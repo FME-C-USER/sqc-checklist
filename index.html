@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SQC 評核系統 - 登入</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    body { font-family: "Noto Sans TC", system-ui, -apple-system, "Microsoft JhengHei", sans-serif; }
+  </style>
+</head>
+<body class="min-h-screen bg-gradient-to-br from-slate-800 via-slate-700 to-emerald-800 flex items-center justify-center p-4">
+  <div class="w-full max-w-md">
+    <div class="bg-white rounded-2xl shadow-2xl overflow-hidden">
+      <!-- Header -->
+      <div class="bg-gradient-to-r from-emerald-600 to-emerald-500 px-8 py-7 text-center">
+        <div class="inline-flex items-center justify-center w-14 h-14 rounded-xl bg-white/20 mb-3">
+          <svg class="w-8 h-8 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+          </svg>
+        </div>
+        <h1 class="text-2xl font-bold text-white tracking-wide">SQC 評核系統</h1>
+        <p class="text-emerald-100 text-sm mt-1">門市服務品質稽核 · 日翊文化</p>
+      </div>
+
+      <!-- Form -->
+      <form id="loginForm" class="px-8 py-8 space-y-5">
+        <div>
+          <label class="block text-sm font-semibold text-slate-700 mb-1.5">員工帳號</label>
+          <input id="userId" type="text" maxlength="15" autocomplete="username"
+            class="w-full px-4 py-2.5 rounded-lg border border-slate-300 focus:border-emerald-500 focus:ring-2 focus:ring-emerald-200 outline-none transition"
+            placeholder="請輸入 AD 帳號" />
+        </div>
+        <div>
+          <label class="block text-sm font-semibold text-slate-700 mb-1.5">密碼</label>
+          <input id="password" type="password" maxlength="30" autocomplete="current-password"
+            class="w-full px-4 py-2.5 rounded-lg border border-slate-300 focus:border-emerald-500 focus:ring-2 focus:ring-emerald-200 outline-none transition"
+            placeholder="請輸入密碼" />
+        </div>
+
+        <div id="errorBox" class="hidden text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2"></div>
+
+        <button id="loginBtn" type="submit"
+          class="w-full py-3 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-semibold shadow-md transition disabled:opacity-60 disabled:cursor-not-allowed">
+          登入
+        </button>
+
+        <p class="text-xs text-center text-slate-400 pt-2">
+          使用日翊 AD 帳號登入 · 驗證 API：CheckUserId
+        </p>
+      </form>
+    </div>
+    <p class="text-center text-white/60 text-xs mt-4">© 2026 FME 日翊文化 · SQC Audit System</p>
+  </div>
+
+  <script src="js/config.js"></script>
+  <script src="js/api.js"></script>
+  <script>
+    // 註冊 Service Worker（PWA 離線可開啟）
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => navigator.serviceWorker.register('service-worker.js').catch(() => {}));
+    }
+
+    const form = document.getElementById('loginForm');
+    const btn = document.getElementById('loginBtn');
+    const errBox = document.getElementById('errorBox');
+
+    function showError(msg) {
+      errBox.textContent = msg;
+      errBox.classList.remove('hidden');
+    }
+    function clearError() { errBox.classList.add('hidden'); }
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      clearError();
+      const userId = document.getElementById('userId').value.trim();
+      const password = document.getElementById('password').value;
+      if (!userId || !password) { showError('請輸入帳號與密碼'); return; }
+
+      // 防止重複提交
+      btn.disabled = true;
+      btn.textContent = '驗證中...';
+
+      try {
+        // === DEMO 模式：GAS 未設定時，輸入 demo / demo 直接進入（原型展示）===
+        const notConfigured = !window.SQC_CONFIG || window.SQC_CONFIG.GAS_URL.includes('XXXXXXXX');
+        if (userId === 'demo' && password === 'demo') {
+          sessionStorage.setItem('sqc_user', JSON.stringify({ name: 'demo', role: '管理者', section: '', dept: '', empId: 'demo' }));
+          window.location.href = 'app.html';
+          return;
+        }
+        if (notConfigured) { showError('尚未設定後端網址；原型展示請用 demo / demo 登入'); return; }
+
+        // === 正式：由 GAS 後端呼叫 CheckUserId 驗證並取得角色 ===
+        const r = await window.SqcApi.login(userId, password);
+        if (r.ok) {
+          sessionStorage.setItem('sqc_user', JSON.stringify(r.user));
+          window.location.href = 'app.html';
+        } else {
+          showError(r.message || '登入失敗');
+        }
+      } catch (err) {
+        showError('無法連線驗證服務，請稍後再試');
+      } finally {
+        btn.disabled = false;
+        btn.textContent = '登入';
+      }
+    });
+  </script>
+</body>
+</html>

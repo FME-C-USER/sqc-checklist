@@ -1,0 +1,14 @@
+{
+  "name": "SQC 評核系統",
+  "short_name": "SQC評核",
+  "description": "門市服務品質稽核 — 現場點檢、照片上傳、離線補傳",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0f172a",
+  "theme_color": "#059669",
+  "icons": [
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}

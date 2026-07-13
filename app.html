@@ -1,0 +1,872 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SQC 評核系統</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+  <script src="js/config.js"></script>
+  <script src="js/api.js"></script>
+  <script src="js/db.js"></script>
+  <script src="js/uploader.js"></script>
+  <style>body { font-family: "Noto Sans TC", system-ui, "Microsoft JhengHei", sans-serif; }</style>
+</head>
+<body class="bg-slate-100">
+  <div id="root"></div>
+  <script>
+    if ('serviceWorker' in navigator) window.addEventListener('load', () => navigator.serviceWorker.register('service-worker.js').catch(() => {}));
+  </script>
+
+  <script type="text/jsx" id="appCode">
+    const { useState, useMemo, useEffect } = React;
+
+    // ============================================================
+    // 共用：照片壓縮工具（上傳壓縮 + 縮圖預覽）
+    //   目標 800KB~1200KB / 長邊1920px / 品質0.92起 每次-0.1 至<1200KB / 下限0.3 / JPEG
+    //   縮圖：固定品質 0.7，僅供畫面顯示
+    // ============================================================
+    const MAX_EDGE = 1920, MAX_KB = 1200, MIN_Q = 0.3, START_Q = 0.92, THUMB_Q = 0.7;
+
+    function loadImage(file) {
+      return new Promise((res, rej) => {
+        const img = new Image();
+        img.onload = () => res(img);
+        img.onerror = rej;
+        img.src = URL.createObjectURL(file);
+      });
+    }
+    function drawScaled(img) {
+      let { width: w, height: h } = img;
+      if (Math.max(w, h) > MAX_EDGE) {
+        const r = MAX_EDGE / Math.max(w, h);
+        w = Math.round(w * r); h = Math.round(h * r);
+      }
+      const c = document.createElement('canvas');
+      c.width = w; c.height = h;
+      c.getContext('2d').drawImage(img, 0, 0, w, h);
+      return c;
+    }
+    function canvasToBlob(canvas, q) {
+      return new Promise(res => canvas.toBlob(b => res(b), 'image/jpeg', q));
+    }
+    async function compressImage(file) {
+      const img = await loadImage(file);
+      const canvas = drawScaled(img);
+      let q = START_Q;
+      let blob = await canvasToBlob(canvas, q);
+      while (blob.size / 1024 > MAX_KB && q > MIN_Q) {
+        q = Math.round((q - 0.1) * 100) / 100;
+        blob = await canvasToBlob(canvas, q);
+      }
+      const thumb = canvas.toDataURL('image/jpeg', THUMB_Q);
+      return { name: file.name.replace(/\.[^.]+$/, '') + '.jpg', sizeKB: Math.round(blob.size / 1024), quality: q, thumb, blob };
+    }
+
+    function PhotoUpload({ label, photos, onChange, required, max = 10, folderPath }) {
+      const [busy, setBusy] = useState(false);
+      const list = photos || [];
+      const handleFile = async (e) => {
+        const files = Array.from(e.target.files);
+        e.target.value = '';
+        setBusy(true);
+        const out = [];
+        for (const f of files) {
+          if (list.length + out.length >= max) break;
+          try { out.push(await compressImage(f)); } catch (_) {}
+        }
+        onChange([...list, ...out]);
+        setBusy(false);
+      };
+      const remove = (i) => onChange(list.filter((_, idx) => idx !== i));
+      const need = required && list.length === 0;
+      return (
+        <div className={"mt-2 rounded-lg border p-2 " + (need ? "border-red-300 bg-red-50" : "border-slate-200 bg-slate-50")}>
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-xs font-medium text-slate-600">
+              {label}{required && <span className="text-red-500"> *必須</span>}
+              <span className="text-slate-400">（{list.length}/{max}）</span>
+            </span>
+            <label className="text-xs px-2 py-1 bg-emerald-600 text-white rounded cursor-pointer hover:bg-emerald-700 whitespace-nowrap">
+              {busy ? '壓縮中…' : '+ 拍照/上傳'}
+              <input type="file" accept="image/*" capture="environment" multiple className="hidden" onChange={handleFile} disabled={busy} />
+            </label>
+          </div>
+          {folderPath && <div className="text-[10px] text-slate-400 mt-1">📁 {folderPath}</div>}
+          {list.length > 0 && (
+            <div className="flex flex-wrap gap-2 mt-2">
+              {list.map((p, i) => (
+                <div key={i} className="relative">
+                  <img src={p.thumb} className="w-16 h-16 object-cover rounded border" />
+                  <span className="absolute bottom-0 inset-x-0 bg-black/50 text-white text-[9px] text-center">{p.sizeKB}KB</span>
+                  <button onClick={() => remove(i)} className="absolute -top-1.5 -right-1.5 w-5 h-5 bg-red-500 text-white rounded-full text-xs leading-none">×</button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    // ============================================================
+    // MOCK DATA（正式由「維護專區」每月匯入）
+    // ============================================================
+    const DRIVE_ROOT = 'SQC照片 (Google Drive)';
+
+    // 部別 / 課別
+    const DEMO_DEPTS = [{ dept: '營運一部', sections: ['北一課', '北二課'] }, { dept: '營運二部', sections: ['中區課', '南區課'] }];
+    // 點檢人員（含課別）
+    const DEMO_STAFFS = [
+      { id: 'A001', name: '王小明', dept: '營運一部', section: '北一課' },
+      { id: 'A002', name: '李大華', dept: '營運一部', section: '北二課' },
+      { id: 'B001', name: '陳美玲', dept: '營運二部', section: '中區課' },
+    ];
+    // 店鋪名單（分月轉入，含課別＋店鋪型態）
+    const DEMO_STORES = [
+      { code: '001234', name: '台北車站門市', section: '北一課', can_photo: true },
+      { code: '002187', name: '信義威秀門市', section: '北一課', can_photo: true },
+      { code: '003920', name: '內湖科技門市', section: '北二課', can_photo: false },
+      { code: '004556', name: '板橋大遠百門市', section: '中區課', can_photo: true },
+      { code: '005781', name: '桃園機場門市', section: '中區課', can_photo: false },
+    ];
+
+    // 題庫（11506 版）— type: subdeduct(分區扣分，點選缺失區由滿分往下扣) / deduct(整題扣分制)
+    const DEMO_CHECKLIST = {
+      version: '115.6',
+      categories: [
+        { key: 'A', name: '活動告示 & 清潔維護', max: 35, items: [
+          { id: 'A1', name: '1.店外海報', max: 4, type: 'deduct', desc: '海報(大海報/Famihot/3合1/特殊商流靜電貼/自製/政令貼)張貼完整、無過期、脫落或破損，自製POP符合規範' },
+          { id: 'A2', name: '2.物流籃', max: 3, type: 'deduct', desc: '店外物流籃整齊堆疊不阻擋入店動線（高度≤120cm）' },
+          { id: 'A3', name: '3.店外環境清潔', max: 5, type: 'deduct', desc: '店外空間乾淨整潔（玻璃、門框、休憩區、地板、柱面…）' },
+          { id: 'A4', name: '4.後櫃台清潔', max: 3, type: 'deduct', desc: '後櫃台、洗手台、咖啡機、霜淇淋機、煮茶機乾淨無雜物' },
+          { id: 'A5', name: '5.FF區POP', max: 3, type: 'deduct', desc: 'FF區POP張貼完整無過期或破損褪色，且填寫銷售時段' },
+          { id: 'A6', name: '6.FF區清潔', max: 3, type: 'deduct', desc: 'FF區桌面、抽屜、機台、防塵罩、熟食夾及微波爐乾淨無髒污' },
+          { id: 'A7', name: '7.貨架清潔', max: 8, type: 'subdeduct', perPoint: 2, subs: ['OC', 'WI', '冷凍櫃', '口巧', '零食', '加工', 'TM前貨架', '六格陳列架', { label: '其他貨架', custom: true }], desc: '貨架層板、機台邊框乾淨無積塵髒污（每區缺失 -2分，滿分8分）' },
+          { id: 'A8', name: '8.店內活動資訊', max: 3, type: 'deduct', desc: 'FamiNews/WI/OC/立櫃看板 POP張貼完整且無過期' },
+          { id: 'A9', name: '9.店內地板', max: 3, type: 'deduct', desc: '店內地板清潔無明顯髒污且落實地墊貼膠' },
+        ]},
+        { key: 'B', name: '商品陳列', max: 55, items: [
+          { id: 'B10', name: '10.商品豐富陳列', max: 18, type: 'subdeduct', perPoint: 2, subs: ['OC', 'WI', '冷凍櫃', '口巧', '零食', '加工', 'TM前貨架', '六格陳列架', { label: '其他貨架', custom: true }], desc: '商品貨架豐富陳列（每區缺失 -2分，滿分18分）' },
+          { id: 'B11', name: '11.商品排面整齊', max: 8, type: 'subdeduct', perPoint: 1, subs: ['OC', 'WI', '冷凍櫃', '口巧', '零食', '加工', 'TM前貨架', { label: '其他貨架', custom: true }], desc: '商品貨架排面整齊（每區缺失 -1分，滿分8分）' },
+          { id: 'B12', name: '12.價格清楚標示', max: 12, type: 'subdeduct', perPoint: 2, subs: ['OC', 'WI', '冷凍櫃', '口巧', '零食', '加工', 'TM前貨架', { label: '其他貨架', custom: true }], desc: '價格標示清楚（每區缺失 -2分，滿分12分）' },
+          { id: 'B13', name: '13.FF區商品陳列', max: 9, type: 'subdeduct', perPoint: 3, subs: ['番薯機', { label: '馬鈴薯機+夯番麥', units: 2, note: '兩項都沒有才扣6分' }, '熱狗機', '蒸包機', { label: '蛋鍋', note: '不足1/2；麻辣蛋不觀察' }, '馬尚煮機', { label: '備品區', note: '醬包、袋子、熱狗麵包…' }, '炸烤物櫃', '現烤點心櫃', { label: '其他', custom: true }], desc: '商品、醬包、備品陳列整齊不可空架（每項缺失 -3分，滿分9分）' },
+          { id: 'B14', name: '14.溫層/中島櫃', max: 3, type: 'deduct', desc: '檔期主題商品集中陳列並搭配活動插卡/飾條/背板；中島櫃上方不得放置商品' },
+          { id: 'B15', name: '15.落地陳列', max: 5, type: 'deduct', desc: '上層陳列量≥一半且拉排面、POP完整；落地無異常堆疊、不遮門面/貨架、割箱一致' },
+        ]},
+        { key: 'C', name: '客用空間', max: 10, items: [
+          { id: 'C16', name: '16.休憩區', max: 7, type: 'deduct', desc: '休憩區桌椅及空間乾淨無髒污、桌貼無殘膠破損翹起；無阻擋座位區動線或佔用休憩區空間' },
+          { id: 'C17', name: '17.垃圾桶', max: 3, type: 'deduct', desc: '投入口無髒污膠痕垃圾滿溢；指示標籤清楚無破損外翻脫落' },
+        ]},
+      ],
+      // 觀察區：重點觀察題(拍照) + 廁所(有無) + 文字
+      keyObservations: [
+        { id: 'KO1', name: '重點觀察題1.【店外全景照】' },
+        { id: 'KO2', name: '重點觀察題2.【櫃台全景照】' },
+        { id: 'KO3', name: '重點觀察題3.【FF區全景照】' },
+      ],
+      toiletObservations: [
+        { id: 'O1', name: '店舖有無對外廁所', opts: ['有', '無', '廁所封閉'], show: 'always' },
+        { id: 'O2', name: '店舖有無開放對外廁所', opts: ['有', '無'], show: 'has' },
+        { id: 'O3', name: '店外招牌有無廁所標示', opts: ['有', '無'], show: 'hasOrClosed' },
+        { id: 'O4', name: '店內有無廁所標示', opts: ['有', '無'], show: 'hasOrClosed' },
+        { id: 'O5', name: '是否提供備品（衛生紙、洗手乳、芳香劑）', opts: ['有', '無'], show: 'has' },
+      ],
+      // 廁所觀察題（對外廁所觀察記錄最下方，僅「有」時填）
+      toiletInspect: [
+        { id: 'T1', name: '廁所乾淨無髒污及垃圾桶無明顯滿溢' },
+        { id: 'T2', name: '落實填寫廁間清潔表；無堆放雜物（ex.紙箱、物流籃、資源回收物…等）' },
+      ],
+    };
+    const IDENTITIES = ['店長', '副店', '正職', 'PT'];
+    const PASS_SCORE = 85;
+
+    // 是否已設定後端（未設定＝DEMO 模式，用內建 mock 可離線展示）
+    const CONFIGURED = !!(window.SQC_CONFIG && window.SQC_CONFIG.GAS_URL && window.SQC_CONFIG.GAS_URL.indexOf('XXXXXXXX') < 0);
+    const MONTH = (window.SQC_CONFIG && window.SQC_CONFIG.MONTH) || '11506';
+
+    // 民國年月 11506 → 「115年06月」
+    function monthFolderOf(m) { return m.slice(0, 3) + '年' + m.slice(3, 5) + '月'; }
+
+    // 將後端扁平題目陣列組成 categories 結構（附上固定的觀察題定義）
+    function buildChecklist(items, month) {
+      const order = [];
+      const map = {};
+      items.forEach(function (it) {
+        if (!map[it.cat]) { map[it.cat] = { key: it.cat, name: it.cat, max: 0, items: [] }; order.push(it.cat); }
+        map[it.cat].items.push(it);
+        map[it.cat].max += Number(it.max) || 0;
+      });
+      return {
+        version: month,
+        categories: order.map(function (k) { return map[k]; }),
+        keyObservations: DEMO_CHECKLIST.keyObservations,
+        toiletObservations: DEMO_CHECKLIST.toiletObservations,
+        toiletInspect: DEMO_CHECKLIST.toiletInspect,
+      };
+    }
+
+    // 滿分照片區（無缺失時拍指定區域，每區≤10張）
+    const PERFECT_ZONES = ['1.店外全景', '2.櫃台區', '3.貨架區', '4.OC&鮮食區', '5.WI五門', '6.休息區', '7.FF區', '8.落地區'];
+
+    function gradeOf(t) {
+      return t >= 95 ? { txt: '優良', c: 'text-emerald-600', bg: 'bg-emerald-100 text-emerald-700' }
+        : t >= PASS_SCORE ? { txt: '合格', c: 'text-blue-600', bg: 'bg-blue-100 text-blue-700' }
+        : { txt: '不合格', c: 'text-red-600', bg: 'bg-red-100 text-red-700' };
+    }
+
+    // ============================================================
+    // 點檢項目列
+    // ============================================================
+    function ItemRow({ item, state, setState, canPhoto, monthFolder }) {
+      const s = state || {};
+      const labelOf = (sub) => typeof sub === 'string' ? sub : sub.label;
+      const isCustom = (sub) => typeof sub === 'object' && sub.custom;
+      const fixedUnits = (sub) => (typeof sub === 'object' && sub.units) ? sub.units : 1;
+      const nameUnits = (lbl) => (s.customNames?.[lbl] || '').split(/[\/、,，\s]+/).filter(Boolean).length;
+
+      // 缺失單位數：固定子項用其 units；可填子項用填入的名稱數（至少1）
+      const totalUnits = (s.ngSubs || []).reduce((sum, lbl) => {
+        const sub = (item.subs || []).find(x => labelOf(x) === lbl);
+        if (!sub) return sum;
+        return sum + (isCustom(sub) ? Math.max(1, nameUnits(lbl)) : fixedUnits(sub));
+      }, 0);
+
+      const subdeductScore = item.type === 'subdeduct' ? Math.max(0, item.max - totalUnits * item.perPoint) : null;
+      const score = item.type === 'subdeduct' ? subdeductScore : (s.score != null ? s.score : item.max);
+      const isNG = score < item.max;
+
+      useEffect(() => { if (item.type === 'subdeduct') setState({ ...s, score: subdeductScore }); }, [subdeductScore]);
+
+      const toggleSub = (lbl) => {
+        const ng = s.ngSubs || [];
+        setState({ ...s, ngSubs: ng.includes(lbl) ? ng.filter(x => x !== lbl) : [...ng, lbl] });
+      };
+      const setCustomName = (lbl, v) => setState({ ...s, customNames: { ...(s.customNames || {}), [lbl]: v } });
+
+      return (
+        <div className="px-4 py-3 border-b border-slate-100 last:border-0">
+          <div className="flex items-start justify-between gap-3">
+            <div className="flex-1">
+              <div className="font-semibold text-slate-800 text-sm">{item.name}
+                <span className="ml-2 text-xs text-slate-400">配分 {item.max}</span>
+                <span className={"ml-1 text-[10px] px-1.5 py-0.5 rounded " + (item.type === 'subdeduct' ? "bg-blue-100 text-blue-600" : "bg-amber-100 text-amber-600")}>{item.type === 'subdeduct' ? '分區扣分' : '扣分題'}</span>
+              </div>
+              <div className="text-xs text-slate-500 mt-0.5 leading-relaxed">{item.desc}</div>
+            </div>
+            <div className="text-right shrink-0">
+              <div className={"text-lg font-bold " + (isNG ? "text-red-500" : "text-emerald-600")}>{score}</div>
+              <div className="text-[10px] text-slate-400">得分</div>
+            </div>
+          </div>
+
+          {item.type === 'subdeduct' && (
+            <div className="mt-2">
+              <div className="text-[11px] text-slate-400 mb-1">點選「有缺失」的項目（每項 -{item.perPoint} 分，由滿分往下扣）</div>
+              <div className="flex flex-wrap gap-1.5">
+                {item.subs.map(sub => {
+                  const lbl = labelOf(sub);
+                  const on = (s.ngSubs || []).includes(lbl);
+                  const u = isCustom(sub) ? Math.max(1, nameUnits(lbl)) : fixedUnits(sub);
+                  return <button key={lbl} onClick={() => toggleSub(lbl)} title={sub.note || ''} className={"text-xs px-2 py-1 rounded-full border transition " + (on ? "bg-red-500 text-white border-red-500" : "bg-white text-slate-500 border-slate-300")}>{on ? '✕ ' : ''}{lbl}{sub.note ? ' ⓘ' : ''} -{u * item.perPoint}</button>;
+                })}
+              </div>
+              {/* 可填寫子項：填入名稱（多個以、或/分隔），每個名稱扣一個缺失 */}
+              {item.subs.filter(sub => isCustom(sub) && (s.ngSubs || []).includes(labelOf(sub))).map(sub => {
+                const lbl = labelOf(sub);
+                return (
+                  <div key={lbl} className="mt-2">
+                    <input value={s.customNames?.[lbl] || ''} onChange={e => setCustomName(lbl, e.target.value)}
+                      placeholder={`填入${lbl}名稱，多個以「、」分隔（如：日用品架、寵物貨架）`}
+                      className="w-full text-xs px-2 py-1.5 border border-red-300 rounded bg-red-50" />
+                    <div className="text-[10px] text-red-500 mt-0.5">已填 {nameUnits(lbl)} 項 → 扣 {Math.max(1, nameUnits(lbl)) * item.perPoint} 分</div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {item.type === 'deduct' && (
+            <div className="flex items-center gap-2 mt-2">
+              <button onClick={() => setState({ ...s, score: item.max })} className={"text-xs px-4 py-1 rounded border " + (score === item.max ? "bg-emerald-500 text-white border-emerald-500" : "bg-white text-slate-500 border-slate-300")}>合格 ({item.max})</button>
+              <button onClick={() => setState({ ...s, score: 0 })} className={"text-xs px-4 py-1 rounded border " + (score === 0 ? "bg-red-500 text-white border-red-500" : "bg-white text-slate-500 border-slate-300")}>缺失 (0)</button>
+            </div>
+          )}
+
+          {isNG && canPhoto && (
+            <PhotoUpload label="缺失照片（NG 項目必須拍照記錄）" required photos={s.photos} onChange={p => setState({ ...s, photos: p })} folderPath={`${DRIVE_ROOT}/${monthFolder}/${item.name}/缺失`} />
+          )}
+        </div>
+      );
+    }
+
+    // ============================================================
+    // 主應用
+    // ============================================================
+    function App() {
+      const currentUser = (() => { try { return JSON.parse(sessionStorage.getItem('sqc_user')) || {}; } catch (e) { return { name: sessionStorage.getItem('sqc_user') || 'demo' }; } })();
+      const user = currentUser.name || 'demo';
+      const isManager = currentUser.role === '管理者';
+      const [tab, setTab] = useState('basic');
+
+      // ---- 開場資料（DEMO 用內建 mock；已設定後端則 getBootstrap 載入當月）----
+      const [boot, setBoot] = useState({ checklist: DEMO_CHECKLIST, stores: DEMO_STORES, staffs: DEMO_STAFFS, depts: DEMO_DEPTS });
+      const [loading, setLoading] = useState(CONFIGURED);
+      const reloadBoot = () => SqcApi.getBootstrap(MONTH, '').then(b => {
+        setBoot({
+          checklist: buildChecklist(b.checklist || [], MONTH),
+          stores: b.stores || [],
+          staffs: (b.staffs || []).map(s => ({ id: s.empId, name: s.name, dept: s.dept, section: s.section })),
+          depts: b.depts || [],
+        });
+      });
+      useEffect(() => {
+        if (!CONFIGURED) return;
+        reloadBoot().catch(e => alert('載入當月資料失敗：' + e.message)).finally(() => setLoading(false));
+      }, []);
+      const checklist = boot.checklist, STORE_ROSTER = boot.stores, STAFFS = boot.staffs, DEPTS = boot.depts;
+      const TOTAL_MAX = useMemo(() => checklist.categories.reduce((s, c) => s + c.max, 0), [checklist]);
+      const monthFolder = monthFolderOf(MONTH);
+
+      // ---- 基本資料 ----（登入後預帶自己的部別/課別/姓名，仍可自行改選）
+      const nowStr = new Date().toISOString().slice(0, 16);
+      const [basic, setBasic] = useState({ time: nowStr, dept: currentUser.dept || '', section: currentUser.section || '', staffId: currentUser.empId || '', storeCode: '', customStore: '', storeType: '' });
+      const sectionStores = STORE_ROSTER.filter(s => !basic.section || s.section === basic.section);
+      const store = STORE_ROSTER.find(s => s.code === basic.storeCode);
+      // 店鋪型態由點檢人員手選（基本資料），未選時依名單帶出
+      const canPhoto = basic.storeType === 'photo' ? true : basic.storeType === 'nophoto' ? false : (store ? store.can_photo : true);
+
+      // ---- 點檢作業 ----
+      const [scores, setScores] = useState({});
+      const [keyObs, setKeyObs] = useState({});
+      const [toilet, setToilet] = useState({});
+      const [obsText, setObsText] = useState('');
+      const [perfectPhotos, setPerfectPhotos] = useState({});
+      const [paperForm, setPaperForm] = useState([]);        // 紙本點檢表（所有店必上傳）
+      const [sign, setSign] = useState({ count: '', identity: '' }); // 在店店員人數 / 簽名人員身分別
+      const DEMO_RECORDS = [
+        { id: 1, date: '2026-06-25', store: '台北車站門市', section: '北一課', staff: '王小明', version: '115.6', total: 96, grade: '優良' },
+        { id: 2, date: '2026-06-24', store: '內湖科技門市', section: '北二課', staff: '李大華', version: '115.6', total: 88, grade: '合格' },
+        { id: 3, date: '2026-06-23', store: '板橋大遠百門市', section: '中區課', staff: '陳美玲', version: '115.6', total: 72, grade: '不合格' },
+      ];
+      const [records, setRecords] = useState(CONFIGURED ? [] : DEMO_RECORDS);
+      // 正式模式：查詢紀錄/彙總 進場或改條件時，向後端查當月資料（只跑當月活頁）
+      const loadRecords = () => {
+        if (!CONFIGURED) return;
+        const f = { from: filter.from, to: filter.to, section: filter.section, empId: isManager ? undefined : currentUser.empId };
+        SqcApi.queryRecords(MONTH, f).then(r => {
+          setRecords((r.records || []).map(x => ({
+            id: x.id, date: String(x.time).slice(0, 10), store: x.storeName, section: x.section,
+            staff: x.staffName, version: x.month, total: Number(x.total), grade: x.grade, _raw: x,
+          })));
+        }).catch(e => alert('查詢失敗：' + e.message));
+      };
+
+      const total = useMemo(() => {
+        let t = 0;
+        checklist.categories.forEach(c => c.items.forEach(it => { const s = scores[it.id]; t += (s && s.score != null) ? s.score : it.max; }));
+        return t;
+      }, [scores]);
+
+      // 是否「無缺失」→ 所有題目皆滿分（沒有任何扣分）
+      const noDeductDefect = useMemo(() => checklist.categories.every(c => c.items.every(it => { const s = scores[it.id]; return !s || s.score == null || s.score === it.max; })), [scores]);
+
+      const grade = gradeOf(total);
+      const setItemState = (id, st) => setScores(prev => ({ ...prev, [id]: st }));
+      const logout = () => { sessionStorage.removeItem('sqc_user'); location.href = 'index.html'; };
+
+      const resetWork = () => { setScores({}); setKeyObs({}); setToilet({}); setObsText(''); setPerfectPhotos({}); setPaperForm([]); setSign({ count: '', identity: '' }); };
+
+      const submit = () => {
+        if (!store && !basic.customStore) { alert('請先在「基本資料」選擇店鋪'); setTab('basic'); return; }
+        if (!basic.staffId) { alert('請先在「基本資料」選擇點檢人員'); setTab('basic'); return; }
+        if (!sign.count) { alert('請選擇「在店店員人數」'); return; }
+        if (!sign.identity) { alert('請選擇「簽名店鋪人員身分別」'); return; }
+        // 紙本點檢表：所有店皆必須上傳
+        if (!paperForm.length) { alert('所有店皆須上傳「紙本點檢表」才能送出'); return; }
+
+        // 照片相關僅可拍照店鋪檢查；無法拍照店鋪只需紙本
+        if (canPhoto) {
+          for (const k of checklist.keyObservations) {
+            if (!(keyObs[k.id] || []).length) { alert(`「${k.name}」為必拍重點觀察題`); return; }
+          }
+          if (noDeductDefect) {
+            for (const z of PERFECT_ZONES) { if (!(perfectPhotos[z] || []).length) { alert(`無缺失店鋪：滿分照片區「${z}」必須上傳照片`); return; } }
+          } else {
+            for (const c of checklist.categories) for (const it of c.items) {
+              const s = scores[it.id]; const sc = (s && s.score != null) ? s.score : it.max; const ng = sc < it.max;
+              if (ng && (!s?.photos || !s.photos.length)) { alert(`「${it.name}」有扣分，請補上缺失照片`); return; }
+            }
+          }
+        }
+        const staff = STAFFS.find(s => s.id === basic.staffId);
+        const storeName = store ? store.name : basic.customStore;
+        const storeCode = store ? store.code : '';
+        const recId = (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : 'r' + Date.now();
+
+        // 明細 / 觀察 JSON
+        const detail = {};
+        checklist.categories.forEach(c => c.items.forEach(it => {
+          const s = scores[it.id] || {};
+          detail[it.id] = { name: it.name, score: (s.score != null ? s.score : it.max), ngSubs: s.ngSubs || [], customNames: s.customNames || {} };
+        }));
+        const observation = { toilet, obsText };
+
+        // 蒐集照片 → 依 pathParts 排入背景上傳；照片JSON 記錄「資料夾/檔名」
+        const queue = [], photosJson = {};
+        const addPhotos = (pathParts, arr) => {
+          if (!arr || !arr.length) return;
+          const key = pathParts.join('/');
+          photosJson[key] = photosJson[key] || [];
+          arr.forEach((p, i) => {
+            const name = `${storeCode || 'S'}_${basic.time.slice(0, 10)}_${key.replace(/[\/\s]/g, '')}_${i + 1}.jpg`;
+            photosJson[key].push(name);
+            queue.push({ blob: p.blob, name, pathParts, thumb: p.thumb });
+          });
+        };
+        if (canPhoto) {
+          checklist.categories.forEach(c => c.items.forEach(it => {
+            const s = scores[it.id] || {};
+            if ((s.score != null ? s.score : it.max) < it.max) addPhotos([monthFolder, it.name, '缺失'], s.photos);
+          }));
+          checklist.keyObservations.forEach(k => addPhotos([monthFolder, k.name], keyObs[k.id]));
+          if (noDeductDefect) PERFECT_ZONES.forEach(z => addPhotos([monthFolder, '滿分照片', z], perfectPhotos[z]));
+        }
+        addPhotos([monthFolder, 'SQC點檢表完成照片'], paperForm);
+
+        const record = {
+          id: recId, month: MONTH, time: basic.time.replace('T', ' '),
+          dept: basic.dept, section: basic.section, empId: basic.staffId, staffName: staff ? staff.name : user,
+          storeCode, storeName, storeType: canPhoto ? '可拍照' : '無法拍照',
+          total, grade: grade.txt, staffCount: sign.count, identity: sign.identity,
+          detail, observation, photos: photosJson, paperPhotos: (photosJson[[monthFolder, 'SQC點檢表完成照片'].join('/')] || []),
+        };
+
+        if (!CONFIGURED) {
+          setRecords([{ id: recId, date: basic.time.slice(0, 10), store: storeName, section: basic.section, staff: staff?.name || user, version: checklist.version, total, grade: grade.txt }, ...records]);
+          alert(`✅ 已送出（DEMO 模擬）\n店鋪：${storeName}\n合計得分：${total}/${TOTAL_MAX}（${grade.txt}）\n照片 ${queue.length} 張（正式模式將壓縮後背景直傳 Drive）`);
+          resetWork(); setTab('records'); return;
+        }
+
+        // 正式模式：先背景排入照片（邊送邊傳），再寫入紀錄（秒回）
+        queue.forEach(q => SqcUploader.enqueue({ ...q, recordId: recId }));
+        SqcApi.submitRecord(record).then(() => {
+          alert(`✅ 已送出\n店鋪：${storeName}　得分：${total}/${TOTAL_MAX}（${grade.txt}）\n照片 ${queue.length} 張背景上傳中，可離開此頁`);
+          resetWork(); setTab('records'); loadRecords();
+        }).catch(e => alert('送出失敗：' + e.message + '\n（照片仍會背景續傳，可稍後重試送出）'));
+      };
+
+      // ---- 查詢/彙總篩選 ----
+      const [filter, setFilter] = useState({ from: '', to: '', section: '' });
+      const filtered = records.filter(r => (!filter.from || r.date >= filter.from) && (!filter.to || r.date <= filter.to) && (!filter.section || r.section === filter.section));
+      // 正式模式：進查詢/彙總頁或改條件時，重新向後端查當月
+      useEffect(() => { if (CONFIGURED && (tab === 'records' || tab === 'summary')) loadRecords(); }, [tab, filter.from, filter.to, filter.section]);
+      const delRecord = (id) => {
+        if (!confirm('確定刪除此筆評核紀錄？')) return;
+        if (!CONFIGURED) { setRecords(records.filter(r => r.id !== id)); return; }
+        SqcApi.deleteRecord(MONTH, id).then(() => loadRecords()).catch(e => alert('刪除失敗：' + e.message));
+      };
+
+      const exportExcel = () => {
+        const head = ['日期', '店鋪', '課別', '稽核員', '版本', '得分', '結果'];
+        const rows = filtered.map(r => [r.date, r.store, r.section, r.staff, r.version, r.total, r.grade]);
+        const csv = '﻿' + [head, ...rows].map(r => r.map(c => `"${c}"`).join(',')).join('\n');
+        const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8;' }));
+        const a = document.createElement('a'); a.href = url; a.download = `SQC彙總_${filter.from || '全部'}_${filter.to || ''}.csv`; a.click();
+      };
+
+      const allSections = DEPTS.flatMap(d => d.sections);
+
+      // ============================================================
+      const TABS = [['basic', '📋 基本資料'], ['work', '📝 點檢作業'], ['records', '🔍 查詢紀錄'], ['summary', '📊 彙總專區']]
+        .concat(isManager ? [['maintain', '⚙️ 維護專區']] : []);
+
+      return (
+        <div className="min-h-screen pb-32">
+          <div className="sticky top-0 z-30 bg-emerald-700 text-white px-4 py-3 flex items-center justify-between shadow">
+            <div className="flex items-center gap-2"><span className="font-bold">SQC 評核系統</span><span className="text-xs opacity-75">v115.6</span></div>
+            <div className="flex items-center gap-3 text-sm"><span className="opacity-90">{user}</span><button onClick={logout} className="px-3 py-1 bg-white/20 rounded hover:bg-white/30">登出</button></div>
+          </div>
+
+          {/* Tabs */}
+          <div className="bg-white border-b sticky top-[48px] z-20 overflow-x-auto">
+            <div className="flex max-w-4xl mx-auto px-2">
+              {TABS.map(([k, label]) => (
+                <button key={k} onClick={() => setTab(k)} className={"px-4 py-3 text-sm font-medium whitespace-nowrap border-b-2 transition " + (tab === k ? "border-emerald-600 text-emerald-700" : "border-transparent text-slate-500")}>{label}</button>
+              ))}
+            </div>
+          </div>
+
+          <div className="max-w-4xl mx-auto p-4 space-y-4">
+            {/* ========== 基本資料 ========== */}
+            {tab === 'basic' && (
+              <div className="bg-white rounded-xl shadow-sm p-5 space-y-4">
+                <h2 className="font-bold text-slate-700">📋 基本資料</h2>
+                <div className="grid md:grid-cols-2 gap-4 text-sm">
+                  <div><label className="block text-xs text-slate-500 mb-1">點檢時間</label>
+                    <input type="datetime-local" value={basic.time} onChange={e => setBasic({ ...basic, time: e.target.value })} className="w-full px-3 py-2 border border-slate-300 rounded-lg" /></div>
+                  <div><label className="block text-xs text-slate-500 mb-1">部別</label>
+                    <select value={basic.dept} onChange={e => setBasic({ ...basic, dept: e.target.value, section: '' })} className="w-full px-3 py-2 border border-slate-300 rounded-lg">
+                      <option value="">— 請選擇 —</option>{DEPTS.map(d => <option key={d.dept}>{d.dept}</option>)}</select></div>
+                  <div><label className="block text-xs text-slate-500 mb-1">課別</label>
+                    <select value={basic.section} onChange={e => setBasic({ ...basic, section: e.target.value, storeCode: '' })} className="w-full px-3 py-2 border border-slate-300 rounded-lg">
+                      <option value="">— 請選擇 —</option>{(DEPTS.find(d => d.dept === basic.dept)?.sections || allSections).map(s => <option key={s}>{s}</option>)}</select></div>
+                  <div><label className="block text-xs text-slate-500 mb-1">點檢人員</label>
+                    <select value={basic.staffId} onChange={e => { const st = STAFFS.find(x => x.id === e.target.value); setBasic({ ...basic, staffId: e.target.value, dept: st?.dept || basic.dept, section: st?.section || basic.section }); }} className="w-full px-3 py-2 border border-slate-300 rounded-lg">
+                      <option value="">— 請選擇 —</option>{STAFFS.map(s => <option key={s.id} value={s.id}>{s.name}（{s.section}）</option>)}</select></div>
+                  <div><label className="block text-xs text-slate-500 mb-1">店鋪型態</label>
+                    <select value={basic.storeType} onChange={e => setBasic({ ...basic, storeType: e.target.value })} className="w-full px-3 py-2 border border-slate-300 rounded-lg">
+                      <option value="">— 依名單帶出 —</option><option value="photo">可拍照店鋪</option><option value="nophoto">無法拍照店鋪</option></select></div>
+                </div>
+
+                <div>
+                  <label className="block text-xs text-slate-500 mb-1">點檢店鋪名單<span className="text-slate-400">（依課別自動帶出，亦可自行新增）</span></label>
+                  <select value={basic.storeCode} onChange={e => { const st = STORE_ROSTER.find(x => x.code === e.target.value); setBasic({ ...basic, storeCode: e.target.value, customStore: '', storeType: st ? (st.can_photo ? 'photo' : 'nophoto') : basic.storeType }); }} className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm">
+                    <option value="">— 請選擇店鋪 —</option>
+                    {sectionStores.map(s => <option key={s.code} value={s.code}>{s.code} {s.name}（{s.can_photo ? '可拍照' : '無法拍照'}）</option>)}
+                    <option value="__custom">＋ 自行新增店鋪…</option>
+                  </select>
+                  {basic.storeCode === '__custom' && (
+                    <input value={basic.customStore} onChange={e => setBasic({ ...basic, customStore: e.target.value })} placeholder="輸入店號 店名" className="w-full mt-2 px-3 py-2 border border-slate-300 rounded-lg text-sm" />
+                  )}
+                </div>
+
+                {(store || basic.customStore) && (
+                  <div className={"text-sm px-3 py-2 rounded-lg " + (canPhoto ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700")}>
+                    店鋪型態：<b>{canPhoto ? '可拍照店鋪' : '無法拍照店鋪'}</b>
+                    {canPhoto ? 'NG 需缺失照片；無缺失需拍滿分照片區；所有店皆須上傳紙本' : '免拍各項照片，僅須上傳紙本點檢表'}
+                  </div>
+                )}
+
+                <button onClick={() => setTab('work')} disabled={!store && !basic.customStore} className="w-full py-3 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white font-semibold rounded-lg">前往點檢作業 →</button>
+              </div>
+            )}
+
+            {/* ========== 點檢作業 ========== */}
+            {tab === 'work' && (!store && !basic.customStore ? (
+              <div className="bg-white rounded-xl shadow-sm p-8 text-center text-slate-500">請先到「基本資料」選擇店鋪與人員<br /><button onClick={() => setTab('basic')} className="mt-3 px-4 py-2 bg-emerald-600 text-white rounded-lg">前往基本資料</button></div>
+            ) : (
+              <>
+                <div className="bg-white rounded-xl shadow-sm px-4 py-3 text-sm text-slate-600 flex flex-wrap gap-x-4 gap-y-1">
+                  <span>🏪 {store ? store.name : basic.customStore}</span><span>👤 {STAFFS.find(s => s.id === basic.staffId)?.name || '—'}</span><span>📅 {basic.time.slice(0, 10)}</span>
+                  <span className={"px-2 rounded " + (canPhoto ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700")}>{canPhoto ? '可拍照' : '無法拍照'}</span>
+                </div>
+
+                {checklist.categories.map(cat => {
+                  const cs = cat.items.reduce((s, it) => { const sc = scores[it.id]; return s + ((sc && sc.score != null) ? sc.score : it.max); }, 0);
+                  return (
+                    <div key={cat.key} className="bg-white rounded-xl shadow-sm overflow-hidden">
+                      <div className="bg-slate-700 text-white px-4 py-2.5 flex justify-between"><span className="font-bold">{cat.name}</span><span className="text-sm">{cs} / {cat.max}</span></div>
+                      {cat.items.map(it => <ItemRow key={it.id} item={it} state={scores[it.id]} setState={st => setItemState(it.id, st)} canPhoto={canPhoto} monthFolder={monthFolder} />)}
+                    </div>
+                  );
+                })}
+
+                {/* 觀察區 */}
+                <div className="bg-white rounded-xl shadow-sm overflow-hidden">
+                  <div className="bg-indigo-600 text-white px-4 py-2.5 font-bold">🔍 觀察區（不計分）</div>
+                  <div className="p-4 space-y-3">
+                    {/* 重點觀察題：僅可拍照店鋪需拍照 */}
+                    {canPhoto && checklist.keyObservations.map(k => (
+                      <PhotoUpload key={k.id} label={k.name} required photos={keyObs[k.id]} onChange={p => setKeyObs({ ...keyObs, [k.id]: p })} folderPath={`${DRIVE_ROOT}/${monthFolder}/${k.name}`} />
+                    ))}
+
+                    {/* 對外廁所觀察記錄（條件式顯示） */}
+                    <div className="border-t pt-3">
+                      <div className="text-sm font-semibold text-slate-600 mb-2">對外廁所觀察記錄</div>
+                      <div className="grid md:grid-cols-2 gap-2">
+                        {checklist.toiletObservations.map(o => {
+                          const o1 = toilet['O1'];
+                          const visible = o.show === 'always' ? true : o.show === 'has' ? o1 === '有' : (o1 === '有' || o1 === '廁所封閉');
+                          if (!visible) return null;
+                          return (
+                            <div key={o.id} className="text-sm flex items-center justify-between gap-2">
+                              <span className="text-slate-700">{o.name}</span>
+                              <div className="flex gap-1 shrink-0">{o.opts.map(v => <button key={v} onClick={() => setToilet({ ...toilet, [o.id]: v })} className={"px-3 py-1 text-xs rounded border " + (toilet[o.id] === v ? "bg-indigo-500 text-white border-indigo-500" : "bg-white text-slate-500 border-slate-300")}>{v}</button>)}</div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                      {/* 廁所觀察題：僅「有」對外廁所時填 */}
+                      {toilet['O1'] === '有' && (
+                        <div className="mt-3 space-y-2">
+                          {checklist.toiletInspect.map(t => (
+                            <div key={t.id} className="text-sm flex items-center justify-between gap-2">
+                              <span className="text-slate-700 flex-1">{t.name}</span>
+                              <div className="flex gap-1 shrink-0">{['符合', '不符合'].map(v => <button key={v} onClick={() => setToilet({ ...toilet, [t.id]: v })} className={"px-3 py-1 text-xs rounded border " + (toilet[t.id] === v ? (v === '符合' ? "bg-emerald-500 text-white border-emerald-500" : "bg-red-500 text-white border-red-500") : "bg-white text-slate-500 border-slate-300")}>{v}</button>)}</div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+
+                    <textarea value={obsText} onChange={e => setObsText(e.target.value)} rows="2" placeholder="其他觀察記錄（異味、動線阻擋等）…" className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm" />
+                  </div>
+                </div>
+
+                {/* 滿分照片區（僅可拍照店鋪、且全表無缺失時必拍） */}
+                {canPhoto && noDeductDefect && (
+                  <div className="bg-white rounded-xl shadow-sm overflow-hidden">
+                    <div className="bg-amber-500 text-white px-4 py-2.5 font-bold">🏆 滿分照片區（無缺失店鋪必拍）</div>
+                    <div className="p-4">
+                      <p className="text-xs text-slate-500 mb-2">店鋪無缺失：請拍下列指定區域，每區可上傳 10 張；相鄰區域可共拍一張。</p>
+                      <div className="grid md:grid-cols-2 gap-2">
+                        {PERFECT_ZONES.map(z => <PhotoUpload key={z} label={z} required photos={perfectPhotos[z]} onChange={p => setPerfectPhotos({ ...perfectPhotos, [z]: p })} folderPath={`${DRIVE_ROOT}/${monthFolder}/滿分照片/${z}`} />)}
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* 簽核區（所有店）：在店店員人數 / 身分別 / 紙本表格上傳 */}
+                <div className="bg-white rounded-xl shadow-sm overflow-hidden">
+                  <div className="bg-slate-600 text-white px-4 py-2.5 font-bold">✍️ 簽核與紙本</div>
+                  <div className="p-4 space-y-3">
+                    <div className="grid md:grid-cols-2 gap-3 text-sm">
+                      <div><label className="block text-xs text-slate-500 mb-1">在店店員人數</label>
+                        <select value={sign.count} onChange={e => setSign({ ...sign, count: e.target.value })} className="w-full px-3 py-2 border border-slate-300 rounded-lg">
+                          <option value="">— 請選擇 —</option>{Array.from({ length: 20 }, (_, i) => i + 1).map(n => <option key={n} value={n}>{n} 人</option>)}</select></div>
+                      <div><label className="block text-xs text-slate-500 mb-1">簽名店鋪人員身分別</label>
+                        <select value={sign.identity} onChange={e => setSign({ ...sign, identity: e.target.value })} className="w-full px-3 py-2 border border-slate-300 rounded-lg">
+                          <option value="">— 請選擇 —</option>{IDENTITIES.map(i => <option key={i}>{i}</option>)}</select></div>
+                    </div>
+                    <div>
+                      <div className="text-sm font-semibold text-slate-600">📄 紙本點檢表上傳<span className="text-red-500 text-xs"> *所有店皆必須上傳才能送出</span></div>
+                      <PhotoUpload label="紙本點檢表照片" required photos={paperForm} onChange={setPaperForm} folderPath={`${DRIVE_ROOT}/${monthFolder}/SQC點檢表完成照片`} />
+                    </div>
+                  </div>
+                </div>
+              </>
+            ))}
+
+            {/* ========== 查詢紀錄 ========== */}
+            {tab === 'records' && (
+              <div className="space-y-4">
+                <div className="bg-white rounded-xl shadow-sm p-4 flex flex-wrap items-end gap-3 text-sm">
+                  <div><label className="block text-xs text-slate-500 mb-1">起始日期</label><input type="date" value={filter.from} onChange={e => setFilter({ ...filter, from: e.target.value })} className="px-3 py-2 border border-slate-300 rounded-lg" /></div>
+                  <div><label className="block text-xs text-slate-500 mb-1">結束日期</label><input type="date" value={filter.to} onChange={e => setFilter({ ...filter, to: e.target.value })} className="px-3 py-2 border border-slate-300 rounded-lg" /></div>
+                  <div><label className="block text-xs text-slate-500 mb-1">課別</label><select value={filter.section} onChange={e => setFilter({ ...filter, section: e.target.value })} className="px-3 py-2 border border-slate-300 rounded-lg"><option value="">全部</option>{allSections.map(s => <option key={s}>{s}</option>)}</select></div>
+                </div>
+                <div className="bg-white rounded-xl shadow-sm overflow-hidden">
+                  <table className="w-full text-sm">
+                    <thead><tr className="text-left text-slate-500 border-b bg-slate-50"><th className="py-2 px-3">日期</th><th>店鋪</th><th>課別</th><th>稽核員</th><th>得分</th><th>結果</th><th className="px-3">操作</th></tr></thead>
+                    <tbody>
+                      {filtered.map(r => (
+                        <tr key={r.id} className="border-b border-slate-100">
+                          <td className="py-2 px-3 text-slate-500">{r.date}</td><td className="font-medium text-slate-800">{r.store}</td><td className="text-slate-500">{r.section}</td><td className="text-slate-500">{r.staff}</td>
+                          <td className="font-bold">{r.total}</td><td><span className={"text-xs px-2 py-0.5 rounded " + gradeOf(r.total).bg}>{r.grade}</span></td>
+                          <td className="px-3 whitespace-nowrap"><button onClick={() => { alert('原型模擬：載入此筆至點檢作業修改'); }} className="text-xs text-blue-600 mr-2">修改</button><button onClick={() => delRecord(r.id)} className="text-xs text-red-600">刪除</button></td>
+                        </tr>
+                      ))}
+                      {filtered.length === 0 && <tr><td colSpan="7" className="py-8 text-center text-slate-400">無符合條件的紀錄</td></tr>}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+
+            {/* ========== 彙總專區 ========== */}
+            {tab === 'summary' && (
+              <div className="space-y-4">
+                <div className="bg-white rounded-xl shadow-sm p-4 flex flex-wrap items-end gap-3 text-sm">
+                  <div><label className="block text-xs text-slate-500 mb-1">起始日期</label><input type="date" value={filter.from} onChange={e => setFilter({ ...filter, from: e.target.value })} className="px-3 py-2 border border-slate-300 rounded-lg" /></div>
+                  <div><label className="block text-xs text-slate-500 mb-1">結束日期</label><input type="date" value={filter.to} onChange={e => setFilter({ ...filter, to: e.target.value })} className="px-3 py-2 border border-slate-300 rounded-lg" /></div>
+                  <div><label className="block text-xs text-slate-500 mb-1">課別</label><select value={filter.section} onChange={e => setFilter({ ...filter, section: e.target.value })} className="px-3 py-2 border border-slate-300 rounded-lg"><option value="">全部</option>{allSections.map(s => <option key={s}>{s}</option>)}</select></div>
+                  <button onClick={exportExcel} className="ml-auto px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg">📤 匯出 Excel</button>
+                </div>
+                <div className="grid grid-cols-3 gap-3">
+                  <div className="bg-white rounded-xl shadow-sm p-4 text-center"><div className="text-xs text-slate-500">執行店數</div><div className="text-3xl font-extrabold text-emerald-600">{filtered.length}</div></div>
+                  <div className="bg-white rounded-xl shadow-sm p-4 text-center"><div className="text-xs text-slate-500">平均得分</div><div className="text-3xl font-extrabold text-slate-700">{filtered.length ? Math.round(filtered.reduce((s, r) => s + r.total, 0) / filtered.length) : '—'}</div></div>
+                  <div className="bg-white rounded-xl shadow-sm p-4 text-center"><div className="text-xs text-slate-500">合格率</div><div className="text-3xl font-extrabold text-blue-600">{filtered.length ? Math.round(filtered.filter(r => r.total >= PASS_SCORE).length / filtered.length * 100) : 0}%</div></div>
+                </div>
+                <div className="bg-white rounded-xl shadow-sm overflow-hidden">
+                  <table className="w-full text-sm">
+                    <thead><tr className="text-left text-slate-500 border-b bg-slate-50"><th className="py-2 px-3">日期</th><th>店鋪</th><th>課別</th><th>稽核員</th><th>得分</th><th>結果</th></tr></thead>
+                    <tbody>{filtered.map(r => <tr key={r.id} className="border-b border-slate-100"><td className="py-2 px-3 text-slate-500">{r.date}</td><td className="font-medium text-slate-800">{r.store}</td><td className="text-slate-500">{r.section}</td><td className="text-slate-500">{r.staff}</td><td className="font-bold">{r.total}</td><td><span className={"text-xs px-2 py-0.5 rounded " + gradeOf(r.total).bg}>{r.grade}</span></td></tr>)}</tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+
+            {/* ========== 維護專區 ========== */}
+            {tab === 'maintain' && <MaintainPanel monthFolder={monthFolder} checklist={checklist} stores={STORE_ROSTER} staffs={STAFFS} configured={CONFIGURED} curMonth={MONTH} onReload={reloadBoot} />}
+          </div>
+
+          {/* 底部總分（僅點檢作業） */}
+          {tab === 'work' && (store || basic.customStore) && (
+            <div className="fixed bottom-0 left-0 right-0 bg-white border-t shadow-2xl z-30">
+              <div className="max-w-4xl mx-auto px-4 py-3 flex items-center justify-between">
+                <div><div className="text-xs text-slate-400">合計得分（及格 {PASS_SCORE}）</div>
+                  <div className="flex items-baseline gap-2"><span className="text-3xl font-extrabold text-slate-800">{total}</span><span className="text-slate-400">/ {TOTAL_MAX}</span><span className={"ml-2 font-bold " + grade.c}>{grade.txt}</span>{noDeductDefect && canPhoto && <span className="ml-1 text-xs bg-amber-100 text-amber-700 px-2 py-0.5 rounded">需拍滿分照片</span>}</div></div>
+                <button onClick={submit} className="px-8 py-3 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl shadow-lg">送出評核</button>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    // ============================================================
+    // 維護專區
+    // ============================================================
+    function MaintainPanel({ monthFolder, checklist, stores, staffs, configured, curMonth, onReload }) {
+      const [sub, setSub] = useState('items');
+      const [month, setMonth] = useState(curMonth);
+      const [uploaded, setUploaded] = useState({});
+      const [editing, setEditing] = useState(null); // 編輯/新增中的題目（中文鍵）或 null
+      const items = checklist.categories.flatMap(c => c.items.map(it => ({ ...it, cat: it.cat || c.name })));
+
+      // 解析上傳的 Excel/CSV → 陣列（key 為該表中文表頭）
+      const parseFile = (file) => new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = (ev) => {
+          try {
+            const wb = XLSX.read(ev.target.result, { type: 'array' });
+            const ws = wb.Sheets[wb.SheetNames[0]];
+            resolve(XLSX.utils.sheet_to_json(ws, { defval: '' }));
+          } catch (err) { reject(err); }
+        };
+        reader.onerror = reject;
+        reader.readAsArrayBuffer(file);
+      });
+
+      const onUpload = async (kind, e) => {
+        const f = e.target.files[0]; e.target.value = '';
+        if (!f) return;
+        if (!configured) {
+          const prev = uploaded[kind];
+          let msg = `DEMO 模擬：已讀取「${f.name}」`;
+          if (prev === f.name) msg += `\n⚠ 同檔名 → 正式模式會刪除先前資料以最新為主`;
+          setUploaded({ ...uploaded, [kind]: f.name });
+          alert(msg + '\n（設定 GAS 後將實際寫入試算表）');
+          return;
+        }
+        try {
+          const rows = await parseFile(f);
+          const r = await SqcApi.importMaster(kind, month, rows, f.name);
+          setUploaded({ ...uploaded, [kind]: f.name });
+          await onReload(); // 匯入後即時重載，畫面表格更新
+          alert(`✅ 已匯入「${f.name}」${r.count} 筆（同名覆蓋，以最新為主）`);
+        } catch (err) { alert('匯入失敗：' + err.message); }
+      };
+
+      // 單題 新增/編輯/刪除（寫回後端）
+      const blankItem = () => ({ 排序: items.length + 1, 編號: '', 大分類: '', 題號名稱: '', 配分: 0, 計分方式: '合格0分', 每項扣分: '', 子項清單: '', 規範說明: '' });
+      const toForm = (it) => ({ 排序: it.order || '', 編號: it.id, 大分類: it.cat, 題號名稱: it.name, 配分: it.max, 計分方式: it.type === 'subdeduct' ? '分區扣分' : '合格0分', 每項扣分: it.perPoint || '', 子項清單: it.subsRaw || '', 規範說明: it.desc || '' });
+      const saveItem = async () => {
+        if (!editing['編號'] || !editing['題號名稱']) { alert('「編號」與「題號名稱」必填'); return; }
+        if (!configured) { alert('DEMO 模式不寫回；設定 GAS 後可存回試算表'); setEditing(null); return; }
+        try { await SqcApi.upsertItem(month, editing); await onReload(); setEditing(null); alert('✅ 已儲存'); }
+        catch (e) { alert('儲存失敗：' + e.message); }
+      };
+      const removeItem = async (id) => {
+        if (!confirm('確定刪除此題？')) return;
+        if (!configured) { alert('DEMO 模式不寫回'); return; }
+        try { await SqcApi.deleteItem(month, id); await onReload(); } catch (e) { alert('刪除失敗：' + e.message); }
+      };
+
+      const SUBS = [['items', '點檢題目（分月）'], ['roster', '店鋪名單（分月）'], ['stores', '店鋪主檔'], ['staffs', '點檢人員']];
+      const UPMETA = {
+        items: { label: '點檢題目', note: '分月份轉入，轉入後於下方呈現' },
+        roster: { label: '店鋪名單', note: '分月份轉入（含課別、店鋪型態）' },
+        stores: { label: '店鋪主檔', note: '全店基本資料' },
+        staffs: { label: '點檢人員資料', note: '含部別、課別' },
+      };
+
+      return (
+        <div className="space-y-4">
+          <div className="bg-white rounded-xl shadow-sm p-2 flex flex-wrap gap-1">
+            {SUBS.map(([k, l]) => <button key={k} onClick={() => setSub(k)} className={"px-3 py-1.5 text-sm rounded-lg " + (sub === k ? "bg-emerald-600 text-white" : "text-slate-600 hover:bg-slate-100")}>{l}</button>)}
+          </div>
+
+          <div className="bg-white rounded-xl shadow-sm p-5">
+            <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
+              <div>
+                <h3 className="font-bold text-slate-700">{UPMETA[sub].label} 匯入</h3>
+                <p className="text-xs text-slate-400">{UPMETA[sub].note}　·　同檔名再次上傳將刪除先前資料</p>
+              </div>
+              <div className="flex items-center gap-2">
+                {(sub === 'items' || sub === 'roster') && <select value={month} onChange={e => setMonth(e.target.value)} className="px-3 py-1.5 border border-slate-300 rounded-lg text-sm"><option value="11506">115年06月</option><option value="11507">115年07月</option></select>}
+                <label className="text-sm px-3 py-1.5 bg-slate-700 text-white rounded-lg cursor-pointer hover:bg-slate-800">📥 {uploaded[sub] ? '重新轉入' : '匯入檔案'}<input type="file" accept=".xlsx,.csv" className="hidden" onChange={e => onUpload(sub, e)} /></label>
+              </div>
+            </div>
+            {uploaded[sub] && <div className="text-xs text-emerald-600 mb-3">✓ 目前檔案：{uploaded[sub]}</div>}
+
+            {/* 題目轉入後呈現 + 單題修改/新增/刪除 */}
+            {sub === 'items' && (
+              <div>
+                <div className="flex justify-end mb-2"><button onClick={() => setEditing(blankItem())} className="text-sm px-3 py-1.5 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700">+ 新增題目</button></div>
+                <table className="w-full text-sm">
+                  <thead><tr className="text-left text-slate-500 border-b"><th className="py-2">編號</th><th>大分類</th><th>項目</th><th>配分</th><th>計分</th><th>每項</th><th>操作</th></tr></thead>
+                  <tbody>
+                    {items.map(it => (
+                      <tr key={it.id} className="border-b border-slate-100">
+                        <td className="py-2 text-slate-400">{it.id}</td><td className="text-slate-600 text-xs">{it.cat}</td><td className="font-medium text-slate-800">{it.name}</td><td>{it.max}</td>
+                        <td><span className={"text-xs px-2 py-0.5 rounded " + (it.type === 'subdeduct' ? "bg-blue-100 text-blue-700" : "bg-amber-100 text-amber-700")}>{it.type === 'subdeduct' ? '分區扣分' : '合格0分'}</span></td>
+                        <td className="text-slate-500 text-xs">{it.type === 'subdeduct' ? `-${it.perPoint}` : '—'}</td>
+                        <td className="whitespace-nowrap"><button onClick={() => setEditing(toForm(it))} className="text-xs text-blue-600 mr-2">編輯</button><button onClick={() => removeItem(it.id)} className="text-xs text-red-600">刪除</button></td>
+                      </tr>
+                    ))}
+                    {items.length === 0 && <tr><td colSpan="7" className="py-6 text-center text-slate-400">尚無題目，請匯入或新增</td></tr>}
+                  </tbody>
+                </table>
+
+                {/* 單題 新增/編輯 表單 */}
+                {editing && (
+                  <div className="mt-4 border-t pt-4">
+                    <h4 className="font-bold text-slate-700 mb-2">{items.some(x => x.id === editing['編號']) ? '編輯題目' : '新增題目'}</h4>
+                    <div className="grid md:grid-cols-2 gap-2 text-sm">
+                      {[['排序', 'number'], ['編號', 'text'], ['大分類', 'text'], ['題號名稱', 'text'], ['配分', 'number'], ['每項扣分', 'number']].map(([k, t]) => (
+                        <label key={k} className="block"><span className="text-xs text-slate-500">{k}</span>
+                          <input type={t} value={editing[k]} onChange={e => setEditing({ ...editing, [k]: t === 'number' ? e.target.value : e.target.value })} className="w-full px-2 py-1.5 border border-slate-300 rounded" /></label>
+                      ))}
+                      <label className="block"><span className="text-xs text-slate-500">計分方式</span>
+                        <select value={editing['計分方式']} onChange={e => setEditing({ ...editing, ['計分方式']: e.target.value })} className="w-full px-2 py-1.5 border border-slate-300 rounded"><option>合格0分</option><option>分區扣分</option></select></label>
+                      <label className="block md:col-span-2"><span className="text-xs text-slate-500">子項清單（分區扣分用；用 | 分隔，可填寫用 :填寫、多單位用 :2）</span>
+                        <input value={editing['子項清單']} onChange={e => setEditing({ ...editing, ['子項清單']: e.target.value })} className="w-full px-2 py-1.5 border border-slate-300 rounded" placeholder="OC|WI|其他貨架:填寫" /></label>
+                      <label className="block md:col-span-2"><span className="text-xs text-slate-500">規範說明</span>
+                        <input value={editing['規範說明']} onChange={e => setEditing({ ...editing, ['規範說明']: e.target.value })} className="w-full px-2 py-1.5 border border-slate-300 rounded" /></label>
+                    </div>
+                    <div className="flex gap-2 mt-3">
+                      <button onClick={saveItem} className="px-4 py-1.5 bg-emerald-600 text-white rounded-lg text-sm hover:bg-emerald-700">儲存</button>
+                      <button onClick={() => setEditing(null)} className="px-4 py-1.5 bg-slate-200 text-slate-600 rounded-lg text-sm">取消</button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {sub === 'roster' && <RosterTable stores={stores} />}
+            {sub === 'stores' && <StoresTable stores={stores} />}
+            {sub === 'staffs' && <StaffsTable staffs={staffs} />}
+          </div>
+        </div>
+      );
+    }
+    const TableShell = ({ head, rows }) => (
+      <table className="w-full text-sm"><thead><tr className="text-left text-slate-500 border-b">{head.map(h => <th key={h} className="py-2">{h}</th>)}</tr></thead>
+        <tbody>{rows.map((r, i) => <tr key={i} className="border-b border-slate-100">{r.map((c, j) => <td key={j} className="py-2 text-slate-700">{c}</td>)}</tr>)}</tbody></table>
+    );
+    const RosterTable = ({ stores }) => <TableShell head={['店號', '店名', '課別', '店鋪型態']} rows={(stores || []).map(s => [s.code, s.name, s.section, s.can_photo ? '可拍照' : '無法拍照'])} />;
+    const StoresTable = ({ stores }) => <TableShell head={['店號', '店名', '課別']} rows={(stores || []).map(s => [s.code, s.name, s.section])} />;
+    const StaffsTable = ({ staffs }) => <TableShell head={['員編', '姓名', '部別', '課別']} rows={(staffs || []).map(s => [s.id, s.name, s.dept, s.section])} />;
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+  <script>
+    // 以 classic runtime 編譯（避免新版 Babel 預設 automatic runtime 產生 import 而在純瀏覽器報錯）
+    (function () {
+      try {
+        var src = document.getElementById('appCode').textContent;
+        var out = Babel.transform(src, { presets: [['react', { runtime: 'classic' }]] }).code;
+        (0, eval)(out);
+      } catch (e) {
+        document.getElementById('root').innerHTML =
+          '<pre style="color:#b91c1c;padding:16px;white-space:pre-wrap">啟動錯誤：' + (e && e.message ? e.message : e) + '</pre>';
+        console.error(e);
+      }
+    })();
+  </script>
+</body>
+</html>
