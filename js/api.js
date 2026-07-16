@@ -38,5 +38,8 @@
     importMaster: (kind, month, rows, fileName) => call('importMaster', { kind, month, rows, fileName }),
     upsertItem: (month, item) => call('upsertItem', { month, item }),
     deleteItem: (month, id) => call('deleteItem', { month, id }),
+    upsertRow: (kind, month, row) => call('upsertRow', { kind, month, row }),
+    deleteRow: (kind, month, id) => call('deleteRow', { kind, month, id }),
+    getMaster: (kind, month) => call('getMaster', { kind, month }),
   };
 })();

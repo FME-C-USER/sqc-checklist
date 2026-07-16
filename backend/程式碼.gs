@@ -27,7 +27,7 @@ function doPost(e) {
 
     // ===== 授權閘門：除 login 外皆需有效 token；管理動作再驗管理者 =====
     var OPEN = { login: 1 };
-    var ADMIN_ONLY = { importMaster: 1, upsertItem: 1, deleteItem: 1 };
+    var ADMIN_ONLY = { importMaster: 1, upsertItem: 1, deleteItem: 1, upsertRow: 1, deleteRow: 1, getMaster: 1 };
     if (!OPEN[action]) {
       var sess = getSession(req.token);
       if (!sess) return json({ ok: false, code: 'AUTH', error: '未登入或連線逾時，請重新登入' });
@@ -47,6 +47,9 @@ function doPost(e) {
       importMaster: function () { return importMaster(p.kind, p.month, p.rows, p.fileName); },
       upsertItem: function () { return upsertItem(p.month, p.item); },
       deleteItem: function () { return deleteItem(p.month, p.id); },
+      upsertRow: function () { return upsertRow(p.kind, p.month, p.row); },
+      deleteRow: function () { return deleteRowByKind(p.kind, p.month, p.id); },
+      getMaster: function () { return { rows: readSheet(sheetForKind(p.kind, p.month)) }; },
     };
     if (!routes[action]) return json({ ok: false, error: '未知動作：' + action });
     return json({ ok: true, result: routes[action]() });
@@ -125,6 +128,7 @@ function getBootstrap(month, section) {
     month: month,
     passScore: Number(getSetting('及格分數') || 85),
     checklist: getChecklist(month),
+    observations: getObservations(month),
     stores: getStores(month, section),
     staffs: readSheet('點檢人員').map(function (r) {
       return { empId: r['員編'], name: r['姓名'], dept: r['部別'], section: r['課別'] };
@@ -164,6 +168,20 @@ function parseSubs(raw) {
     if (note) sub.note = note;
     return sub;
   });
+}
+
+// 觀察題（分月）→ 分成 拍照/有無/符合 三組回前端
+function getObservations(month) {
+  var rows = readSheet('觀察題_' + month).sort(function (a, b) { return (Number(a['排序']) || 0) - (Number(b['排序']) || 0); });
+  var key = [], toilet = [], inspect = [];
+  rows.forEach(function (r) {
+    var t = String(r['類型'] || '');
+    var id = r['編號'], name = r['題目名稱'];
+    if (t.indexOf('拍照') >= 0) key.push({ id: id, name: name, required: (String(r['必填']) === '是' || String(r['必填']).toUpperCase() === 'Y') });
+    else if (t.indexOf('符合') >= 0) inspect.push({ id: id, name: name });
+    else toilet.push({ id: id, name: name, opts: String(r['選項'] || '有|無').split('|'), show: String(r['顯示條件'] || 'always') });
+  });
+  return { keyObservations: key, toiletObservations: toilet, toiletInspect: inspect };
 }
 
 function getStores(month, section) {
@@ -298,7 +316,7 @@ function importMaster(kind, month, rows, fileName) {
   try {
     var map = {
       'staff': '點檢人員', 'stores': '店鋪主檔',
-      'roster': '店鋪名單_' + month, 'checklist': '題庫_' + month,
+      'roster': '店鋪名單_' + month, 'checklist': '題庫_' + month, 'obs': '觀察題_' + month,
     };
     var name = map[kind];
     if (!name) throw new Error('未知匯入類型：' + kind);
@@ -350,6 +368,49 @@ function deleteItem(month, id) {
       if (String(data[i][idCol]) === String(id)) { sh.deleteRow(i + 1); return { ok: true }; }
     }
     return { ok: false, message: '找不到題目' };
+  } finally { lock.releaseLock(); }
+}
+
+// ============================================================
+// 通用單筆 新增/修改/刪除（各區共用；row 以中文表頭為鍵）
+//   kind: checklist/obs/roster/staff/stores
+// ============================================================
+function sheetForKind(kind, month) {
+  return { checklist: '題庫_' + month, obs: '觀察題_' + month, roster: '店鋪名單_' + month, staff: '點檢人員', stores: '店鋪主檔' }[kind];
+}
+function keyForKind(kind) {
+  return { checklist: '編號', obs: '編號', roster: '店號', staff: '員編', stores: '店號' }[kind];
+}
+function upsertRow(kind, month, row) {
+  var lock = LockService.getScriptLock(); lock.waitLock(20000);
+  try {
+    var name = sheetForKind(kind, month); if (!name) throw new Error('未知類型：' + kind);
+    var sh = ssBook().getSheetByName(name); if (!sh) throw new Error('找不到活頁：' + name);
+    var head = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0];
+    var keyCol = keyForKind(kind);
+    var out = head.map(function (h) { return row[h] != null ? row[h] : ''; });
+    var data = sh.getDataRange().getValues();
+    var ci = head.indexOf(keyCol);
+    for (var i = 1; i < data.length; i++) {
+      if (String(data[i][ci]) === String(row[keyCol]) && String(row[keyCol]) !== '') {
+        sh.getRange(i + 1, 1, 1, head.length).setValues([out]);
+        return { ok: true, mode: 'update' };
+      }
+    }
+    sh.appendRow(out);
+    return { ok: true, mode: 'add' };
+  } finally { lock.releaseLock(); }
+}
+function deleteRowByKind(kind, month, id) {
+  var lock = LockService.getScriptLock(); lock.waitLock(20000);
+  try {
+    var sh = ssBook().getSheetByName(sheetForKind(kind, month));
+    var data = sh.getDataRange().getValues();
+    var ci = data[0].indexOf(keyForKind(kind));
+    for (var i = 1; i < data.length; i++) {
+      if (String(data[i][ci]) === String(id)) { sh.deleteRow(i + 1); return { ok: true }; }
+    }
+    return { ok: false, message: '找不到資料' };
   } finally { lock.releaseLock(); }
 }
 
