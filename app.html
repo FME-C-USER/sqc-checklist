@@ -473,10 +473,12 @@
 
       const exportExcel = () => {
         const head = ['日期', '店鋪', '課別', '稽核員', '版本', '得分', '結果'];
-        const rows = filtered.map(r => [r.date, r.store, r.section, r.staff, r.version, r.total, r.grade]);
-        const csv = '﻿' + [head, ...rows].map(r => r.map(c => `"${c}"`).join(',')).join('\n');
-        const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8;' }));
-        const a = document.createElement('a'); a.href = url; a.download = `SQC彙總_${filter.from || '全部'}_${filter.to || ''}.csv`; a.click();
+        const data = [head].concat(filtered.map(r => [r.date, r.store, r.section, r.staff, r.version, r.total, r.grade]));
+        const ws = XLSX.utils.aoa_to_sheet(data);
+        ws['!cols'] = [{ wch: 12 }, { wch: 18 }, { wch: 10 }, { wch: 10 }, { wch: 8 }, { wch: 8 }, { wch: 8 }];
+        const wb = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(wb, ws, '彙總');
+        XLSX.writeFile(wb, `SQC彙總_${filter.from || '全部'}_${filter.to || ''}.xlsx`);
       };
 
       const allSections = DEPTS.flatMap(d => d.sections);
@@ -799,7 +801,7 @@
               <div className="flex items-center gap-2">
                 {area.monthly && <select value={month} onChange={e => setMonth(e.target.value)} className="px-3 py-1.5 border border-slate-300 rounded-lg text-sm"><option value="11506">115年06月</option><option value="11507">115年07月</option></select>}
                 <button onClick={() => setEditing(blank())} className="text-sm px-3 py-1.5 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700">+ 新增</button>
-                <label className="text-sm px-3 py-1.5 bg-slate-700 text-white rounded-lg cursor-pointer hover:bg-slate-800">📥 {uploaded[sub] ? '重新匯入' : 'Excel 匯入'}<input type="file" accept=".xlsx,.csv" className="hidden" onChange={onUpload} /></label>
+                <label className="text-sm px-3 py-1.5 bg-slate-700 text-white rounded-lg cursor-pointer hover:bg-slate-800">📥 {uploaded[sub] ? '重新匯入' : 'Excel 匯入'}<input type="file" accept=".xlsx,.xls" className="hidden" onChange={onUpload} /></label>
               </div>
             </div>
             {uploaded[sub] && <div className="text-xs text-emerald-600 mb-3">✓ 最近匯入：{uploaded[sub]}</div>}
