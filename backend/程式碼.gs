@@ -146,6 +146,10 @@ function getBootstrap(month, section) {
     checklist: getChecklist(month),
     observations: getObservations(month),
     stores: getStores(month, section),
+    // 店鋪主檔（自行新增店鋪時比對用）
+    storesMaster: readSheet('店鋪主檔').map(function (r) {
+      return { code: String(r['店號']), name: r['店名'], section: r['課別'], can_photo: (String(r['店鋪型態']).indexOf('無法') < 0 && String(r['店鋪型態']).indexOf('不可') < 0) };
+    }),
     // 點檢人員下拉：只帶「有填部別或課別」的人員（純管理者未填部/課者不列入下拉，但仍可登入）
     staffs: readSheet('點檢人員').filter(function (r) {
       return String(r['部別'] || '').trim() !== '' || String(r['課別'] || '').trim() !== '';

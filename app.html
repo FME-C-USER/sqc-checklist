@@ -189,6 +189,10 @@
 
     // 民國年月 11506 → 「115年06月」
     function monthFolderOf(m) { return m.slice(0, 3) + '年' + m.slice(3, 5) + '月'; }
+    // 台北時間現在（datetime-local 預設值用）
+    function taipeiNow() { return new Date(Date.now() + 8 * 3600 * 1000).toISOString().slice(0, 16); }
+    // 點檢時間(YYYY-MM-DDTHH:mm) → 民國年月，如 2026-07 → 11507
+    function rocMonth(dt) { if (!dt || dt.length < 7) return MONTH; return String(parseInt(dt.slice(0, 4)) - 1911) + dt.slice(5, 7); }
 
     // 將後端扁平題目陣列組成 categories 結構（附上固定的觀察題定義）
     function buildChecklist(items, month, obs) {
@@ -313,34 +317,38 @@
       const isManager = currentUser.role === '管理者';
       const [tab, setTab] = useState('basic');
 
-      // ---- 開場資料（DEMO 用內建 mock；已設定後端則 getBootstrap 載入當月）----
-      const [boot, setBoot] = useState({ checklist: DEMO_CHECKLIST, stores: DEMO_STORES, staffs: DEMO_STAFFS, depts: DEMO_DEPTS });
+      // ---- 基本資料 ----（時間用台北；月份由點檢時間決定；登入預帶自己的部/課/姓名）
+      const [basic, setBasic] = useState({ time: taipeiNow(), dept: currentUser.dept || '', section: currentUser.section || '', staffId: currentUser.empId || '', storeCode: '', customStore: '', customInfo: null, storeType: '' });
+      const workMonth = rocMonth(basic.time); // 依點檢時間對應的民國年月
+
+      // ---- 開場資料（依 workMonth 載入；DEMO 用內建 mock）----
+      const [boot, setBoot] = useState({ checklist: DEMO_CHECKLIST, stores: DEMO_STORES, staffs: DEMO_STAFFS, depts: DEMO_DEPTS, storesMaster: [] });
       const [loading, setLoading] = useState(CONFIGURED);
       const [bootErr, setBootErr] = useState('');
-      const reloadBoot = () => SqcApi.getBootstrap(MONTH, '').then(b => {
+      const reloadBoot = (m) => { const mo = m || workMonth; return SqcApi.getBootstrap(mo, '').then(b => {
         setBoot({
-          checklist: buildChecklist(b.checklist || [], MONTH, b.observations),
+          checklist: buildChecklist(b.checklist || [], mo, b.observations),
           stores: b.stores || [],
           staffs: (b.staffs || []).map(s => ({ id: s.empId, name: s.name, dept: s.dept, section: s.section })),
           depts: b.depts || [],
+          storesMaster: b.storesMaster || [],
         });
         setBootErr('');
-      });
+      }); };
       useEffect(() => {
         if (!CONFIGURED) return;
-        reloadBoot().catch(e => setBootErr(e.message || '載入失敗')).finally(() => setLoading(false));
-      }, []);
-      const checklist = boot.checklist, STORE_ROSTER = boot.stores, STAFFS = boot.staffs, DEPTS = boot.depts;
+        setLoading(true);
+        reloadBoot(workMonth).catch(e => setBootErr(e.message || '載入失敗')).finally(() => setLoading(false));
+      }, [workMonth]);
+      const checklist = boot.checklist, STORE_ROSTER = boot.stores, STAFFS = boot.staffs, DEPTS = boot.depts, STORES_MASTER = boot.storesMaster || [];
       const TOTAL_MAX = useMemo(() => checklist.categories.reduce((s, c) => s + c.max, 0), [checklist]);
-      const monthFolder = monthFolderOf(MONTH);
+      const monthFolder = monthFolderOf(workMonth);
 
-      // ---- 基本資料 ----（登入後預帶自己的部別/課別/姓名，仍可自行改選）
-      const nowStr = new Date().toISOString().slice(0, 16);
-      const [basic, setBasic] = useState({ time: nowStr, dept: currentUser.dept || '', section: currentUser.section || '', staffId: currentUser.empId || '', storeCode: '', customStore: '', storeType: '' });
       const sectionStores = STORE_ROSTER.filter(s => !basic.section || s.section === basic.section);
       const store = STORE_ROSTER.find(s => s.code === basic.storeCode);
-      // 店鋪型態由點檢人員手選（基本資料），未選時依名單帶出
-      const canPhoto = basic.storeType === 'photo' ? true : basic.storeType === 'nophoto' ? false : (store ? store.can_photo : true);
+      const effStore = store || basic.customInfo; // 名單選的 或 自行新增(比對主檔後)的店
+      // 店鋪型態必須由點檢人員手選（可拍照/不可拍照）
+      const canPhoto = basic.storeType === 'photo';
 
       // ---- 點檢作業 ----
       const [scores, setScores] = useState({});
@@ -360,7 +368,7 @@
       const loadRecords = () => {
         if (!CONFIGURED) return;
         const f = { from: filter.from, to: filter.to, section: filter.section, empId: isManager ? undefined : currentUser.empId };
-        SqcApi.queryRecords(MONTH, f).then(r => {
+        SqcApi.queryRecords(workMonth, f).then(r => {
           setRecords((r.records || []).map(x => ({
             id: x.id, date: String(x.time).slice(0, 10), store: x.storeName, section: x.section,
             staff: x.staffName, version: x.month, total: Number(x.total), grade: x.grade, _raw: x,
@@ -384,7 +392,8 @@
       const resetWork = () => { setScores({}); setKeyObs({}); setToilet({}); setObsText(''); setPerfectPhotos({}); setPaperForm([]); setSign({ count: '', identity: '' }); };
 
       const submit = () => {
-        if (!store && !basic.customStore) { alert('請先在「基本資料」選擇店鋪'); setTab('basic'); return; }
+        if (!effStore) { alert('請先在「基本資料」選擇店鋪'); setTab('basic'); return; }
+        if (!basic.storeType) { alert('請先在「基本資料」選擇店鋪型態'); setTab('basic'); return; }
         if (!basic.staffId) { alert('請先在「基本資料」選擇點檢人員'); setTab('basic'); return; }
         if (!sign.count) { alert('請選擇「在店店員人數」'); return; }
         if (!sign.identity) { alert('請選擇「簽名店鋪人員身分別」'); return; }
@@ -406,8 +415,8 @@
           }
         }
         const staff = STAFFS.find(s => s.id === basic.staffId);
-        const storeName = store ? store.name : basic.customStore;
-        const storeCode = store ? store.code : '';
+        const storeName = effStore ? effStore.name : '';
+        const storeCode = effStore ? effStore.code : '';
         const recId = (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : 'r' + Date.now();
 
         // 明細 / 觀察 JSON
@@ -441,7 +450,7 @@
         addPhotos([monthFolder, 'SQC點檢表完成照片'], paperForm);
 
         const record = {
-          id: recId, month: MONTH, time: basic.time.replace('T', ' '),
+          id: recId, month: workMonth, time: basic.time.replace('T', ' '),
           dept: basic.dept, section: basic.section, empId: basic.staffId, staffName: staff ? staff.name : user,
           storeCode, storeName, storeType: canPhoto ? '可拍照' : '不可拍照',
           total, grade: grade.txt, staffCount: sign.count, identity: sign.identity,
@@ -470,7 +479,7 @@
       const delRecord = (id) => {
         if (!confirm('確定刪除此筆評核紀錄？')) return;
         if (!CONFIGURED) { setRecords(records.filter(r => r.id !== id)); return; }
-        SqcApi.deleteRecord(MONTH, id).then(() => loadRecords()).catch(e => alert('刪除失敗：' + e.message));
+        SqcApi.deleteRecord(workMonth, id).then(() => loadRecords()).catch(e => alert('刪除失敗：' + e.message));
       };
 
       const exportExcel = () => {
@@ -487,7 +496,7 @@
       const exportUninspected = async () => {
         let done = new Set();
         if (CONFIGURED) {
-          const q = await SqcApi.queryRecords(MONTH, { section: filter.section });
+          const q = await SqcApi.queryRecords(workMonth, { section: filter.section });
           (q.records || []).forEach(r => done.add(String(r.storeCode || '')));
         } else {
           records.forEach(r => done.add(String(r.store)));
@@ -501,7 +510,7 @@
         ws['!cols'] = [{ wch: 12 }, { wch: 18 }, { wch: 10 }, { wch: 10 }];
         const wb = XLSX.utils.book_new();
         XLSX.utils.book_append_sheet(wb, ws, '尚未點檢');
-        XLSX.writeFile(wb, `SQC尚未點檢_${MONTH}${filter.section ? '_' + filter.section : ''}.xlsx`);
+        XLSX.writeFile(wb, `SQC尚未點檢_${workMonth}${filter.section ? '_' + filter.section : ''}.xlsx`);
       };
 
       const allSections = DEPTS.flatMap(d => d.sections);
@@ -539,46 +548,62 @@
                     <select value={basic.dept} onChange={e => setBasic({ ...basic, dept: e.target.value, section: '' })} className="w-full px-3 py-2 border border-slate-300 rounded-lg">
                       <option value="">— 請選擇 —</option>{DEPTS.map(d => <option key={d.dept}>{d.dept}</option>)}</select></div>
                   <div><label className="block text-xs text-slate-500 mb-1">課別</label>
-                    <select value={basic.section} onChange={e => setBasic({ ...basic, section: e.target.value, storeCode: '' })} className="w-full px-3 py-2 border border-slate-300 rounded-lg">
+                    <select value={basic.section} onChange={e => setBasic({ ...basic, section: e.target.value, storeCode: '', staffId: '' })} className="w-full px-3 py-2 border border-slate-300 rounded-lg">
                       <option value="">— 請選擇 —</option>{(DEPTS.find(d => d.dept === basic.dept)?.sections || allSections).map(s => <option key={s}>{s}</option>)}</select></div>
-                  <div><label className="block text-xs text-slate-500 mb-1">點檢人員</label>
+                  <div><label className="block text-xs text-slate-500 mb-1">點檢人員<span className="text-slate-400">（依課別帶出）</span></label>
                     <select value={basic.staffId} onChange={e => { const st = STAFFS.find(x => x.id === e.target.value); setBasic({ ...basic, staffId: e.target.value, dept: st?.dept || basic.dept, section: st?.section || basic.section }); }} className="w-full px-3 py-2 border border-slate-300 rounded-lg">
-                      <option value="">— 請選擇 —</option>{STAFFS.map(s => <option key={s.id} value={s.id}>{s.name}（{s.section}）</option>)}</select></div>
-                  <div><label className="block text-xs text-slate-500 mb-1">店鋪型態</label>
-                    <select value={basic.storeType} onChange={e => setBasic({ ...basic, storeType: e.target.value })} className="w-full px-3 py-2 border border-slate-300 rounded-lg">
-                      <option value="">— 依名單帶出 —</option><option value="photo">可拍照店鋪</option><option value="nophoto">不可拍照店鋪</option></select></div>
+                      <option value="">— 請選擇 —</option>{STAFFS.filter(s => !basic.section || s.section === basic.section).map(s => <option key={s.id} value={s.id}>{s.name}</option>)}</select></div>
                 </div>
 
                 <div>
                   <label className="block text-xs text-slate-500 mb-1">點檢店鋪名單<span className="text-slate-400">（依課別自動帶出，亦可自行新增）</span></label>
-                  <select value={basic.storeCode} onChange={e => { const st = STORE_ROSTER.find(x => x.code === e.target.value); setBasic({ ...basic, storeCode: e.target.value, customStore: '', storeType: st ? (st.can_photo ? 'photo' : 'nophoto') : basic.storeType }); }} className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm">
+                  <select value={basic.storeCode} onChange={e => { const st = STORE_ROSTER.find(x => x.code === e.target.value); setBasic({ ...basic, storeCode: e.target.value, customStore: '', customInfo: null, storeType: st ? (st.can_photo ? 'photo' : 'nophoto') : '' }); }} className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm">
                     <option value="">— 請選擇店鋪 —</option>
                     {sectionStores.map(s => <option key={s.code} value={s.code}>{s.code} {s.name}（{s.can_photo ? '可拍照' : '不可拍照'}）</option>)}
                     <option value="__custom">＋ 自行新增店鋪…</option>
                   </select>
                   {basic.storeCode === '__custom' && (
-                    <input value={basic.customStore} onChange={e => setBasic({ ...basic, customStore: e.target.value })} placeholder="輸入店號 店名" className="w-full mt-2 px-3 py-2 border border-slate-300 rounded-lg text-sm" />
+                    <div className="mt-2">
+                      <input value={basic.customStore} onChange={e => {
+                        const v = e.target.value.trim();
+                        const hit = STORES_MASTER.find(s => String(s.code) === v || s.name === v || (v && s.name && s.name.indexOf(v) >= 0 && v.length >= 2));
+                        setBasic({ ...basic, customStore: e.target.value, customInfo: hit || null, storeType: hit ? (hit.can_photo ? 'photo' : 'nophoto') : '' });
+                      }} placeholder="輸入店號 或 店名（需存在於店鋪主檔）" className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm" />
+                      {basic.customStore && (basic.customInfo
+                        ? <div className="text-xs text-emerald-600 mt-1">✓ 主檔比對：{basic.customInfo.code} {basic.customInfo.name}（{basic.customInfo.section}）</div>
+                        : <div className="text-xs text-red-500 mt-1">✗ 店鋪主檔查無此店，無法新增（請確認店號/店名）</div>)}
+                    </div>
                   )}
                 </div>
 
-                {(store || basic.customStore) && (
+                <div>
+                  <label className="block text-xs text-slate-500 mb-1">店鋪型態<span className="text-red-500">（必選）</span></label>
+                  <div className="flex gap-2">
+                    <button type="button" onClick={() => setBasic({ ...basic, storeType: 'photo' })} className={"flex-1 py-2.5 rounded-lg border font-medium " + (basic.storeType === 'photo' ? "bg-emerald-600 text-white border-emerald-600" : "bg-white text-slate-600 border-slate-300")}>📷 可拍照店鋪</button>
+                    <button type="button" onClick={() => setBasic({ ...basic, storeType: 'nophoto' })} className={"flex-1 py-2.5 rounded-lg border font-medium " + (basic.storeType === 'nophoto' ? "bg-amber-500 text-white border-amber-500" : "bg-white text-slate-600 border-slate-300")}>🚫 不可拍照店鋪</button>
+                  </div>
+                </div>
+
+                {effStore && basic.storeType && (
                   <div className={"text-sm px-3 py-2 rounded-lg " + (canPhoto ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700")}>
                     店鋪型態：<b>{canPhoto ? '可拍照店鋪' : '不可拍照店鋪'}</b>
                     {canPhoto ? 'NG 需缺失照片；無缺失需拍滿分照片區；所有店皆須上傳紙本' : '免拍各項照片，僅須上傳紙本點檢表'}
                   </div>
                 )}
 
-                <button onClick={() => setTab('work')} disabled={!store && !basic.customStore} className="w-full py-3 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white font-semibold rounded-lg">前往點檢作業 →</button>
+                <button onClick={() => setTab('work')} disabled={!effStore || !basic.storeType} className="w-full py-3 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white font-semibold rounded-lg">
+                  {!effStore ? '請先選擇店鋪' : !basic.storeType ? '請先選擇店鋪型態' : '前往點檢作業 →'}
+                </button>
               </div>
             )}
 
             {/* ========== 點檢作業 ========== */}
-            {tab === 'work' && (!store && !basic.customStore ? (
-              <div className="bg-white rounded-xl shadow-sm p-8 text-center text-slate-500">請先到「基本資料」選擇店鋪與人員<br /><button onClick={() => setTab('basic')} className="mt-3 px-4 py-2 bg-emerald-600 text-white rounded-lg">前往基本資料</button></div>
+            {tab === 'work' && (!effStore || !basic.storeType ? (
+              <div className="bg-white rounded-xl shadow-sm p-8 text-center text-slate-500">請先到「基本資料」選好店鋪與店鋪型態<br /><button onClick={() => setTab('basic')} className="mt-3 px-4 py-2 bg-emerald-600 text-white rounded-lg">前往基本資料</button></div>
             ) : (
               <>
                 <div className="bg-white rounded-xl shadow-sm px-4 py-3 text-sm text-slate-600 flex flex-wrap gap-x-4 gap-y-1">
-                  <span>🏪 {store ? store.name : basic.customStore}</span><span>👤 {STAFFS.find(s => s.id === basic.staffId)?.name || '—'}</span><span>📅 {basic.time.slice(0, 10)}</span>
+                  <span>🏪 {effStore.name}</span><span>👤 {STAFFS.find(s => s.id === basic.staffId)?.name || '—'}</span><span>📅 {basic.time.slice(0, 10)}</span>
                   <span className={"px-2 rounded " + (canPhoto ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700")}>{canPhoto ? '可拍照' : '不可拍照'}</span>
                 </div>
 
@@ -719,11 +744,11 @@
             )}
 
             {/* ========== 維護專區 ========== */}
-            {tab === 'maintain' && <MaintainPanel configured={CONFIGURED} curMonth={MONTH} onReload={reloadBoot} />}
+            {tab === 'maintain' && <MaintainPanel configured={CONFIGURED} curMonth={workMonth} onReload={reloadBoot} />}
           </div>
 
           {/* 底部總分（僅點檢作業） */}
-          {tab === 'work' && (store || basic.customStore) && (
+          {tab === 'work' && effStore && basic.storeType && (
             <div className="fixed bottom-0 left-0 right-0 bg-white border-t shadow-2xl z-30">
               <div className="max-w-4xl mx-auto px-4 py-3 flex items-center justify-between">
                 <div><div className="text-xs text-slate-400">合計得分（及格 {PASS_SCORE}）</div>
