@@ -52,6 +52,7 @@ function doPost(e) {
       deleteRow: function () { return deleteRowByKind(p.kind, p.month, p.id); },
       getMaster: function () { ensureKindSheet(p.kind, p.month); return { rows: readSheet(sheetForKind(p.kind, p.month)) }; },
       getChangeLog: function () { return getChangeLog(p.limit); },
+      lookupStore: function () { return lookupStore(p.q); },
     };
     if (!routes[action]) return json({ ok: false, error: '未知動作：' + action });
     var result = routes[action]();
@@ -146,10 +147,6 @@ function getBootstrap(month, section) {
     checklist: getChecklist(month),
     observations: getObservations(month),
     stores: getStores(month, section),
-    // 店鋪主檔（自行新增店鋪時比對用）
-    storesMaster: readSheet('店鋪主檔').map(function (r) {
-      return { code: String(r['店號']), name: r['店名'], section: r['課別'], can_photo: (String(r['店鋪型態']).indexOf('無法') < 0 && String(r['店鋪型態']).indexOf('不可') < 0) };
-    }),
     // 點檢人員下拉：只帶「有填部別或課別」的人員（純管理者未填部/課者不列入下拉，但仍可登入）
     staffs: readSheet('點檢人員').filter(function (r) {
       return String(r['部別'] || '').trim() !== '' || String(r['課別'] || '').trim() !== '';
@@ -205,6 +202,21 @@ function getObservations(month) {
     else toilet.push({ id: id, name: name, opts: String(r['選項'] || '有|無').split('|'), show: String(r['顯示條件'] || 'always') });
   });
   return { keyObservations: key, toiletObservations: toilet, toiletInspect: inspect };
+}
+
+// 自行新增店鋪：以店號或店名查店鋪主檔（回最多 20 筆）
+function lookupStore(q) {
+  q = String(q || '').trim();
+  if (!q) return { rows: [] };
+  var rows = readSheet('店鋪主檔');
+  var out = [];
+  for (var i = 0; i < rows.length && out.length < 20; i++) {
+    var code = String(rows[i]['店號'] || ''), name = String(rows[i]['店名'] || '');
+    if (code === q || name === q || (name.indexOf(q) >= 0) || (code.indexOf(q) >= 0)) {
+      out.push({ code: code, name: name, section: rows[i]['營業課名稱'] || '', dept: rows[i]['營業部名稱'] || '' });
+    }
+  }
+  return { rows: out };
 }
 
 function getStores(month, section) {
@@ -406,7 +418,7 @@ var HEADERS_MAP = {
   obs: ['排序', '編號', '類型', '題目名稱', '選項', '顯示條件', '必填'],
   roster: ['店號', '店名', '課別', '店鋪型態'],
   staff: ['部別', '課別', '工號', '姓名', '職稱', 'AD帳號', '角色'],
-  stores: ['店號', '店名', '課別', '店鋪型態'],
+  stores: ['序號', '店號', '店名', '營業本部名稱', '營業部名稱', '營業課名稱', '營業擔當', '縣市', '鄉鎮', '地址'],
   record: ['紀錄ID', '點檢時間', '部別', '課別', '員編', '點檢人員', '店號', '店名', '店鋪型態', '題庫版本', '合計得分', '等第', '在店店員人數', '簽名身分別', '明細JSON', '觀察JSON', '照片JSON', '紙本照片', '照片資料夾', '同步狀態', '建立時間', '更新時間'],
   log: ['時間', '操作人', '動作', '對象', '說明'],
 };

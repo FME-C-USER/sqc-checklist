@@ -322,7 +322,8 @@
       const workMonth = rocMonth(basic.time); // 依點檢時間對應的民國年月
 
       // ---- 開場資料（依 workMonth 載入；DEMO 用內建 mock）----
-      const [boot, setBoot] = useState({ checklist: DEMO_CHECKLIST, stores: DEMO_STORES, staffs: DEMO_STAFFS, depts: DEMO_DEPTS, storesMaster: [] });
+      const [boot, setBoot] = useState({ checklist: DEMO_CHECKLIST, stores: DEMO_STORES, staffs: DEMO_STAFFS, depts: DEMO_DEPTS });
+      const [custResults, setCustResults] = useState([]);
       const [loading, setLoading] = useState(CONFIGURED);
       const [bootErr, setBootErr] = useState('');
       const reloadBoot = (m) => { const mo = m || workMonth; return SqcApi.getBootstrap(mo, '').then(b => {
@@ -331,7 +332,6 @@
           stores: b.stores || [],
           staffs: (b.staffs || []).map(s => ({ id: s.empId, name: s.name, dept: s.dept, section: s.section })),
           depts: b.depts || [],
-          storesMaster: b.storesMaster || [],
         });
         setBootErr('');
       }); };
@@ -340,7 +340,7 @@
         setLoading(true);
         reloadBoot(workMonth).catch(e => setBootErr(e.message || '載入失敗')).finally(() => setLoading(false));
       }, [workMonth]);
-      const checklist = boot.checklist, STORE_ROSTER = boot.stores, STAFFS = boot.staffs, DEPTS = boot.depts, STORES_MASTER = boot.storesMaster || [];
+      const checklist = boot.checklist, STORE_ROSTER = boot.stores, STAFFS = boot.staffs, DEPTS = boot.depts;
       const TOTAL_MAX = useMemo(() => checklist.categories.reduce((s, c) => s + c.max, 0), [checklist]);
       const monthFolder = monthFolderOf(workMonth);
 
@@ -388,6 +388,23 @@
       const grade = gradeOf(total);
       const setItemState = (id, st) => setScores(prev => ({ ...prev, [id]: st }));
       const logout = () => { sessionStorage.removeItem('sqc_user'); location.href = 'index.html'; };
+
+      // 自行新增店鋪：查店鋪主檔
+      const doLookup = async () => {
+        const q = (basic.customStore || '').trim();
+        if (!q) { setCustResults([]); return; }
+        if (!CONFIGURED) {
+          setCustResults(DEMO_STORES.filter(s => s.code === q || s.name.indexOf(q) >= 0).map(s => ({ code: s.code, name: s.name, section: s.section })));
+          return;
+        }
+        try {
+          const r = await SqcApi.lookupStore(q);
+          const rows = r.rows || [];
+          const exact = rows.filter(s => String(s.code) === q || s.name === q);
+          if (exact.length === 1) { setBasic({ ...basic, customInfo: exact[0], customStore: exact[0].code + ' ' + exact[0].name }); setCustResults([]); }
+          else { setCustResults(rows); if (!rows.length) alert('店鋪主檔查無此店，無法新增（請確認店號/店名）'); }
+        } catch (e) { alert('查詢失敗：' + e.message); }
+      };
 
       const resetWork = () => { setScores({}); setKeyObs({}); setToilet({}); setObsText(''); setPerfectPhotos({}); setPaperForm([]); setSign({ count: '', identity: '' }); };
 
@@ -564,14 +581,22 @@
                   </select>
                   {basic.storeCode === '__custom' && (
                     <div className="mt-2">
-                      <input value={basic.customStore} onChange={e => {
-                        const v = e.target.value.trim();
-                        const hit = STORES_MASTER.find(s => String(s.code) === v || s.name === v || (v && s.name && s.name.indexOf(v) >= 0 && v.length >= 2));
-                        setBasic({ ...basic, customStore: e.target.value, customInfo: hit || null, storeType: hit ? (hit.can_photo ? 'photo' : 'nophoto') : '' });
-                      }} placeholder="輸入店號 或 店名（需存在於店鋪主檔）" className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm" />
-                      {basic.customStore && (basic.customInfo
-                        ? <div className="text-xs text-emerald-600 mt-1">✓ 主檔比對：{basic.customInfo.code} {basic.customInfo.name}（{basic.customInfo.section}）</div>
-                        : <div className="text-xs text-red-500 mt-1">✗ 店鋪主檔查無此店，無法新增（請確認店號/店名）</div>)}
+                      <div className="flex gap-2">
+                        <input value={basic.customStore} onChange={e => setBasic({ ...basic, customStore: e.target.value, customInfo: null })}
+                          onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); doLookup(); } }}
+                          placeholder="輸入店號 或 店名 → 查主檔" className="flex-1 px-3 py-2 border border-slate-300 rounded-lg text-sm" />
+                        <button type="button" onClick={doLookup} className="px-3 py-2 bg-slate-700 text-white rounded-lg text-sm whitespace-nowrap">🔍 查主檔</button>
+                      </div>
+                      {basic.customInfo && <div className="text-xs text-emerald-600 mt-1">✓ 已選：{basic.customInfo.code} {basic.customInfo.name}（{basic.customInfo.section}）</div>}
+                      {!basic.customInfo && custResults.length > 0 && (
+                        <div className="mt-1 border border-slate-200 rounded-lg divide-y max-h-48 overflow-y-auto">
+                          {custResults.map(s => (
+                            <button type="button" key={s.code} onClick={() => { setBasic({ ...basic, customInfo: s, customStore: s.code + ' ' + s.name }); setCustResults([]); }}
+                              className="w-full text-left px-3 py-2 text-sm hover:bg-emerald-50">{s.code} {s.name} <span className="text-slate-400">（{s.section}）</span></button>
+                          ))}
+                        </div>
+                      )}
+                      {!basic.customInfo && custResults.length === 0 && basic.customStore && <div className="text-xs text-slate-400 mt-1">按「查主檔」搜尋；主檔有才可新增</div>}
                     </div>
                   )}
                 </div>
@@ -830,9 +855,9 @@
         cols: ['店號', '店名', '課別', '店鋪型態'],
         fields: [{ k: '店號', t: 'text' }, { k: '店名', t: 'text' }, { k: '課別', t: 'text' }, { k: '店鋪型態', t: 'select', opts: ['可拍照', '不可拍照'] }] },
       { kind: 'stores', importKind: 'stores', label: '店鋪主檔', monthly: false, key: '店號',
-        note: '全門市主檔（常駐）',
-        cols: ['店號', '店名', '課別', '店鋪型態'],
-        fields: [{ k: '店號', t: 'text' }, { k: '店名', t: 'text' }, { k: '課別', t: 'text' }, { k: '店鋪型態', t: 'select', opts: ['可拍照', '不可拍照'] }] },
+        note: '全門市主檔（常駐；可直接匯入官方「店庫」總表，店號請設文字格式）',
+        cols: ['店號', '店名', '營業課名稱', '縣市', '鄉鎮'],
+        fields: [{ k: '序號', t: 'text' }, { k: '店號', t: 'text' }, { k: '店名', t: 'text' }, { k: '營業本部名稱', t: 'text' }, { k: '營業部名稱', t: 'text' }, { k: '營業課名稱', t: 'text' }, { k: '營業擔當', t: 'text' }, { k: '縣市', t: 'text' }, { k: '鄉鎮', t: 'text' }, { k: '地址', t: 'text' }] },
       { kind: 'staffs', importKind: 'staff', label: '點檢人員', monthly: false, key: '工號',
         note: '常駐；管理者需填 AD帳號 與 角色=管理者。基本資料的點檢人員下拉只帶「有填部別或課別」的人',
         cols: ['姓名', '部別', '課別', '職稱', '角色'],
@@ -950,12 +975,13 @@
               <table className="w-full text-sm">
                 <thead><tr className="text-left text-slate-500 border-b bg-slate-50">{area.cols.map(c => <th key={c} className="py-2 px-2">{c}</th>)}<th className="px-2">操作</th></tr></thead>
                 <tbody>
-                  {rows.map((r, i) => (
+                  {rows.slice(0, 500).map((r, i) => (
                     <tr key={i} className="border-b border-slate-100">
                       {area.cols.map(c => <td key={c} className="py-2 px-2 text-slate-700">{String(r[c] != null ? r[c] : '')}</td>)}
                       <td className="px-2 whitespace-nowrap"><button onClick={() => setEditing({ ...r })} className="text-xs text-blue-600 mr-2">編輯</button><button onClick={() => remove(r[area.key])} className="text-xs text-red-600">刪除</button></td>
                     </tr>
                   ))}
+                  {rows.length > 500 && <tr><td colSpan={area.cols.length + 1} className="py-2 px-2 text-center text-slate-400 text-xs">僅顯示前 500 筆（共 {rows.length} 筆）；請用匯入或搜尋維護</td></tr>}
                   {rows.length === 0 && <tr><td colSpan={area.cols.length + 1} className="py-6 text-center text-slate-400">{configured ? '尚無資料，請匯入或新增' : 'DEMO 模式不載入（請部署 GAS 後於正式環境維護）'}</td></tr>}
                 </tbody>
               </table>

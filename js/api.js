@@ -42,5 +42,6 @@
     deleteRow: (kind, month, id) => call('deleteRow', { kind, month, id }),
     getMaster: (kind, month) => call('getMaster', { kind, month }),
     getChangeLog: (limit) => call('getChangeLog', { limit }),
+    lookupStore: (q) => call('lookupStore', { q }),
   };
 })();
