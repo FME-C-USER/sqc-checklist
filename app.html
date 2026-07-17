@@ -739,6 +739,57 @@
     // ============================================================
     // 維護專區
     // ============================================================
+    // 官方評核表(原始表單版面) → 結構化題庫列。非官方表回傳 null。
+    function officialFormToRows(aoa) {
+      if (!aoa || aoa.length < 2) return null;
+      const head = (aoa[0] || []).map(x => String(x || ''));
+      const isForm = head.some(h => h.indexOf('評核內容與規範') >= 0) && head.some(h => h.indexOf('分數') >= 0);
+      if (!isForm) return null;
+      const clean = s => String(s == null ? '' : s).replace(/[\r\n]+/g, '').trim();
+      const halves = [{ c: 0, n: 1, s: 2, sc: 6 }, { c: 8, n: 9, s: 10, sc: 14 }];
+      const items = [];
+      halves.forEach(h => {
+        let curCat = '', last = null;
+        for (let i = 1; i < aoa.length; i++) {
+          const row = aoa[i] || [];
+          const catRaw = clean(row[h.c]);
+          if (catRaw) curCat = catRaw.replace(/共\s*\d+\s*分$/, '');
+          const name = clean(row[h.n]);
+          const rawScore = row[h.sc];
+          const spec = String(row[h.s] == null ? '' : row[h.s]).replace(/\r/g, '');
+          const isObs = String(rawScore).indexOf('--') >= 0;
+          if (name) {
+            if (isObs) { last = null; continue; } // 觀察題略過（另於觀察區維護）
+            const num = (name.match(/^(\d+)/) || [])[1] || '';
+            const m = spec.match(/每項\s*(\d+)\s*分/);
+            let method = '合格0分', per = '', subs = '';
+            if (m) {
+              method = '分區扣分'; per = m[1];
+              const lines = spec.split('\n');
+              const startIdx = lines.findIndex(l => l.indexOf('/') >= 0);
+              if (startIdx >= 0) {
+                let listStr = lines.slice(startIdx).join('').replace(/[（(]每項[\s\S]*$/, ''); // 合併換行的清單、去掉(每項…)註記
+                let parts = listStr.split('/').map(x => x.replace(/_+/g, '').trim()).filter(Boolean);
+                parts = parts.map(p => p === '其他貨架' ? '其他貨架:填寫' : p);
+                subs = parts.join('|');
+              }
+            }
+            const score = (typeof rawScore === 'number') ? rawScore : (parseFloat(rawScore) || 0);
+            const letter = curCat.indexOf('商品') >= 0 ? 'B' : (curCat.indexOf('客用') >= 0 ? 'C' : 'A');
+            last = { 排序: items.length + 1, 編號: letter + num, 大分類: curCat, 題號名稱: name, 配分: score, 計分方式: method, 每項扣分: per, 子項清單: subs, 規範說明: spec.replace(/\n/g, ' ').replace(/\s+/g, ' ').trim() };
+            items.push(last);
+          } else if (last && rawScore !== '' && !isObs) {
+            const add = (typeof rawScore === 'number') ? rawScore : (parseFloat(rawScore) || 0);
+            if (add) last.配分 = Number(last.配分) + add; // 子列加總（落地/休憩）
+          }
+        }
+      });
+      if (!items.length) return null;
+      items.sort((a, b) => (parseInt(a.題號名稱) || 0) - (parseInt(b.題號名稱) || 0));
+      items.forEach((it, i) => it.排序 = i + 1);
+      return items;
+    }
+
     // 各資料區欄位定義（key＝主鍵中文欄名；fields＝表單欄位；cols＝列表顯示欄）
     const MAINT_AREAS = [
       { kind: 'items', importKind: 'checklist', label: '點檢題目', monthly: true, key: '編號',
@@ -782,7 +833,13 @@
 
       const parseFile = (file) => new Promise((resolve, reject) => {
         const reader = new FileReader();
-        reader.onload = (ev) => { try { const wb = XLSX.read(ev.target.result, { type: 'array' }); resolve(XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { defval: '' })); } catch (err) { reject(err); } };
+        reader.onload = (ev) => {
+          try {
+            const wb = XLSX.read(ev.target.result, { type: 'array' });
+            const ws = wb.Sheets[wb.SheetNames[0]];
+            resolve({ json: XLSX.utils.sheet_to_json(ws, { defval: '' }), aoa: XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' }) });
+          } catch (err) { reject(err); }
+        };
         reader.onerror = reject;
         reader.readAsArrayBuffer(file);
       });
@@ -791,11 +848,17 @@
         const f = e.target.files[0]; e.target.value = ''; if (!f) return;
         if (!configured) { alert('DEMO 模式：設定 GAS 後才會實際寫入試算表'); return; }
         try {
-          const data = await parseFile(f);
+          const parsed = await parseFile(f);
+          let data = parsed.json, converted = false;
+          // 點檢題目：若上傳的是「官方評核表」版面，自動轉成題庫格式
+          if (sub === 'items') {
+            const c = officialFormToRows(parsed.aoa);
+            if (c) { data = c; converted = true; }
+          }
           const r = await SqcApi.importMaster(area.importKind, month, data, f.name);
           setUploaded({ ...uploaded, [sub]: f.name });
           load(); await onReload();
-          alert(`✅ 已匯入「${f.name}」${r.count} 筆（同名覆蓋，以最新為主）`);
+          alert(`✅ 已匯入「${f.name}」${r.count} 筆（同名覆蓋，以最新為主）` + (converted ? '\n（偵測到官方評核表，已自動轉為題庫格式；13題機台等客製子項請用單筆編輯補上）' : ''));
         } catch (err) { alert('匯入失敗：' + err.message); }
       };
 
