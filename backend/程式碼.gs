@@ -27,9 +27,10 @@ function doPost(e) {
 
     // ===== 授權閘門：除 login 外皆需有效 token；管理動作再驗管理者 =====
     var OPEN = { login: 1 };
-    var ADMIN_ONLY = { importMaster: 1, upsertItem: 1, deleteItem: 1, upsertRow: 1, deleteRow: 1, getMaster: 1 };
+    var ADMIN_ONLY = { importMaster: 1, upsertItem: 1, deleteItem: 1, upsertRow: 1, deleteRow: 1, getMaster: 1, getChangeLog: 1 };
+    var sess = null;
     if (!OPEN[action]) {
-      var sess = getSession(req.token);
+      sess = getSession(req.token);
       if (!sess) return json({ ok: false, code: 'AUTH', error: '未登入或連線逾時，請重新登入' });
       if (ADMIN_ONLY[action] && sess.role !== '管理者') return json({ ok: false, error: '此功能需管理者權限' });
     }
@@ -50,9 +51,23 @@ function doPost(e) {
       upsertRow: function () { return upsertRow(p.kind, p.month, p.row); },
       deleteRow: function () { return deleteRowByKind(p.kind, p.month, p.id); },
       getMaster: function () { ensureKindSheet(p.kind, p.month); return { rows: readSheet(sheetForKind(p.kind, p.month)) }; },
+      getChangeLog: function () { return getChangeLog(p.limit); },
     };
     if (!routes[action]) return json({ ok: false, error: '未知動作：' + action });
-    return json({ ok: true, result: routes[action]() });
+    var result = routes[action]();
+
+    // 記錄維護/資料異動軌跡
+    var LOGGED = { importMaster: 'Excel匯入', upsertItem: '題目新增/修改', deleteItem: '刪除題目', upsertRow: '新增/修改', deleteRow: '刪除', deleteRecord: '刪除點檢紀錄', updateRecord: '修改點檢紀錄' };
+    if (LOGGED[action]) {
+      var who = sess ? (sess.name || sess.ad) : '';
+      var target = '', note = '';
+      if (action === 'importMaster') { target = p.kind + (p.month ? '_' + p.month : ''); note = (p.fileName || '') + '（' + ((result && result.count) || 0) + ' 筆）'; }
+      else if (action === 'upsertRow' || action === 'upsertItem') { target = (p.kind || 'checklist') + (p.month ? '_' + p.month : ''); note = ((p.row && (p.row['編號'] || p.row['店號'] || p.row['工號'])) || (p.item && p.item['編號']) || ''); }
+      else if (action === 'deleteRow' || action === 'deleteItem') { target = (p.kind || 'checklist') + (p.month ? '_' + p.month : ''); note = '刪除 ' + (p.id || ''); }
+      else if (action === 'deleteRecord' || action === 'updateRecord') { target = '點檢紀錄_' + p.month; note = p.id || ''; }
+      logChange(who, LOGGED[action], target, note);
+    }
+    return json({ ok: true, result: result });
   } catch (err) {
     return json({ ok: false, error: String(err && err.message || err) });
   }
@@ -124,6 +139,7 @@ function findStaffByAd(ad) {
 // 開場資料：當月題庫 + 店鋪名單(依課別) + 設定
 // ============================================================
 function getBootstrap(month, section) {
+  ensureMonth(month); // 開啟某月即自動建齊該月所有活頁
   return {
     month: month,
     passScore: Number(getSetting('及格分數') || 85),
@@ -192,7 +208,7 @@ function getStores(month, section) {
   return rows.filter(function (r) {
     return !section || String(r['課別']) === String(section);
   }).map(function (r) {
-    return { code: r['店號'], name: r['店名'], section: r['課別'], can_photo: String(r['店鋪型態']).indexOf('無法') < 0 };
+    return { code: r['店號'], name: r['店名'], section: r['課別'], can_photo: (String(r['店鋪型態']).indexOf('無法') < 0 && String(r['店鋪型態']).indexOf('不可') < 0) };
   });
 }
 
@@ -388,7 +404,20 @@ var HEADERS_MAP = {
   staff: ['部別', '課別', '工號', '姓名', '職稱', 'AD帳號', '角色'],
   stores: ['店號', '店名', '課別', '店鋪型態'],
   record: ['紀錄ID', '點檢時間', '部別', '課別', '員編', '點檢人員', '店號', '店名', '店鋪型態', '題庫版本', '合計得分', '等第', '在店店員人數', '簽名身分別', '明細JSON', '觀察JSON', '照片JSON', '紙本照片', '照片資料夾', '同步狀態', '建立時間', '更新時間'],
+  log: ['時間', '操作人', '動作', '對象', '說明'],
 };
+// 異動紀錄（維護區的編輯修改軌跡；單獨活頁）
+function logChange(user, action, target, detail) {
+  try {
+    var sh = ensureSheetNamed('異動紀錄', HEADERS_MAP.log);
+    sh.appendRow([nowStr(), user || '', action || '', target || '', detail || '']);
+  } catch (e) { /* 記錄失敗不影響主流程 */ }
+}
+function getChangeLog(limit) {
+  var rows = readSheet('異動紀錄');
+  limit = limit || 300;
+  return { rows: rows.slice(-limit).reverse().map(function (r) { return { time: toDateTimeStr(r['時間']), user: r['操作人'], action: r['動作'], target: r['對象'], note: r['說明'] }; }) };
+}
 // 找不到活頁就自動建立（附表頭），回傳工作表
 function ensureSheetNamed(name, headers) {
   var book = ssBook();
@@ -403,6 +432,13 @@ function ensureSheetNamed(name, headers) {
   return sh;
 }
 function ensureKindSheet(kind, month) { return ensureSheetNamed(sheetForKind(kind, month), HEADERS_MAP[kind]); }
+// 建齊某月所有分月活頁（題庫/觀察題/店鋪名單/點檢紀錄）
+function ensureMonth(month) {
+  ensureKindSheet('checklist', month);
+  ensureKindSheet('obs', month);
+  ensureKindSheet('roster', month);
+  ensureSheetNamed('點檢紀錄_' + month, HEADERS_MAP.record);
+}
 function upsertRow(kind, month, row) {
   var lock = LockService.getScriptLock(); lock.waitLock(20000);
   try {

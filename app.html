@@ -316,6 +316,7 @@
       // ---- 開場資料（DEMO 用內建 mock；已設定後端則 getBootstrap 載入當月）----
       const [boot, setBoot] = useState({ checklist: DEMO_CHECKLIST, stores: DEMO_STORES, staffs: DEMO_STAFFS, depts: DEMO_DEPTS });
       const [loading, setLoading] = useState(CONFIGURED);
+      const [bootErr, setBootErr] = useState('');
       const reloadBoot = () => SqcApi.getBootstrap(MONTH, '').then(b => {
         setBoot({
           checklist: buildChecklist(b.checklist || [], MONTH, b.observations),
@@ -323,10 +324,11 @@
           staffs: (b.staffs || []).map(s => ({ id: s.empId, name: s.name, dept: s.dept, section: s.section })),
           depts: b.depts || [],
         });
+        setBootErr('');
       });
       useEffect(() => {
         if (!CONFIGURED) return;
-        reloadBoot().catch(e => alert('載入當月資料失敗：' + e.message)).finally(() => setLoading(false));
+        reloadBoot().catch(e => setBootErr(e.message || '載入失敗')).finally(() => setLoading(false));
       }, []);
       const checklist = boot.checklist, STORE_ROSTER = boot.stores, STAFFS = boot.staffs, DEPTS = boot.depts;
       const TOTAL_MAX = useMemo(() => checklist.categories.reduce((s, c) => s + c.max, 0), [checklist]);
@@ -389,7 +391,7 @@
         // 紙本點檢表：所有店皆必須上傳
         if (!paperForm.length) { alert('所有店皆須上傳「紙本點檢表」才能送出'); return; }
 
-        // 照片相關僅可拍照店鋪檢查；無法拍照店鋪只需紙本
+        // 照片相關僅可拍照店鋪檢查；不可拍照店鋪只需紙本
         if (canPhoto) {
           for (const k of checklist.keyObservations) {
             if (!(keyObs[k.id] || []).length) { alert(`「${k.name}」為必拍重點觀察題`); return; }
@@ -441,7 +443,7 @@
         const record = {
           id: recId, month: MONTH, time: basic.time.replace('T', ' '),
           dept: basic.dept, section: basic.section, empId: basic.staffId, staffName: staff ? staff.name : user,
-          storeCode, storeName, storeType: canPhoto ? '可拍照' : '無法拍照',
+          storeCode, storeName, storeType: canPhoto ? '可拍照' : '不可拍照',
           total, grade: grade.txt, staffCount: sign.count, identity: sign.identity,
           detail, observation, photos: photosJson, paperPhotos: (photosJson[[monthFolder, 'SQC點檢表完成照片'].join('/')] || []),
         };
@@ -481,6 +483,27 @@
         XLSX.writeFile(wb, `SQC彙總_${filter.from || '全部'}_${filter.to || ''}.xlsx`);
       };
 
+      // 匯出「當月名單中尚未點檢」的店鋪（本月已點檢者排除；可依課別）
+      const exportUninspected = async () => {
+        let done = new Set();
+        if (CONFIGURED) {
+          const q = await SqcApi.queryRecords(MONTH, { section: filter.section });
+          (q.records || []).forEach(r => done.add(String(r.storeCode || '')));
+        } else {
+          records.forEach(r => done.add(String(r.store)));
+        }
+        const roster = STORE_ROSTER.filter(s => !filter.section || s.section === filter.section);
+        const pending = roster.filter(s => !done.has(String(s.code)) && !done.has(String(s.name)));
+        if (!pending.length) { alert('當月名單中沒有尚未點檢的店鋪 🎉'); return; }
+        const head = ['店號', '店名', '課別', '店鋪型態'];
+        const data = [head].concat(pending.map(s => [s.code, s.name, s.section, s.can_photo ? '可拍照' : '不可拍照']));
+        const ws = XLSX.utils.aoa_to_sheet(data);
+        ws['!cols'] = [{ wch: 12 }, { wch: 18 }, { wch: 10 }, { wch: 10 }];
+        const wb = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(wb, ws, '尚未點檢');
+        XLSX.writeFile(wb, `SQC尚未點檢_${MONTH}${filter.section ? '_' + filter.section : ''}.xlsx`);
+      };
+
       const allSections = DEPTS.flatMap(d => d.sections);
 
       // ============================================================
@@ -504,6 +527,7 @@
           </div>
 
           <div className="max-w-4xl mx-auto p-4 space-y-4">
+            {bootErr && <div className="bg-red-50 border border-red-200 text-red-700 text-sm rounded-lg px-3 py-2 flex justify-between items-center"><span>載入當月資料失敗：{bootErr}（可能連線逾時，請重新登入或稍後再試）</span><button onClick={() => setBootErr('')} className="text-red-400">✕</button></div>}
             {/* ========== 基本資料 ========== */}
             {tab === 'basic' && (
               <div className="bg-white rounded-xl shadow-sm p-5 space-y-4">
@@ -522,14 +546,14 @@
                       <option value="">— 請選擇 —</option>{STAFFS.map(s => <option key={s.id} value={s.id}>{s.name}（{s.section}）</option>)}</select></div>
                   <div><label className="block text-xs text-slate-500 mb-1">店鋪型態</label>
                     <select value={basic.storeType} onChange={e => setBasic({ ...basic, storeType: e.target.value })} className="w-full px-3 py-2 border border-slate-300 rounded-lg">
-                      <option value="">— 依名單帶出 —</option><option value="photo">可拍照店鋪</option><option value="nophoto">無法拍照店鋪</option></select></div>
+                      <option value="">— 依名單帶出 —</option><option value="photo">可拍照店鋪</option><option value="nophoto">不可拍照店鋪</option></select></div>
                 </div>
 
                 <div>
                   <label className="block text-xs text-slate-500 mb-1">點檢店鋪名單<span className="text-slate-400">（依課別自動帶出，亦可自行新增）</span></label>
                   <select value={basic.storeCode} onChange={e => { const st = STORE_ROSTER.find(x => x.code === e.target.value); setBasic({ ...basic, storeCode: e.target.value, customStore: '', storeType: st ? (st.can_photo ? 'photo' : 'nophoto') : basic.storeType }); }} className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm">
                     <option value="">— 請選擇店鋪 —</option>
-                    {sectionStores.map(s => <option key={s.code} value={s.code}>{s.code} {s.name}（{s.can_photo ? '可拍照' : '無法拍照'}）</option>)}
+                    {sectionStores.map(s => <option key={s.code} value={s.code}>{s.code} {s.name}（{s.can_photo ? '可拍照' : '不可拍照'}）</option>)}
                     <option value="__custom">＋ 自行新增店鋪…</option>
                   </select>
                   {basic.storeCode === '__custom' && (
@@ -539,7 +563,7 @@
 
                 {(store || basic.customStore) && (
                   <div className={"text-sm px-3 py-2 rounded-lg " + (canPhoto ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700")}>
-                    店鋪型態：<b>{canPhoto ? '可拍照店鋪' : '無法拍照店鋪'}</b>
+                    店鋪型態：<b>{canPhoto ? '可拍照店鋪' : '不可拍照店鋪'}</b>
                     {canPhoto ? 'NG 需缺失照片；無缺失需拍滿分照片區；所有店皆須上傳紙本' : '免拍各項照片，僅須上傳紙本點檢表'}
                   </div>
                 )}
@@ -555,7 +579,7 @@
               <>
                 <div className="bg-white rounded-xl shadow-sm px-4 py-3 text-sm text-slate-600 flex flex-wrap gap-x-4 gap-y-1">
                   <span>🏪 {store ? store.name : basic.customStore}</span><span>👤 {STAFFS.find(s => s.id === basic.staffId)?.name || '—'}</span><span>📅 {basic.time.slice(0, 10)}</span>
-                  <span className={"px-2 rounded " + (canPhoto ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700")}>{canPhoto ? '可拍照' : '無法拍照'}</span>
+                  <span className={"px-2 rounded " + (canPhoto ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700")}>{canPhoto ? '可拍照' : '不可拍照'}</span>
                 </div>
 
                 {checklist.categories.map(cat => {
@@ -677,7 +701,8 @@
                   <div><label className="block text-xs text-slate-500 mb-1">起始日期</label><input type="date" value={filter.from} onChange={e => setFilter({ ...filter, from: e.target.value })} className="px-3 py-2 border border-slate-300 rounded-lg" /></div>
                   <div><label className="block text-xs text-slate-500 mb-1">結束日期</label><input type="date" value={filter.to} onChange={e => setFilter({ ...filter, to: e.target.value })} className="px-3 py-2 border border-slate-300 rounded-lg" /></div>
                   <div><label className="block text-xs text-slate-500 mb-1">課別</label><select value={filter.section} onChange={e => setFilter({ ...filter, section: e.target.value })} className="px-3 py-2 border border-slate-300 rounded-lg"><option value="">全部</option>{allSections.map(s => <option key={s}>{s}</option>)}</select></div>
-                  <button onClick={exportExcel} className="ml-auto px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg">📤 匯出 Excel</button>
+                  <button onClick={exportUninspected} className="ml-auto px-4 py-2 bg-amber-500 hover:bg-amber-600 text-white rounded-lg">🏪 尚未點檢名單</button>
+                  <button onClick={exportExcel} className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg">📤 匯出 Excel</button>
                 </div>
                 <div className="grid grid-cols-3 gap-3">
                   <div className="bg-white rounded-xl shadow-sm p-4 text-center"><div className="text-xs text-slate-500">執行店數</div><div className="text-3xl font-extrabold text-emerald-600">{filtered.length}</div></div>
@@ -727,11 +752,11 @@
       { kind: 'roster', importKind: 'roster', label: '店鋪名單', monthly: true, key: '店號',
         note: '分月轉入（本月要點檢的店）；店號建議設文字格式避免掉 0',
         cols: ['店號', '店名', '課別', '店鋪型態'],
-        fields: [{ k: '店號', t: 'text' }, { k: '店名', t: 'text' }, { k: '課別', t: 'text' }, { k: '店鋪型態', t: 'select', opts: ['可拍照', '無法拍照'] }] },
+        fields: [{ k: '店號', t: 'text' }, { k: '店名', t: 'text' }, { k: '課別', t: 'text' }, { k: '店鋪型態', t: 'select', opts: ['可拍照', '不可拍照'] }] },
       { kind: 'stores', importKind: 'stores', label: '店鋪主檔', monthly: false, key: '店號',
         note: '全門市主檔（常駐）',
         cols: ['店號', '店名', '課別', '店鋪型態'],
-        fields: [{ k: '店號', t: 'text' }, { k: '店名', t: 'text' }, { k: '課別', t: 'text' }, { k: '店鋪型態', t: 'select', opts: ['可拍照', '無法拍照'] }] },
+        fields: [{ k: '店號', t: 'text' }, { k: '店名', t: 'text' }, { k: '課別', t: 'text' }, { k: '店鋪型態', t: 'select', opts: ['可拍照', '不可拍照'] }] },
       { kind: 'staffs', importKind: 'staff', label: '點檢人員', monthly: false, key: '工號',
         note: '常駐；管理者需填 AD帳號 與 角色=管理者。基本資料的點檢人員下拉只帶「有填部別或課別」的人',
         cols: ['姓名', '部別', '課別', '職稱', '角色'],
@@ -744,10 +769,13 @@
       const [rows, setRows] = useState([]);
       const [editing, setEditing] = useState(null);
       const [uploaded, setUploaded] = useState({});
+      const [logRows, setLogRows] = useState([]);
+      const isLog = sub === 'log';
       const area = MAINT_AREAS.find(a => a.kind === sub);
 
       const load = () => {
-        if (!configured) { setRows([]); return; }
+        if (!configured) { setRows([]); setLogRows([]); return; }
+        if (isLog) { SqcApi.getChangeLog(300).then(r => setLogRows(r.rows || [])).catch(() => setLogRows([])); return; }
         SqcApi.getMaster(area.importKind, month).then(r => setRows(r.rows || [])).catch(() => setRows([]));
       };
       useEffect(() => { setEditing(null); load(); }, [sub, month]);
@@ -784,14 +812,38 @@
         try { await SqcApi.deleteRow(area.importKind, month, id); load(); await onReload(); } catch (e) { alert('刪除失敗：' + e.message); }
       };
 
-      const isEdit = editing && rows.some(r => String(r[area.key]) === String(editing[area.key]) && String(editing[area.key]) !== '');
+      const isEdit = !isLog && editing && rows.some(r => String(r[area.key]) === String(editing[area.key]) && String(editing[area.key]) !== '');
 
       return (
         <div className="space-y-4">
           <div className="bg-white rounded-xl shadow-sm p-2 flex flex-wrap gap-1">
             {MAINT_AREAS.map(a => <button key={a.kind} onClick={() => setSub(a.kind)} className={"px-3 py-1.5 text-sm rounded-lg " + (sub === a.kind ? "bg-emerald-600 text-white" : "text-slate-600 hover:bg-slate-100")}>{a.label}{a.monthly ? '（分月）' : ''}</button>)}
+            <button onClick={() => setSub('log')} className={"px-3 py-1.5 text-sm rounded-lg " + (isLog ? "bg-emerald-600 text-white" : "text-slate-600 hover:bg-slate-100")}>📜 異動紀錄</button>
           </div>
 
+          {isLog && (
+            <div className="bg-white rounded-xl shadow-sm p-5">
+              <div className="flex items-center justify-between mb-3">
+                <h3 className="font-bold text-slate-700">📜 異動紀錄</h3>
+                <button onClick={load} className="text-sm px-3 py-1.5 bg-slate-100 rounded-lg hover:bg-slate-200">重新整理</button>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead><tr className="text-left text-slate-500 border-b bg-slate-50"><th className="py-2 px-2">時間</th><th className="px-2">操作人</th><th className="px-2">動作</th><th className="px-2">對象</th><th className="px-2">說明</th></tr></thead>
+                  <tbody>
+                    {logRows.map((r, i) => (
+                      <tr key={i} className="border-b border-slate-100">
+                        <td className="py-2 px-2 text-slate-500 whitespace-nowrap">{r.time}</td><td className="px-2">{r.user}</td><td className="px-2">{r.action}</td><td className="px-2 text-slate-600">{r.target}</td><td className="px-2 text-slate-500">{r.note}</td>
+                      </tr>
+                    ))}
+                    {logRows.length === 0 && <tr><td colSpan="5" className="py-6 text-center text-slate-400">{configured ? '尚無異動紀錄' : 'DEMO 模式不載入'}</td></tr>}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {!isLog && (
           <div className="bg-white rounded-xl shadow-sm p-5">
             <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
               <div>
@@ -841,6 +893,7 @@
               </div>
             )}
           </div>
+          )}
         </div>
       );
     }

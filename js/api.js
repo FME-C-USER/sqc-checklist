@@ -41,5 +41,6 @@
     upsertRow: (kind, month, row) => call('upsertRow', { kind, month, row }),
     deleteRow: (kind, month, id) => call('deleteRow', { kind, month, id }),
     getMaster: (kind, month) => call('getMaster', { kind, month }),
+    getChangeLog: (limit) => call('getChangeLog', { limit }),
   };
 })();
