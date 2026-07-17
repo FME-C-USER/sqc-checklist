@@ -49,7 +49,7 @@ function doPost(e) {
       deleteItem: function () { return deleteItem(p.month, p.id); },
       upsertRow: function () { return upsertRow(p.kind, p.month, p.row); },
       deleteRow: function () { return deleteRowByKind(p.kind, p.month, p.id); },
-      getMaster: function () { return { rows: readSheet(sheetForKind(p.kind, p.month)) }; },
+      getMaster: function () { ensureKindSheet(p.kind, p.month); return { rows: readSheet(sheetForKind(p.kind, p.month)) }; },
     };
     if (!routes[action]) return json({ ok: false, error: '未知動作：' + action });
     return json({ ok: true, result: routes[action]() });
@@ -231,9 +231,7 @@ function submitRecord(rec) {
   var lock = LockService.getScriptLock();
   lock.waitLock(20000);
   try {
-    var sheetName = '點檢紀錄_' + rec.month;
-    var sh = SpreadsheetApp.openById(SPREADSHEET_ID).getSheetByName(sheetName);
-    if (!sh) throw new Error('找不到活頁：' + sheetName);
+    var sh = ensureSheetNamed('點檢紀錄_' + rec.month, HEADERS_MAP.record); // 缺活頁自動建立
     var id = rec.id || (Utilities.getUuid());
     var now = nowStr();
     var row = recordToRow(sh, Object.assign({}, rec, { id: id, createdAt: now, updatedAt: now }));
@@ -321,11 +319,8 @@ function importMaster(kind, month, rows, fileName) {
       'staff': '點檢人員', 'stores': '店鋪主檔',
       'roster': '店鋪名單_' + month, 'checklist': '題庫_' + month, 'obs': '觀察題_' + month,
     };
-    var name = map[kind];
-    if (!name) throw new Error('未知匯入類型：' + kind);
-    var book = SpreadsheetApp.openById(SPREADSHEET_ID);
-    var sh = book.getSheetByName(name);
-    if (!sh) throw new Error('找不到活頁：' + name + '，請先執行 setupMonth');
+    if (!map[kind]) throw new Error('未知匯入類型：' + kind);
+    var sh = ensureKindSheet(kind, month); // 缺活頁自動建立
     var head = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0];
     // 清空舊資料（保留表頭）→ 以最新上傳為主
     if (sh.getLastRow() > 1) sh.getRange(2, 1, sh.getLastRow() - 1, head.length).clearContent();
@@ -384,11 +379,35 @@ function sheetForKind(kind, month) {
 function keyForKind(kind) {
   return { checklist: '編號', obs: '編號', roster: '店號', staff: '工號', stores: '店號' }[kind];
 }
+
+// 各活頁表頭（缺活頁時自動建立用；與 setup.gs 保持一致）
+var HEADERS_MAP = {
+  checklist: ['排序', '編號', '大分類', '題號名稱', '配分', '計分方式', '每項扣分', '子項清單', '規範說明'],
+  obs: ['排序', '編號', '類型', '題目名稱', '選項', '顯示條件', '必填'],
+  roster: ['店號', '店名', '課別', '店鋪型態'],
+  staff: ['部別', '課別', '工號', '姓名', '職稱', 'AD帳號', '角色'],
+  stores: ['店號', '店名', '課別', '店鋪型態'],
+  record: ['紀錄ID', '點檢時間', '部別', '課別', '員編', '點檢人員', '店號', '店名', '店鋪型態', '題庫版本', '合計得分', '等第', '在店店員人數', '簽名身分別', '明細JSON', '觀察JSON', '照片JSON', '紙本照片', '照片資料夾', '同步狀態', '建立時間', '更新時間'],
+};
+// 找不到活頁就自動建立（附表頭），回傳工作表
+function ensureSheetNamed(name, headers) {
+  var book = ssBook();
+  var sh = book.getSheetByName(name);
+  if (!sh) {
+    sh = book.insertSheet(name);
+    if (headers && headers.length) {
+      sh.getRange(1, 1, 1, headers.length).setValues([headers]).setFontWeight('bold').setBackground('#334155').setFontColor('#ffffff');
+      sh.setFrozenRows(1);
+    }
+  }
+  return sh;
+}
+function ensureKindSheet(kind, month) { return ensureSheetNamed(sheetForKind(kind, month), HEADERS_MAP[kind]); }
 function upsertRow(kind, month, row) {
   var lock = LockService.getScriptLock(); lock.waitLock(20000);
   try {
-    var name = sheetForKind(kind, month); if (!name) throw new Error('未知類型：' + kind);
-    var sh = ssBook().getSheetByName(name); if (!sh) throw new Error('找不到活頁：' + name);
+    if (!sheetForKind(kind, month)) throw new Error('未知類型：' + kind);
+    var sh = ensureKindSheet(kind, month); // 缺活頁自動建立
     var head = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0];
     var keyCol = keyForKind(kind);
     var out = head.map(function (h) { return row[h] != null ? row[h] : ''; });
