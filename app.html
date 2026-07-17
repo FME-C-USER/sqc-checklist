@@ -732,10 +732,10 @@
         note: '全門市主檔（常駐）',
         cols: ['店號', '店名', '課別', '店鋪型態'],
         fields: [{ k: '店號', t: 'text' }, { k: '店名', t: 'text' }, { k: '課別', t: 'text' }, { k: '店鋪型態', t: 'select', opts: ['可拍照', '無法拍照'] }] },
-      { kind: 'staffs', importKind: 'staff', label: '點檢人員', monthly: false, key: '員編',
-        note: '常駐；管理者需填 AD帳號 與 角色=管理者，一般點檢員可留空',
-        cols: ['員編', '姓名', '課別', '角色'],
-        fields: [{ k: '員編', t: 'text' }, { k: '姓名', t: 'text' }, { k: '部別', t: 'text' }, { k: '課別', t: 'text' }, { k: 'AD帳號', t: 'text' }, { k: '角色', t: 'select', opts: ['點檢員', '管理者'] }] },
+      { kind: 'staffs', importKind: 'staff', label: '點檢人員', monthly: false, key: '工號',
+        note: '常駐；管理者需填 AD帳號 與 角色=管理者。基本資料的點檢人員下拉只帶「有填部別或課別」的人',
+        cols: ['姓名', '部別', '課別', '職稱', '角色'],
+        fields: [{ k: '部別', t: 'text' }, { k: '課別', t: 'text' }, { k: '工號', t: 'text' }, { k: '姓名', t: 'text' }, { k: '職稱', t: 'text' }, { k: 'AD帳號', t: 'text' }, { k: '角色', t: 'select', opts: ['點檢員', '管理者'] }] },
     ];
 
     function MaintainPanel({ configured, curMonth, onReload }) {

@@ -112,7 +112,7 @@ function findStaffByAd(ad) {
   for (var i = 0; i < rows.length; i++) {
     if (String(rows[i]['AD帳號'] || '').toLowerCase() === ad) {
       return {
-        empId: rows[i]['員編'], name: rows[i]['姓名'], dept: rows[i]['部別'],
+        empId: rows[i]['工號'], name: rows[i]['姓名'], dept: rows[i]['部別'], title: rows[i]['職稱'],
         section: rows[i]['課別'], role: rows[i]['角色'] || '點檢員', ad: rows[i]['AD帳號'],
       };
     }
@@ -130,8 +130,11 @@ function getBootstrap(month, section) {
     checklist: getChecklist(month),
     observations: getObservations(month),
     stores: getStores(month, section),
-    staffs: readSheet('點檢人員').map(function (r) {
-      return { empId: r['員編'], name: r['姓名'], dept: r['部別'], section: r['課別'] };
+    // 點檢人員下拉：只帶「有填部別或課別」的人員（純管理者未填部/課者不列入下拉，但仍可登入）
+    staffs: readSheet('點檢人員').filter(function (r) {
+      return String(r['部別'] || '').trim() !== '' || String(r['課別'] || '').trim() !== '';
+    }).map(function (r) {
+      return { empId: r['工號'], name: r['姓名'], dept: r['部別'], section: r['課別'], title: r['職稱'] };
     }),
     depts: distinctDepts(),
   };
@@ -379,7 +382,7 @@ function sheetForKind(kind, month) {
   return { checklist: '題庫_' + month, obs: '觀察題_' + month, roster: '店鋪名單_' + month, staff: '點檢人員', stores: '店鋪主檔' }[kind];
 }
 function keyForKind(kind) {
-  return { checklist: '編號', obs: '編號', roster: '店號', staff: '員編', stores: '店號' }[kind];
+  return { checklist: '編號', obs: '編號', roster: '店號', staff: '工號', stores: '店號' }[kind];
 }
 function upsertRow(kind, month, row) {
   var lock = LockService.getScriptLock(); lock.waitLock(20000);
