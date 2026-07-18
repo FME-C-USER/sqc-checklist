@@ -318,7 +318,7 @@
       const [tab, setTab] = useState('basic');
 
       // ---- 基本資料 ----（時間用台北；月份由點檢時間決定；登入預帶自己的部/課/姓名）
-      const [basic, setBasic] = useState({ time: taipeiNow(), dept: currentUser.dept || '', section: currentUser.section || '', staffId: currentUser.empId || '', storeCode: '', customStore: '', customInfo: null, storeType: '' });
+      const [basic, setBasic] = useState({ time: taipeiNow(), dept: currentUser.dept || '', section: currentUser.section || '', staffId: currentUser.empId || '', storeCode: '', customStore: '', customInfo: null, storeType: '', noPhotoReason: '', noPhotoOther: '' });
       const workMonth = rocMonth(basic.time); // 依點檢時間對應的民國年月
 
       // ---- 開場資料（依 workMonth 載入；DEMO 用內建 mock）----
@@ -347,8 +347,13 @@
       const sectionStores = STORE_ROSTER.filter(s => !basic.section || s.section === basic.section);
       const store = STORE_ROSTER.find(s => s.code === basic.storeCode);
       const effStore = store || basic.customInfo; // 名單選的 或 自行新增(比對主檔後)的店
-      // 店鋪型態必須由點檢人員手選（可拍照/不可拍照）
+      // 可否拍照必須由點檢人員手選；不可拍照需再選原因
       const canPhoto = basic.storeType === 'photo';
+      const noPhotoReasonText = basic.storeType === 'nophoto'
+        ? (basic.noPhotoReason === '其他' ? ('其他：' + (basic.noPhotoOther || '').trim()) : basic.noPhotoReason)
+        : '';
+      const reasonOk = basic.storeType !== 'nophoto' || (basic.noPhotoReason && (basic.noPhotoReason !== '其他' || (basic.noPhotoOther || '').trim()));
+      const readyToWork = !!effStore && !!basic.storeType && reasonOk;
 
       // ---- 點檢作業 ----
       const [scores, setScores] = useState({});
@@ -410,7 +415,8 @@
 
       const submit = () => {
         if (!effStore) { alert('請先在「基本資料」選擇店鋪'); setTab('basic'); return; }
-        if (!basic.storeType) { alert('請先在「基本資料」選擇店鋪型態'); setTab('basic'); return; }
+        if (!basic.storeType) { alert('請先在「基本資料」選擇可否拍照'); setTab('basic'); return; }
+        if (!reasonOk) { alert('不可拍照店鋪請選擇原因'); setTab('basic'); return; }
         if (!basic.staffId) { alert('請先在「基本資料」選擇點檢人員'); setTab('basic'); return; }
         if (!sign.count) { alert('請選擇「在店店員人數」'); return; }
         if (!sign.identity) { alert('請選擇「簽名店鋪人員身分別」'); return; }
@@ -471,6 +477,7 @@
           dept: basic.dept, section: basic.section, empId: basic.staffId, staffName: staff ? staff.name : user,
           storeCode, storeName, storeType: canPhoto ? '可拍照' : '不可拍照',
           total, grade: grade.txt, staffCount: sign.count, identity: sign.identity,
+          note: noPhotoReasonText, // 備註：不可拍照原因
           detail, observation, photos: photosJson, paperPhotos: (photosJson[[monthFolder, 'SQC點檢表完成照片'].join('/')] || []),
         };
 
@@ -602,28 +609,42 @@
                 </div>
 
                 <div>
-                  <label className="block text-xs text-slate-500 mb-1">店鋪型態<span className="text-red-500">（必選）</span></label>
+                  <label className="block text-xs text-slate-500 mb-1">可否拍照<span className="text-red-500">（必選）</span><span className="text-slate-400"> — 決定是否需上傳缺失照片</span></label>
                   <div className="flex gap-2">
-                    <button type="button" onClick={() => setBasic({ ...basic, storeType: 'photo' })} className={"flex-1 py-2.5 rounded-lg border font-medium " + (basic.storeType === 'photo' ? "bg-emerald-600 text-white border-emerald-600" : "bg-white text-slate-600 border-slate-300")}>📷 可拍照店鋪</button>
+                    <button type="button" onClick={() => setBasic({ ...basic, storeType: 'photo', noPhotoReason: '', noPhotoOther: '' })} className={"flex-1 py-2.5 rounded-lg border font-medium " + (basic.storeType === 'photo' ? "bg-emerald-600 text-white border-emerald-600" : "bg-white text-slate-600 border-slate-300")}>📷 可拍照店鋪</button>
                     <button type="button" onClick={() => setBasic({ ...basic, storeType: 'nophoto' })} className={"flex-1 py-2.5 rounded-lg border font-medium " + (basic.storeType === 'nophoto' ? "bg-amber-500 text-white border-amber-500" : "bg-white text-slate-600 border-slate-300")}>🚫 不可拍照店鋪</button>
                   </div>
+                  {basic.storeType === 'nophoto' && (
+                    <div className="mt-2 bg-amber-50 border border-amber-200 rounded-lg p-3">
+                      <div className="text-xs text-amber-700 mb-1.5">不可拍照原因<span className="text-red-500">（必選）</span></div>
+                      <div className="flex flex-wrap gap-2">
+                        {['廠區店', '營區店', '其他'].map(r => (
+                          <button type="button" key={r} onClick={() => setBasic({ ...basic, noPhotoReason: r })} className={"text-sm px-3 py-1.5 rounded-lg border " + (basic.noPhotoReason === r ? "bg-amber-500 text-white border-amber-500" : "bg-white text-slate-600 border-slate-300")}>{r}</button>
+                        ))}
+                      </div>
+                      {basic.noPhotoReason === '其他' && (
+                        <input value={basic.noPhotoOther} maxLength={30} onChange={e => setBasic({ ...basic, noPhotoOther: e.target.value.slice(0, 30) })}
+                          placeholder="請輸入原因（上限30字）" className="w-full mt-2 px-3 py-2 border border-slate-300 rounded-lg text-sm" />
+                      )}
+                    </div>
+                  )}
                 </div>
 
                 {effStore && basic.storeType && (
                   <div className={"text-sm px-3 py-2 rounded-lg " + (canPhoto ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700")}>
-                    店鋪型態：<b>{canPhoto ? '可拍照店鋪' : '不可拍照店鋪'}</b>
-                    {canPhoto ? 'NG 需缺失照片；無缺失需拍滿分照片區；所有店皆須上傳紙本' : '免拍各項照片，僅須上傳紙本點檢表'}
+                    <b>{canPhoto ? '可拍照店鋪' : '不可拍照店鋪'}</b>
+                    {canPhoto ? 'NG 需缺失照片；無缺失需拍滿分照片區；所有店皆須上傳紙本' : `免拍各項照片，僅須上傳紙本點檢表${noPhotoReasonText ? '（原因：' + noPhotoReasonText + '）' : ''}`}
                   </div>
                 )}
 
-                <button onClick={() => setTab('work')} disabled={!effStore || !basic.storeType} className="w-full py-3 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white font-semibold rounded-lg">
-                  {!effStore ? '請先選擇店鋪' : !basic.storeType ? '請先選擇店鋪型態' : '前往點檢作業 →'}
+                <button onClick={() => setTab('work')} disabled={!readyToWork} className="w-full py-3 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white font-semibold rounded-lg">
+                  {!effStore ? '請先選擇店鋪' : !basic.storeType ? '請先選擇可否拍照' : !reasonOk ? '請選擇不可拍照原因' : '前往點檢作業 →'}
                 </button>
               </div>
             )}
 
             {/* ========== 點檢作業 ========== */}
-            {tab === 'work' && (!effStore || !basic.storeType ? (
+            {tab === 'work' && (!readyToWork ? (
               <div className="bg-white rounded-xl shadow-sm p-8 text-center text-slate-500">請先到「基本資料」選好店鋪與店鋪型態<br /><button onClick={() => setTab('basic')} className="mt-3 px-4 py-2 bg-emerald-600 text-white rounded-lg">前往基本資料</button></div>
             ) : (
               <>
@@ -773,7 +794,7 @@
           </div>
 
           {/* 底部總分（僅點檢作業） */}
-          {tab === 'work' && effStore && basic.storeType && (
+          {tab === 'work' && readyToWork && (
             <div className="fixed bottom-0 left-0 right-0 bg-white border-t shadow-2xl z-30">
               <div className="max-w-4xl mx-auto px-4 py-3 flex items-center justify-between">
                 <div><div className="text-xs text-slate-400">合計得分（及格 {PASS_SCORE}）</div>

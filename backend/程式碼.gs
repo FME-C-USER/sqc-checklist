@@ -419,7 +419,7 @@ var HEADERS_MAP = {
   roster: ['店號', '店名', '課別', '店鋪型態'],
   staff: ['部別', '課別', '工號', '姓名', '職稱', 'AD帳號', '角色'],
   stores: ['序號', '店號', '店名', '營業本部名稱', '營業部名稱', '營業課名稱', '營業擔當', '縣市', '鄉鎮', '地址'],
-  record: ['紀錄ID', '點檢時間', '部別', '課別', '員編', '點檢人員', '店號', '店名', '店鋪型態', '題庫版本', '合計得分', '等第', '在店店員人數', '簽名身分別', '明細JSON', '觀察JSON', '照片JSON', '紙本照片', '照片資料夾', '同步狀態', '建立時間', '更新時間'],
+  record: ['紀錄ID', '點檢時間', '部別', '課別', '員編', '點檢人員', '店號', '店名', '店鋪型態', '備註', '題庫版本', '合計得分', '等第', '在店店員人數', '簽名身分別', '明細JSON', '觀察JSON', '照片JSON', '紙本照片', '照片資料夾', '同步狀態', '建立時間', '更新時間'],
   log: ['時間', '操作人', '動作', '對象', '說明'],
 };
 // 異動紀錄（維護區的編輯修改軌跡；單獨活頁）
@@ -533,7 +533,7 @@ function recordToRow(sh, rec) {
   var map = {
     '紀錄ID': rec.id, '點檢時間': rec.time, '部別': rec.dept, '課別': rec.section,
     '員編': rec.empId, '點檢人員': rec.staffName, '店號': rec.storeCode, '店名': rec.storeName,
-    '店鋪型態': rec.storeType, '題庫版本': rec.month, '合計得分': rec.total, '等第': rec.grade,
+    '店鋪型態': rec.storeType, '備註': rec.note || '', '題庫版本': rec.month, '合計得分': rec.total, '等第': rec.grade,
     '在店店員人數': rec.staffCount, '簽名身分別': rec.identity,
     '明細JSON': JSON.stringify(rec.detail || {}), '觀察JSON': JSON.stringify(rec.observation || {}),
     '照片JSON': JSON.stringify(rec.photos || {}), '紙本照片': (rec.paperPhotos || []).join(','),
@@ -546,7 +546,7 @@ function recordToRow(sh, rec) {
 function rowToRecord(r) {
   return {
     id: r['紀錄ID'], time: toDateTimeStr(r['點檢時間']), dept: r['部別'], section: r['課別'], empId: r['員編'],
-    staffName: r['點檢人員'], storeCode: r['店號'], storeName: r['店名'], storeType: r['店鋪型態'],
+    staffName: r['點檢人員'], storeCode: r['店號'], storeName: r['店名'], storeType: r['店鋪型態'], note: r['備註'],
     month: r['題庫版本'], total: r['合計得分'], grade: r['等第'], staffCount: r['在店店員人數'],
     identity: r['簽名身分別'], detail: safeJson(r['明細JSON']), observation: safeJson(r['觀察JSON']),
     photos: safeJson(r['照片JSON']), paperPhotos: String(r['紙本照片'] || '').split(',').filter(Boolean),
@@ -557,7 +557,7 @@ function safeJson(s) { try { return JSON.parse(s || '{}'); } catch (e) { return 
 function mapToInternal(merged, month, id) {
   return {
     id: id, time: merged['點檢時間'], dept: merged['部別'], section: merged['課別'], empId: merged['員編'],
-    staffName: merged['點檢人員'], storeCode: merged['店號'], storeName: merged['店名'], storeType: merged['店鋪型態'],
+    staffName: merged['點檢人員'], storeCode: merged['店號'], storeName: merged['店名'], storeType: merged['店鋪型態'], note: merged['備註'],
     month: month, total: merged['合計得分'], grade: merged['等第'], staffCount: merged['在店店員人數'],
     identity: merged['簽名身分別'], detail: merged.detail, observation: merged.observation, photos: merged.photos,
     paperPhotos: merged.paperPhotos, folderUrl: merged['照片資料夾'], createdAt: merged['建立時間'], updatedAt: merged.updatedAt,
