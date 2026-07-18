@@ -224,7 +224,7 @@ function getStores(month, section) {
   return rows.filter(function (r) {
     return !section || String(r['課別']) === String(section);
   }).map(function (r) {
-    return { code: r['店號'], name: r['店名'], section: r['課別'], can_photo: (String(r['店鋪型態']).indexOf('無法') < 0 && String(r['店鋪型態']).indexOf('不可') < 0) };
+    return { code: String(r['店號']), name: r['店名'], section: r['課別'], type: r['店鋪型態'] || '一般店' };
   });
 }
 

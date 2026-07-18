@@ -126,11 +126,11 @@
     ];
     // 店鋪名單（分月轉入，含課別＋店鋪型態）
     const DEMO_STORES = [
-      { code: '001234', name: '台北車站門市', section: '北一課', can_photo: true },
-      { code: '002187', name: '信義威秀門市', section: '北一課', can_photo: true },
-      { code: '003920', name: '內湖科技門市', section: '北二課', can_photo: false },
-      { code: '004556', name: '板橋大遠百門市', section: '中區課', can_photo: true },
-      { code: '005781', name: '桃園機場門市', section: '中區課', can_photo: false },
+      { code: '001234', name: '台北車站門市', section: '北一課', type: '一般店' },
+      { code: '002187', name: '信義威秀門市', section: '北一課', type: '隨盤點點檢店' },
+      { code: '003920', name: '內湖科技門市', section: '北二課', type: '一般店' },
+      { code: '004556', name: '板橋大遠百門市', section: '中區課', type: '一般店' },
+      { code: '005781', name: '桃園機場門市', section: '中區課', type: '隨盤點點檢店' },
     ];
 
     // 題庫（11506 版）— type: subdeduct(分區扣分，點選缺失區由滿分往下扣) / deduct(整題扣分制)
@@ -529,7 +529,7 @@
         const pending = roster.filter(s => !done.has(String(s.code)) && !done.has(String(s.name)));
         if (!pending.length) { alert('當月名單中沒有尚未點檢的店鋪 🎉'); return; }
         const head = ['店號', '店名', '課別', '店鋪型態'];
-        const data = [head].concat(pending.map(s => [s.code, s.name, s.section, s.can_photo ? '可拍照' : '不可拍照']));
+        const data = [head].concat(pending.map(s => [s.code, s.name, s.section, s.type || '一般店']));
         const ws = XLSX.utils.aoa_to_sheet(data);
         ws['!cols'] = [{ wch: 12 }, { wch: 18 }, { wch: 10 }, { wch: 10 }];
         const wb = XLSX.utils.book_new();
@@ -581,9 +581,9 @@
 
                 <div>
                   <label className="block text-xs text-slate-500 mb-1">點檢店鋪名單<span className="text-slate-400">（依課別自動帶出，亦可自行新增）</span></label>
-                  <select value={basic.storeCode} onChange={e => { const st = STORE_ROSTER.find(x => x.code === e.target.value); setBasic({ ...basic, storeCode: e.target.value, customStore: '', customInfo: null, storeType: st ? (st.can_photo ? 'photo' : 'nophoto') : '' }); }} className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm">
+                  <select value={basic.storeCode} onChange={e => setBasic({ ...basic, storeCode: e.target.value, customStore: '', customInfo: null })} className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm">
                     <option value="">— 請選擇店鋪 —</option>
-                    {sectionStores.map(s => <option key={s.code} value={s.code}>{s.code} {s.name}（{s.can_photo ? '可拍照' : '不可拍照'}）</option>)}
+                    {sectionStores.map(s => <option key={s.code} value={s.code}>{s.code} {s.name}{s.type ? '（' + s.type + '）' : ''}</option>)}
                     <option value="__custom">＋ 自行新增店鋪…</option>
                   </select>
                   {basic.storeCode === '__custom' && (
@@ -861,6 +861,27 @@
       return items;
     }
 
+    // 官方委外名單(多分頁) → 標準店鋪名單列。找含「店號＋主責課」的分頁；非此格式回 null。
+    function rosterToRows(sheets) {
+      if (!sheets || !sheets.length) return null;
+      const clean = s => String(s == null ? '' : s).replace(/[\r\n\s]/g, '').trim();
+      for (const sh of sheets) {
+        const head = (sh.aoa[0] || []).map(clean);
+        const ci = { code: head.indexOf('店號'), name: head.indexOf('店名'), sect: head.findIndex(h => h.indexOf('主責課') >= 0), follow: head.indexOf('隨盤點') };
+        if (ci.code < 0 || ci.sect < 0) continue; // 不是名單資料頁
+        const rows = [];
+        for (let i = 1; i < sh.aoa.length; i++) {
+          const r = sh.aoa[i] || [];
+          const code = String(r[ci.code] == null ? '' : r[ci.code]).trim();
+          if (!code) continue;
+          const follow = ci.follow >= 0 ? String(r[ci.follow] == null ? '' : r[ci.follow]).trim() : '';
+          rows.push({ 店號: code, 店名: String(r[ci.name] || '').trim(), 課別: String(r[ci.sect] || '').trim(), 店鋪型態: follow ? '隨盤點點檢店' : '一般店' });
+        }
+        if (rows.length) return rows;
+      }
+      return null;
+    }
+
     // 各資料區欄位定義（key＝主鍵中文欄名；fields＝表單欄位；cols＝列表顯示欄）
     const MAINT_AREAS = [
       { kind: 'items', importKind: 'checklist', label: '點檢題目', monthly: true, key: '編號',
@@ -872,9 +893,9 @@
         cols: ['編號', '類型', '題目名稱', '選項'],
         fields: [{ k: '排序', t: 'number' }, { k: '編號', t: 'text' }, { k: '類型', t: 'select', opts: ['拍照', '有無', '符合'] }, { k: '題目名稱', t: 'text' }, { k: '選項', t: 'text', ph: '有|無|廁所封閉' }, { k: '顯示條件', t: 'select', opts: ['always', 'has', 'hasOrClosed'] }, { k: '必填', t: 'select', opts: ['否', '是'] }] },
       { kind: 'roster', importKind: 'roster', label: '店鋪名單', monthly: true, key: '店號',
-        note: '分月轉入（本月要點檢的店）；店號建議設文字格式避免掉 0',
+        note: '分月轉入；課別＝盤點主責課；可直接匯入官方委外名單(自動轉)。店號請設文字格式避免掉 0',
         cols: ['店號', '店名', '課別', '店鋪型態'],
-        fields: [{ k: '店號', t: 'text' }, { k: '店名', t: 'text' }, { k: '課別', t: 'text' }, { k: '店鋪型態', t: 'select', opts: ['可拍照', '不可拍照'] }] },
+        fields: [{ k: '店號', t: 'text' }, { k: '店名', t: 'text' }, { k: '課別', t: 'text' }, { k: '店鋪型態', t: 'select', opts: ['一般店', '隨盤點點檢店'] }] },
       { kind: 'stores', importKind: 'stores', label: '店鋪主檔', monthly: false, key: '店號',
         note: '全門市主檔（常駐；可直接匯入官方「店庫」總表，店號請設文字格式）',
         cols: ['店號', '店名', '營業課名稱', '縣市', '鄉鎮'],
@@ -908,7 +929,11 @@
           try {
             const wb = XLSX.read(ev.target.result, { type: 'array' });
             const ws = wb.Sheets[wb.SheetNames[0]];
-            resolve({ json: XLSX.utils.sheet_to_json(ws, { defval: '' }), aoa: XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' }) });
+            resolve({
+              json: XLSX.utils.sheet_to_json(ws, { defval: '' }),
+              aoa: XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' }),
+              sheets: wb.SheetNames.map(n => ({ name: n, aoa: XLSX.utils.sheet_to_json(wb.Sheets[n], { header: 1, defval: '' }) })),
+            });
           } catch (err) { reject(err); }
         };
         reader.onerror = reject;
@@ -920,16 +945,21 @@
         if (!configured) { alert('DEMO 模式：設定 GAS 後才會實際寫入試算表'); return; }
         try {
           const parsed = await parseFile(f);
-          let data = parsed.json, converted = false;
-          // 點檢題目：若上傳的是「官方評核表」版面，自動轉成題庫格式
+          let data = parsed.json, convMsg = '';
+          // 點檢題目：官方評核表版面自動轉題庫
           if (sub === 'items') {
             const c = officialFormToRows(parsed.aoa);
-            if (c) { data = c; converted = true; }
+            if (c) { data = c; convMsg = '\n（偵測到官方評核表，已自動轉題庫；13題機台等客製子項請單筆補上）'; }
+          }
+          // 店鋪名單：官方委外名單(多分頁)自動轉（主責課→課別、隨盤點→店鋪型態）
+          if (sub === 'roster') {
+            const c = rosterToRows(parsed.sheets);
+            if (c) { data = c; convMsg = '\n（偵測到官方委外名單，已自動轉：主責課→課別、隨盤點→店鋪型態）'; }
           }
           const r = await SqcApi.importMaster(area.importKind, month, data, f.name);
           setUploaded({ ...uploaded, [sub]: f.name });
           load(); await onReload();
-          alert(`✅ 已匯入「${f.name}」${r.count} 筆（同名覆蓋，以最新為主）` + (converted ? '\n（偵測到官方評核表，已自動轉為題庫格式；13題機台等客製子項請用單筆編輯補上）' : ''));
+          alert(`✅ 已匯入「${f.name}」${r.count} 筆（同名覆蓋，以最新為主）` + convMsg);
         } catch (err) { alert('匯入失敗：' + err.message); }
       };
 
