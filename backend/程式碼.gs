@@ -356,8 +356,12 @@ function importMaster(kind, month, rows, fileName) {
     var head = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0];
     // 清空舊資料（保留表頭）→ 以最新上傳為主
     if (sh.getLastRow() > 1) sh.getRange(2, 1, sh.getLastRow() - 1, head.length).clearContent();
-    var out = rows.map(function (r) { return head.map(function (h) { return r[h] != null ? r[h] : ''; }); });
-    if (out.length) sh.getRange(2, 1, out.length, head.length).setValues(out);
+    var out = rows.map(function (r) { return head.map(function (h) { return r[h] != null ? String(r[h]) : ''; }); });
+    if (out.length) {
+      var rng = sh.getRange(2, 1, out.length, head.length);
+      rng.setNumberFormat('@'); // 全部存成文字，避免店號/工號等掉前導0、日期被轉型
+      rng.setValues(out);
+    }
     setSetting('匯入_' + kind, (fileName || '') + ' @ ' + nowStr());
     return { ok: true, count: out.length };
   } finally {
@@ -462,16 +466,17 @@ function upsertRow(kind, month, row) {
     var sh = ensureKindSheet(kind, month); // 缺活頁自動建立
     var head = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0];
     var keyCol = keyForKind(kind);
-    var out = head.map(function (h) { return row[h] != null ? row[h] : ''; });
+    var out = head.map(function (h) { return row[h] != null ? String(row[h]) : ''; });
     var data = sh.getDataRange().getValues();
     var ci = head.indexOf(keyCol);
+    var writeRow = function (rowIdx) { var rng = sh.getRange(rowIdx, 1, 1, head.length); rng.setNumberFormat('@'); rng.setValues([out]); };
     for (var i = 1; i < data.length; i++) {
       if (String(data[i][ci]) === String(row[keyCol]) && String(row[keyCol]) !== '') {
-        sh.getRange(i + 1, 1, 1, head.length).setValues([out]);
+        writeRow(i + 1);
         return { ok: true, mode: 'update' };
       }
     }
-    sh.appendRow(out);
+    writeRow(sh.getLastRow() + 1);
     return { ok: true, mode: 'add' };
   } finally { lock.releaseLock(); }
 }
