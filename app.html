@@ -154,6 +154,7 @@
     function monthFolderOf(m) { return m.slice(0, 3) + '年' + m.slice(3, 5) + '月'; }
     // 台北時間現在（datetime-local 預設值用）
     function taipeiNow() { return new Date(Date.now() + 8 * 3600 * 1000).toISOString().slice(0, 16); }
+    function taipeiToday() { return taipeiNow().slice(0, 10); }
     // 點檢時間(YYYY-MM-DDTHH:mm) → 民國年月，如 2026-07 → 11507
     function rocMonth(dt) { if (!dt || dt.length < 7) return MONTH; return String(parseInt(dt.slice(0, 4)) - 1911) + dt.slice(5, 7); }
 
@@ -522,7 +523,13 @@
 
         queue.forEach(q => SqcUploader.enqueue({ ...q, recordId: recId }));
         const api = isEdit ? SqcApi.updateRecord(workMonth, recId, record) : SqcApi.submitRecord(record);
-        api.then(() => {
+        api.then((result) => {
+          if (result && result.ok === false) {
+            // 後端二次把關（如同店本月已被他人搶先送出）
+            alert('⚠ ' + (result.message || '送出失敗，請稍後再試'));
+            if (result.code === 'DUPLICATE') { setInspectedCodes(prev => ({ ...prev, [String(storeCode)]: true })); setTab('basic'); }
+            return;
+          }
           alert(`✅ ${isEdit ? '已更新' : '已送出'}\n店鋪：${storeName}　得分：${total}/${TOTAL_MAX}（${grade.txt}）` + (queue.length ? `\n新增照片 ${queue.length} 張背景上傳中` : ''));
           if (!isEdit) setInspectedCodes(prev => ({ ...prev, [String(storeCode)]: true }));
           resetWork(); setTab('records'); loadRecords();
@@ -530,7 +537,7 @@
       };
 
       // ---- 查詢/彙總篩選 ----
-      const [filter, setFilter] = useState({ from: '', to: '', section: '' });
+      const [filter, setFilter] = useState({ from: taipeiToday(), to: taipeiToday(), section: '' });
       const filtered = records.filter(r => (!filter.from || r.date >= filter.from) && (!filter.to || r.date <= filter.to) && (!filter.section || r.section === filter.section));
       // 正式模式：進查詢/彙總頁或改條件時，重新向後端查當月
       useEffect(() => { if (CONFIGURED && (tab === 'records' || tab === 'summary')) loadRecords(); }, [tab, filter.from, filter.to, filter.section]);

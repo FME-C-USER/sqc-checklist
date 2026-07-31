@@ -235,7 +235,8 @@ function getDriveToken() {
   return ScriptApp.getOAuthToken();
 }
 
-/** 依 [月份, 題目, 區域...] 取得目標資料夾 ID（自動建立、Script Properties 快取） */
+/** 依 [月份, 題目, 區域...] 取得目標資料夾 ID（自動建立、Script Properties 快取）
+ *  多人同時是「該路徑第一次上傳」時，用鎖避免各自建出同名資料夾 */
 function getUploadFolderId(pathParts) {
   var props = PropertiesService.getScriptProperties();
   var key = 'folder:' + pathParts.join('/');
@@ -243,12 +244,22 @@ function getUploadFolderId(pathParts) {
   if (cached) {
     try { DriveApp.getFolderById(cached); return cached; } catch (e) { /* 失效重建 */ }
   }
-  var folder = DriveApp.getFolderById(DRIVE_ROOT_ID);
-  for (var i = 0; i < pathParts.length; i++) {
-    folder = getOrCreateChild(folder, pathParts[i]);
+  var lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  try {
+    cached = props.getProperty(key); // 等鎖期間可能已被其他請求建好，先重查一次
+    if (cached) {
+      try { DriveApp.getFolderById(cached); return cached; } catch (e) { /* 失效重建 */ }
+    }
+    var folder = DriveApp.getFolderById(DRIVE_ROOT_ID);
+    for (var i = 0; i < pathParts.length; i++) {
+      folder = getOrCreateChild(folder, pathParts[i]);
+    }
+    props.setProperty(key, folder.getId());
+    return folder.getId();
+  } finally {
+    lock.releaseLock();
   }
-  props.setProperty(key, folder.getId());
-  return folder.getId();
 }
 
 function getOrCreateChild(parent, name) {
@@ -264,6 +275,15 @@ function submitRecord(rec) {
   lock.waitLock(20000);
   try {
     var sh = ensureSheetNamed('點檢紀錄_' + rec.month, HEADERS_MAP.record); // 缺活頁自動建立
+    // 鎖定範圍內再次確認：同店本月是否已有紀錄（避免多人同時送出造成重複）
+    var data = sh.getDataRange().getValues();
+    var head = data[0];
+    var storeCol = head.indexOf('店號');
+    for (var i = 1; i < data.length; i++) {
+      if (String(data[i][storeCol]) === String(rec.storeCode) && String(rec.storeCode) !== '') {
+        return { ok: false, code: 'DUPLICATE', message: '這家店本月已有其他人送出點檢紀錄，請重新整理後至查詢紀錄編輯該筆' };
+      }
+    }
     var id = rec.id || (Utilities.getUuid());
     var now = nowStr();
     var row = recordToRow(sh, Object.assign({}, rec, { id: id, createdAt: now, updatedAt: now }));
