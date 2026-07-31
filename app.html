@@ -332,6 +332,7 @@
       const [keyObs, setKeyObs] = useState({});
       const [toilet, setToilet] = useState({});
       const [toiletPhotos, setToiletPhotos] = useState({}); // 廁所觀察「不符合」缺失照片
+      const [toiletReasons, setToiletReasons] = useState({}); // 廁所觀察「不符合」不合格項目
       const [obsText, setObsText] = useState('');
       const [perfectPhotos, setPerfectPhotos] = useState({});
       const [paperForm, setPaperForm] = useState([]);        // 紙本點檢表（所有店必上傳）
@@ -377,7 +378,7 @@
         } catch (e) { alert('查詢失敗：' + e.message); }
       };
 
-      const resetWork = () => { setScores({}); setKeyObs({}); setToilet({}); setToiletPhotos({}); setObsText(''); setPerfectPhotos({}); setPaperForm([]); setSign({ count: '', identity: '' }); setEditingRecordId(null); setExistingPhotos({}); };
+      const resetWork = () => { setScores({}); setKeyObs({}); setToilet({}); setToiletPhotos({}); setToiletReasons({}); setObsText(''); setPerfectPhotos({}); setPaperForm([]); setSign({ count: '', identity: '' }); setEditingRecordId(null); setExistingPhotos({}); };
 
       // 編輯既有紀錄：把該筆載回點檢作業
       const openEdit = (row) => {
@@ -386,7 +387,7 @@
         const sc = {};
         Object.keys(d).forEach(id => { sc[id] = { score: d[id].score, ngSubs: d[id].ngSubs || [], customNames: d[id].customNames || {} }; });
         setScores(sc);
-        setToilet(o.toilet || {}); setObsText(o.obsText || '');
+        setToilet(o.toilet || {}); setObsText(o.obsText || ''); setToiletReasons(o.toiletReasons || {});
         setKeyObs({}); setToiletPhotos({}); setPerfectPhotos({}); setPaperForm([]);
         setExistingPhotos(rec.photos || {});
         setSign({ count: String(rec.staffCount || ''), identity: rec.identity || '' });
@@ -417,25 +418,43 @@
         if (!basic.staffId) { alert('請先在「基本資料」選擇點檢人員'); setTab('basic'); return; }
         if (!sign.count) { alert('請選擇「在店店員人數」'); return; }
         if (!sign.identity) { alert('請選擇「簽名店鋪人員身分別」'); return; }
-        // 紙本點檢表：新建時所有店皆須上傳；編輯時沿用原有（可不重傳）
-        if (!isEdit && !paperForm.length) { alert('所有店皆須上傳「紙本點檢表」才能送出'); return; }
 
-        // 照片必拍檢查：僅「新建 + 可拍照」時強制；編輯時沿用原照片、新增為選填
-        if (canPhoto && !isEdit) {
+        // 是否已存在該照片欄位的舊照片（編輯時沿用；新建時一律沒有）
+        const hasExisting = (parts) => (existingPhotos[parts.join('/')] || []).length > 0;
+
+        // 紙本點檢表：所有店（含編輯）皆須有紙本，新傳或沿用原有皆可
+        if (!paperForm.length && !hasExisting([monthFolder, 'SQC點檢表完成照片'])) { alert('所有店皆須上傳「紙本點檢表」才能送出'); return; }
+
+        // 對外廁所：選「有」時，以下觀察題與符合/不符合皆為必填（不受可否拍照影響）
+        if (toilet['O1'] === '有') {
+          for (const o of checklist.toiletObservations) {
+            if (o.id === 'O1') continue;
+            if (!toilet[o.id]) { alert(`請填寫「${o.name}」`); return; }
+          }
+          for (const t of checklist.toiletInspect) {
+            if (!toilet[t.id]) { alert(`請填寫廁所觀察「${t.name}」`); return; }
+            if (toilet[t.id] === '不符合' && t.opts && t.opts.length && !(toiletReasons[t.id] || []).length) {
+              alert(`廁所觀察「${t.name}」為不符合，請選擇不合格項目`); return;
+            }
+          }
+        }
+
+        // 照片必拍檢查：可拍照店鋪（含編輯），沿用原照片或本次新傳皆可滿足
+        if (canPhoto) {
           for (const k of checklist.keyObservations) {
-            if (!(keyObs[k.id] || []).length) { alert(`「${k.name}」為必拍重點觀察題`); return; }
+            if (!(keyObs[k.id] || []).length && !hasExisting([monthFolder, k.name])) { alert(`「${k.name}」為必拍重點觀察題`); return; }
           }
           if (noDeductDefect) {
-            for (const z of PERFECT_ZONES) { if (!(perfectPhotos[z] || []).length) { alert(`無缺失店鋪：滿分照片區「${z}」必須上傳照片`); return; } }
+            for (const z of PERFECT_ZONES) { if (!(perfectPhotos[z] || []).length && !hasExisting([monthFolder, '滿分照片', z])) { alert(`無缺失店鋪：滿分照片區「${z}」必須上傳照片`); return; } }
           } else {
             for (const c of checklist.categories) for (const it of c.items) {
               const s = scores[it.id]; const sc = (s && s.score != null) ? s.score : it.max; const ng = sc < it.max;
-              if (ng && (!s?.photos || !s.photos.length)) { alert(`「${it.name}」有扣分，請補上缺失照片`); return; }
+              if (ng && (!s?.photos || !s.photos.length) && !hasExisting([monthFolder, it.name, '缺失'])) { alert(`「${it.name}」有扣分，請補上缺失照片`); return; }
             }
           }
           if (toilet['O1'] === '有') {
             for (const t of checklist.toiletInspect) {
-              if (toilet[t.id] === '不符合' && !(toiletPhotos[t.id] || []).length) { alert(`廁所觀察「${t.name}」為不符合，請補上缺失照片`); return; }
+              if (toilet[t.id] === '不符合' && !(toiletPhotos[t.id] || []).length && !hasExisting([monthFolder, '廁所觀察', t.name, '缺失'])) { alert(`廁所觀察「${t.name}」為不符合，請補上缺失照片`); return; }
             }
           }
         }
@@ -449,7 +468,7 @@
           const s = scores[it.id] || {};
           detail[it.id] = { name: it.name, score: (s.score != null ? s.score : it.max), ngSubs: s.ngSubs || [], customNames: s.customNames || {} };
         }));
-        const observation = { toilet, obsText };
+        const observation = { toilet, obsText, toiletReasons };
 
         // 照片：編輯時以原有照片JSON 為基底，新增的接在後面
         const queue = [], photosJson = isEdit ? JSON.parse(JSON.stringify(existingPhotos || {})) : {};
@@ -696,6 +715,18 @@
                                 <span className="text-slate-700 flex-1">{t.name}</span>
                                 <div className="flex gap-1 shrink-0">{['符合', '不符合'].map(v => <button key={v} onClick={() => setToilet({ ...toilet, [t.id]: v })} className={"px-3 py-1 text-xs rounded border " + (toilet[t.id] === v ? (v === '符合' ? "bg-emerald-500 text-white border-emerald-500" : "bg-red-500 text-white border-red-500") : "bg-white text-slate-500 border-slate-300")}>{v}</button>)}</div>
                               </div>
+                              {toilet[t.id] === '不符合' && t.opts && t.opts.length > 0 && (
+                                <div className="mt-1.5 bg-red-50 border border-red-200 rounded-lg p-2">
+                                  <div className="text-[11px] text-red-600 mb-1">請選擇不合格項目<span className="text-red-500">（必選）</span></div>
+                                  <div className="flex flex-wrap gap-1.5">
+                                    {t.opts.map(r => {
+                                      const on = (toiletReasons[t.id] || []).includes(r);
+                                      const toggle = () => { const cur = toiletReasons[t.id] || []; setToiletReasons({ ...toiletReasons, [t.id]: on ? cur.filter(x => x !== r) : [...cur, r] }); };
+                                      return <button key={r} type="button" onClick={toggle} className={"text-xs px-2 py-1 rounded-full border " + (on ? "bg-red-500 text-white border-red-500" : "bg-white text-slate-500 border-slate-300")}>{on ? '✓ ' : ''}{r}</button>;
+                                    })}
+                                  </div>
+                                </div>
+                              )}
                               {toilet[t.id] === '不符合' && canPhoto && (
                                 <PhotoUpload label="缺失照片（不符合必須拍照）" required photos={toiletPhotos[t.id]} onChange={p => setToiletPhotos({ ...toiletPhotos, [t.id]: p })} folderPath={`${DRIVE_ROOT}/${monthFolder}/廁所觀察/${t.name}/缺失`} />
                               )}
@@ -803,7 +834,7 @@
               <div className="max-w-4xl mx-auto px-4 py-3 flex items-center justify-between">
                 <div><div className="text-xs text-slate-400">合計得分（及格 {PASS_SCORE}）</div>
                   <div className="flex items-baseline gap-2"><span className="text-3xl font-extrabold text-slate-800">{total}</span><span className="text-slate-400">/ {TOTAL_MAX}</span><span className={"ml-2 font-bold " + grade.c}>{grade.txt}</span>{noDeductDefect && canPhoto && <span className="ml-1 text-xs bg-amber-100 text-amber-700 px-2 py-0.5 rounded">需拍滿分照片</span>}</div></div>
-                <button onClick={submit} className="px-8 py-3 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl shadow-lg">送出評核</button>
+                <button onClick={submit} className="px-8 py-3 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl shadow-lg">{editingRecordId ? '完成編輯' : '送出評核'}</button>
               </div>
             </div>
           )}
@@ -851,15 +882,41 @@
             }
             const score = (typeof rawScore === 'number') ? rawScore : (parseFloat(rawScore) || 0);
             const letter = curCat.indexOf('商品') >= 0 ? 'B' : (curCat.indexOf('客用') >= 0 ? 'C' : 'A');
-            last = { 排序: items.length + 1, 編號: letter + num, 大分類: curCat, 題號名稱: name, 配分: score, 計分方式: method, 每項扣分: per, 子項清單: subs, 規範說明: spec.replace(/\n/g, ' ').replace(/\s+/g, ' ').trim() };
+            const baseLabel = name.replace(/^\d+\.?/, '');
+            const splitNum = (num === '15' || num === '16') ? num : null;
+            if (splitNum) {
+              // 15/16 題官方表為兩行合計；改拆成 15-1/15-2、16-1/16-2 兩題(各自合格0分)
+              last = { 排序: items.length + 1, 編號: letter + num + '-1', 大分類: curCat, 題號名稱: num + '-1.' + baseLabel, 配分: score, 計分方式: '合格0分', 每項扣分: '', 子項清單: '', 規範說明: spec.replace(/\n/g, ' ').replace(/\s+/g, ' ').trim(), __splitBase: letter + num, __splitLabel: baseLabel, __splitIdx: 1 };
+            } else {
+              last = { 排序: items.length + 1, 編號: letter + num, 大分類: curCat, 題號名稱: name, 配分: score, 計分方式: method, 每項扣分: per, 子項清單: subs, 規範說明: spec.replace(/\n/g, ' ').replace(/\s+/g, ' ').trim() };
+            }
             items.push(last);
           } else if (last && rawScore !== '' && !isObs) {
             const add = (typeof rawScore === 'number') ? rawScore : (parseFloat(rawScore) || 0);
-            if (add) last.配分 = Number(last.配分) + add; // 子列加總（落地/休憩）
+            if (!add) { /* no-op */ }
+            else if (last.__splitBase) {
+              // 15/16 的第二行：獨立成一題(-2)，不併入上一題配分
+              const idx = last.__splitIdx + 1;
+              const num2 = last.__splitBase.slice(1);
+              const next = { 排序: items.length + 1, 編號: last.__splitBase + '-' + idx, 大分類: last.大分類, 題號名稱: num2 + '-' + idx + '.' + last.__splitLabel, 配分: add, 計分方式: '合格0分', 每項扣分: '', 子項清單: '', 規範說明: spec.replace(/\n/g, ' ').replace(/\s+/g, ' ').trim(), __splitBase: last.__splitBase, __splitLabel: last.__splitLabel, __splitIdx: idx };
+              items.push(next);
+              last = next;
+            } else {
+              last.配分 = Number(last.配分) + add; // 其他題目維持子列加總（如有）
+            }
           }
         }
       });
       if (!items.length) return null;
+      // 17.垃圾桶：官方表為單一合格題，改為分區扣分並列出區域(FF區/休息區)
+      items.forEach(it => {
+        if (/^17\./.test(it.題號名稱)) {
+          it.計分方式 = '分區扣分';
+          it.每項扣分 = String(it.配分);
+          it.子項清單 = 'FF區垃圾桶|休息區垃圾桶';
+        }
+        delete it.__splitBase; delete it.__splitLabel; delete it.__splitIdx;
+      });
       items.sort((a, b) => (parseInt(a.題號名稱) || 0) - (parseInt(b.題號名稱) || 0));
       items.forEach((it, i) => it.排序 = i + 1);
       return items;

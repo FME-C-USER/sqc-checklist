@@ -198,7 +198,7 @@ function getObservations(month) {
     var t = String(r['類型'] || '');
     var id = r['編號'], name = r['題目名稱'];
     if (t.indexOf('拍照') >= 0) key.push({ id: id, name: name, required: (String(r['必填']) === '是' || String(r['必填']).toUpperCase() === 'Y') });
-    else if (t.indexOf('符合') >= 0) inspect.push({ id: id, name: name });
+    else if (t.indexOf('符合') >= 0) inspect.push({ id: id, name: name, opts: String(r['選項'] || '').split('|').filter(Boolean) });
     else toilet.push({ id: id, name: name, opts: String(r['選項'] || '有|無').split('|'), show: String(r['顯示條件'] || 'always') });
   });
   return { keyObservations: key, toiletObservations: toilet, toiletInspect: inspect };
@@ -270,6 +270,7 @@ function submitRecord(rec) {
     sh.appendRow(row);
     return { ok: true, id: id };
   } finally {
+    SpreadsheetApp.flush();
     lock.releaseLock();
   }
 }
@@ -306,6 +307,7 @@ function updateRecord(month, id, rec) {
     }
     return { ok: false, message: '找不到紀錄' };
   } finally {
+    SpreadsheetApp.flush();
     lock.releaseLock();
   }
 }
@@ -322,6 +324,7 @@ function deleteRecord(month, id) {
     }
     return { ok: false, message: '找不到紀錄' };
   } finally {
+    SpreadsheetApp.flush();
     lock.releaseLock();
   }
 }
@@ -365,6 +368,7 @@ function importMaster(kind, month, rows, fileName) {
     setSetting('匯入_' + kind, (fileName || '') + ' @ ' + nowStr());
     return { ok: true, count: out.length };
   } finally {
+    SpreadsheetApp.flush();
     lock.releaseLock();
   }
 }
@@ -389,7 +393,7 @@ function upsertItem(month, item) {
     }
     sh.appendRow(row);
     return { ok: true, mode: 'add' };
-  } finally { lock.releaseLock(); }
+  } finally { SpreadsheetApp.flush(); lock.releaseLock(); }
 }
 
 function deleteItem(month, id) {
@@ -402,7 +406,7 @@ function deleteItem(month, id) {
       if (String(data[i][idCol]) === String(id)) { sh.deleteRow(i + 1); return { ok: true }; }
     }
     return { ok: false, message: '找不到題目' };
-  } finally { lock.releaseLock(); }
+  } finally { SpreadsheetApp.flush(); lock.releaseLock(); }
 }
 
 // ============================================================
@@ -478,7 +482,7 @@ function upsertRow(kind, month, row) {
     }
     writeRow(sh.getLastRow() + 1);
     return { ok: true, mode: 'add' };
-  } finally { lock.releaseLock(); }
+  } finally { SpreadsheetApp.flush(); lock.releaseLock(); }
 }
 function deleteRowByKind(kind, month, id) {
   var lock = LockService.getScriptLock(); lock.waitLock(20000);
@@ -490,7 +494,7 @@ function deleteRowByKind(kind, month, id) {
       if (String(data[i][ci]) === String(id)) { sh.deleteRow(i + 1); return { ok: true }; }
     }
     return { ok: false, message: '找不到資料' };
-  } finally { lock.releaseLock(); }
+  } finally { SpreadsheetApp.flush(); lock.releaseLock(); }
 }
 
 // ============================================================
