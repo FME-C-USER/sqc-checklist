@@ -297,9 +297,9 @@ function updateRecord(month, id, rec) {
     var idCol = head.indexOf('紀錄ID');
     for (var i = 1; i < data.length; i++) {
       if (String(data[i][idCol]) === String(id)) {
-        var merged = Object.assign(rowObj(head, data[i]), rec, { updatedAt: nowStr() });
-        // 用中文欄鍵覆寫
-        var newRow = recordToRow(sh, mapToInternal(merged, month, id));
+        var orig = rowObj(head, data[i]);
+        rec.id = id; rec.createdAt = orig['建立時間'] || nowStr(); rec.updatedAt = nowStr();
+        var newRow = recordToRow(sh, rec); // rec 為前端英文鍵完整紀錄，直接覆寫
         sh.getRange(i + 1, 1, 1, newRow.length).setValues([newRow]);
         return { ok: true };
       }

@@ -336,6 +336,8 @@
       const [perfectPhotos, setPerfectPhotos] = useState({});
       const [paperForm, setPaperForm] = useState([]);        // 紙本點檢表（所有店必上傳）
       const [sign, setSign] = useState({ count: '', identity: '' }); // 在店店員人數 / 簽名人員身分別
+      const [editingRecordId, setEditingRecordId] = useState(null); // 非 null＝編輯既有紀錄
+      const [existingPhotos, setExistingPhotos] = useState({});      // 編輯時保留原有照片JSON
       const [records, setRecords] = useState([]);
       // 正式模式：查詢紀錄/彙總 進場或改條件時，向後端查當月資料（只跑當月活頁）
       const loadRecords = () => {
@@ -375,21 +377,51 @@
         } catch (e) { alert('查詢失敗：' + e.message); }
       };
 
-      const resetWork = () => { setScores({}); setKeyObs({}); setToilet({}); setToiletPhotos({}); setObsText(''); setPerfectPhotos({}); setPaperForm([]); setSign({ count: '', identity: '' }); };
+      const resetWork = () => { setScores({}); setKeyObs({}); setToilet({}); setToiletPhotos({}); setObsText(''); setPerfectPhotos({}); setPaperForm([]); setSign({ count: '', identity: '' }); setEditingRecordId(null); setExistingPhotos({}); };
+
+      // 編輯既有紀錄：把該筆載回點檢作業
+      const openEdit = (row) => {
+        const rec = row._raw || row;
+        const d = rec.detail || {}, o = rec.observation || {};
+        const sc = {};
+        Object.keys(d).forEach(id => { sc[id] = { score: d[id].score, ngSubs: d[id].ngSubs || [], customNames: d[id].customNames || {} }; });
+        setScores(sc);
+        setToilet(o.toilet || {}); setObsText(o.obsText || '');
+        setKeyObs({}); setToiletPhotos({}); setPerfectPhotos({}); setPaperForm([]);
+        setExistingPhotos(rec.photos || {});
+        setSign({ count: String(rec.staffCount || ''), identity: rec.identity || '' });
+        // 不可拍照原因還原
+        const note = String(rec.note || '');
+        const npr = note.indexOf('其他') === 0 ? '其他' : (note === '廠區店' || note === '營區店' ? note : '');
+        const npo = note.indexOf('其他') === 0 ? note.replace(/^其他[:：]?/, '') : '';
+        const inRoster = STORE_ROSTER.find(s => String(s.code) === String(rec.storeCode));
+        setBasic({
+          time: String(rec.time || taipeiNow()).replace(' ', 'T').slice(0, 16),
+          dept: rec.dept || '', section: rec.section || '', staffId: rec.empId || '',
+          storeCode: inRoster ? rec.storeCode : '__custom',
+          customStore: inRoster ? '' : (rec.storeCode + ' ' + rec.storeName),
+          customInfo: inRoster ? null : { code: rec.storeCode, name: rec.storeName, section: '' },
+          storeType: rec.storeType === '可拍照' ? 'photo' : 'nophoto',
+          noPhotoReason: npr, noPhotoOther: npo,
+        });
+        setEditingRecordId(rec.id);
+        setTab('work');
+      };
 
       const submit = () => {
+        const isEdit = !!editingRecordId;
         if (!effStore) { alert('請先在「基本資料」選擇店鋪'); setTab('basic'); return; }
-        if (inspectedCodes[String(effStore.code)]) { alert('這家店本月已有點檢紀錄，不可重複點檢'); setTab('basic'); return; }
+        if (!isEdit && inspectedCodes[String(effStore.code)]) { alert('這家店本月已有點檢紀錄，不可重複點檢（如需修正請至查詢紀錄編輯該筆）'); setTab('basic'); return; }
         if (!basic.storeType) { alert('請先在「基本資料」選擇可否拍照'); setTab('basic'); return; }
         if (!reasonOk) { alert('不可拍照店鋪請選擇原因'); setTab('basic'); return; }
         if (!basic.staffId) { alert('請先在「基本資料」選擇點檢人員'); setTab('basic'); return; }
         if (!sign.count) { alert('請選擇「在店店員人數」'); return; }
         if (!sign.identity) { alert('請選擇「簽名店鋪人員身分別」'); return; }
-        // 紙本點檢表：所有店皆必須上傳
-        if (!paperForm.length) { alert('所有店皆須上傳「紙本點檢表」才能送出'); return; }
+        // 紙本點檢表：新建時所有店皆須上傳；編輯時沿用原有（可不重傳）
+        if (!isEdit && !paperForm.length) { alert('所有店皆須上傳「紙本點檢表」才能送出'); return; }
 
-        // 照片相關僅可拍照店鋪檢查；不可拍照店鋪只需紙本
-        if (canPhoto) {
+        // 照片必拍檢查：僅「新建 + 可拍照」時強制；編輯時沿用原照片、新增為選填
+        if (canPhoto && !isEdit) {
           for (const k of checklist.keyObservations) {
             if (!(keyObs[k.id] || []).length) { alert(`「${k.name}」為必拍重點觀察題`); return; }
           }
@@ -401,7 +433,6 @@
               if (ng && (!s?.photos || !s.photos.length)) { alert(`「${it.name}」有扣分，請補上缺失照片`); return; }
             }
           }
-          // 廁所觀察題「不符合」需缺失照片
           if (toilet['O1'] === '有') {
             for (const t of checklist.toiletInspect) {
               if (toilet[t.id] === '不符合' && !(toiletPhotos[t.id] || []).length) { alert(`廁所觀察「${t.name}」為不符合，請補上缺失照片`); return; }
@@ -411,9 +442,8 @@
         const staff = STAFFS.find(s => s.id === basic.staffId);
         const storeName = effStore ? effStore.name : '';
         const storeCode = effStore ? effStore.code : '';
-        const recId = (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : 'r' + Date.now();
+        const recId = editingRecordId || ((window.crypto && crypto.randomUUID) ? crypto.randomUUID() : 'r' + Date.now());
 
-        // 明細 / 觀察 JSON
         const detail = {};
         checklist.categories.forEach(c => c.items.forEach(it => {
           const s = scores[it.id] || {};
@@ -421,14 +451,15 @@
         }));
         const observation = { toilet, obsText };
 
-        // 蒐集照片 → 依 pathParts 排入背景上傳；照片JSON 記錄「資料夾/檔名」
-        const queue = [], photosJson = {};
+        // 照片：編輯時以原有照片JSON 為基底，新增的接在後面
+        const queue = [], photosJson = isEdit ? JSON.parse(JSON.stringify(existingPhotos || {})) : {};
         const addPhotos = (pathParts, arr) => {
           if (!arr || !arr.length) return;
           const key = pathParts.join('/');
           photosJson[key] = photosJson[key] || [];
-          arr.forEach((p, i) => {
-            const name = `${storeCode || 'S'}_${basic.time.slice(0, 10)}_${key.replace(/[\/\s]/g, '')}_${i + 1}.jpg`;
+          arr.forEach((p) => {
+            const idx = photosJson[key].length + 1;
+            const name = `${storeCode || 'S'}_${basic.time.slice(0, 10)}_${key.replace(/[\/\s]/g, '')}_${idx}.jpg`;
             photosJson[key].push(name);
             queue.push({ blob: p.blob, name, pathParts, thumb: p.thumb });
           });
@@ -449,17 +480,17 @@
           dept: basic.dept, section: basic.section, empId: basic.staffId, staffName: staff ? staff.name : user,
           storeCode, storeName, storeType: canPhoto ? '可拍照' : '不可拍照',
           total, grade: grade.txt, staffCount: sign.count, identity: sign.identity,
-          note: noPhotoReasonText, // 備註：不可拍照原因
+          note: noPhotoReasonText,
           detail, observation, photos: photosJson, paperPhotos: (photosJson[[monthFolder, 'SQC點檢表完成照片'].join('/')] || []),
         };
 
-        // 先背景排入照片（邊送邊傳），再寫入紀錄（秒回）
         queue.forEach(q => SqcUploader.enqueue({ ...q, recordId: recId }));
-        SqcApi.submitRecord(record).then(() => {
-          alert(`✅ 已送出\n店鋪：${storeName}　得分：${total}/${TOTAL_MAX}（${grade.txt}）\n照片 ${queue.length} 張背景上傳中，可離開此頁`);
-          setInspectedCodes(prev => ({ ...prev, [String(storeCode)]: true })); // 本店本月已點檢
+        const api = isEdit ? SqcApi.updateRecord(workMonth, recId, record) : SqcApi.submitRecord(record);
+        api.then(() => {
+          alert(`✅ ${isEdit ? '已更新' : '已送出'}\n店鋪：${storeName}　得分：${total}/${TOTAL_MAX}（${grade.txt}）` + (queue.length ? `\n新增照片 ${queue.length} 張背景上傳中` : ''));
+          if (!isEdit) setInspectedCodes(prev => ({ ...prev, [String(storeCode)]: true }));
           resetWork(); setTab('records'); loadRecords();
-        }).catch(e => alert('送出失敗：' + e.message + '\n（照片仍會背景續傳，可稍後重試送出）'));
+        }).catch(e => alert((isEdit ? '更新' : '送出') + '失敗：' + e.message));
       };
 
       // ---- 查詢/彙總篩選 ----
@@ -615,6 +646,7 @@
               <div className="bg-white rounded-xl shadow-sm p-8 text-center text-slate-500">請先到「基本資料」選好店鋪與店鋪型態<br /><button onClick={() => setTab('basic')} className="mt-3 px-4 py-2 bg-emerald-600 text-white rounded-lg">前往基本資料</button></div>
             ) : (
               <>
+                {editingRecordId && <div className="bg-blue-50 border border-blue-200 text-blue-700 text-sm rounded-lg px-3 py-2">✏️ 編輯既有紀錄中——原照片沿用，新增照片為選填；送出將覆蓋這筆</div>}
                 <div className="bg-white rounded-xl shadow-sm px-4 py-3 text-sm text-slate-600 flex flex-wrap gap-x-4 gap-y-1">
                   <span>🏪 {effStore.name}</span><span>👤 {STAFFS.find(s => s.id === basic.staffId)?.name || '—'}</span><span>📅 {basic.time.slice(0, 10)}</span>
                   <span className={"px-2 rounded " + (canPhoto ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700")}>{canPhoto ? '可拍照' : '不可拍照'}</span>
@@ -727,7 +759,7 @@
                         <tr key={r.id} className="border-b border-slate-100">
                           <td className="py-2 px-3 text-slate-500">{r.date}</td><td className="font-medium text-slate-800">{r.store}</td><td className="text-slate-500">{r.section}</td><td className="text-slate-500">{r.staff}</td>
                           <td className="font-bold">{r.total}</td><td><span className={"text-xs px-2 py-0.5 rounded " + gradeOf(r.total).bg}>{r.grade}</span></td>
-                          <td className="px-3 whitespace-nowrap"><button onClick={() => delRecord(r.id)} className="text-xs text-red-600">刪除</button></td>
+                          <td className="px-3 whitespace-nowrap"><button onClick={() => openEdit(r)} className="text-xs text-blue-600 mr-2">編輯</button><button onClick={() => delRecord(r.id)} className="text-xs text-red-600">刪除</button></td>
                         </tr>
                       ))}
                       {filtered.length === 0 && <tr><td colSpan="7" className="py-8 text-center text-slate-400">無符合條件的紀錄</td></tr>}
