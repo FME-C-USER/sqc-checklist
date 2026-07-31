@@ -64,6 +64,74 @@ function seedSettings() {
   ]);
 }
 
+// ============================================================
+// 一次性維護工具（於 Apps Script 編輯器手動執行，不透過網頁介面）
+//   用途：清理「店號前導0被 Google Sheet 自動吃掉」的歷史資料
+//   假設：本專案店號一律為 6 碼數字（如 017246）；若你的店號長度不同請先告知再執行
+// ============================================================
+
+/** 掃描 店鋪主檔 / 店鋪名單_* / 點檢紀錄_* 的「店號」欄，補回前導0並將欄位鎖定為純文字格式。
+ *  執行前建議先看一次「檔案→版本記錄」目前版本，若結果不如預期可還原。
+ *  執行完看 Apps Script「執行項目」的記錄檔(Logger)確認每張活頁改了幾筆。 */
+function normalizeStoreCodes() {
+  var book = ss();
+  var sheets = book.getSheets();
+  var report = [];
+  sheets.forEach(function (sh) {
+    var name = sh.getName();
+    var isTarget = name === '店鋪主檔' || name.indexOf('店鋪名單_') === 0 || name.indexOf('點檢紀錄_') === 0;
+    if (!isTarget) return;
+    var lastRow = sh.getLastRow(), lastCol = sh.getLastColumn();
+    if (lastRow < 2) { report.push(name + '：無資料，略過'); return; }
+    var head = sh.getRange(1, 1, 1, lastCol).getValues()[0];
+    var col = head.indexOf('店號');
+    if (col < 0) { report.push(name + '：找不到「店號」欄，略過'); return; }
+    var range = sh.getRange(2, col + 1, lastRow - 1, 1);
+    var values = range.getValues();
+    var changed = 0;
+    for (var i = 0; i < values.length; i++) {
+      var raw = values[i][0];
+      if (raw === '' || raw == null) continue;
+      var s = String(raw).trim();
+      if (/^\d+$/.test(s) && s.length < 6) {
+        var padded = ('000000' + s).slice(-6);
+        if (padded !== s) changed++;
+        values[i][0] = padded;
+      } else {
+        values[i][0] = s; // 確保存成字串，非數字型別
+      }
+    }
+    range.setNumberFormat('@'); // 欄位鎖定純文字，避免之後再被自動轉數字掉0
+    range.setValues(values);
+    report.push(name + '：補齊 ' + changed + ' 筆（共 ' + values.length + ' 筆）');
+  });
+  var msg = report.length ? report.join('\n') : '沒有找到符合的活頁';
+  Logger.log(msg);
+  return msg;
+}
+
+/** 檢查某月「點檢紀錄」是否有同店(店號正規化後比對)重複，列在記錄檔供人工核對刪除。
+ *  用法：執行前把下面 month 改成要查的月份，執行後看 Logger 記錄檔。 */
+function findDuplicateStoreRecords() {
+  var month = '11507'; // ← 改成要檢查的月份
+  var sh = ss().getSheetByName('點檢紀錄_' + month);
+  if (!sh) { Logger.log('找不到活頁：點檢紀錄_' + month); return; }
+  var data = sh.getDataRange().getValues();
+  var head = data[0];
+  var codeCol = head.indexOf('店號'), idCol = head.indexOf('紀錄ID'), nameCol = head.indexOf('店名'), timeCol = head.indexOf('點檢時間');
+  var norm = function (c) { var s = String(c == null ? '' : c).trim(); return s.replace(/^0+(?=\d)/, ''); };
+  var map = {};
+  for (var i = 1; i < data.length; i++) {
+    var code = norm(data[i][codeCol]);
+    if (!code) continue;
+    (map[code] = map[code] || []).push({ 列: i + 1, 紀錄ID: data[i][idCol], 店名: data[i][nameCol], 點檢時間: data[i][timeCol] });
+  }
+  var dups = [];
+  Object.keys(map).forEach(function (code) { if (map[code].length > 1) dups.push({ 店號: code, 筆數: map[code].length, 明細: map[code] }); });
+  Logger.log(dups.length ? JSON.stringify(dups, null, 2) : '本月無重複店號紀錄');
+  return dups;
+}
+
 // ===== 工具 =====
 function ss() {
   return SpreadsheetApp.openById(SPREADSHEET_ID);
