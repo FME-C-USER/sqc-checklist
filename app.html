@@ -122,52 +122,8 @@
     // ============================================================
     const DRIVE_ROOT = 'SQC照片 (Google Drive)';
 
-    // 部別 / 課別
-    const DEMO_DEPTS = [{ dept: '營運一部', sections: ['北一課', '北二課'] }, { dept: '營運二部', sections: ['中區課', '南區課'] }];
-    // 點檢人員（含課別）
-    const DEMO_STAFFS = [
-      { id: 'A001', name: '王小明', dept: '營運一部', section: '北一課' },
-      { id: 'A002', name: '李大華', dept: '營運一部', section: '北二課' },
-      { id: 'B001', name: '陳美玲', dept: '營運二部', section: '中區課' },
-    ];
-    // 店鋪名單（分月轉入，含課別＋店鋪型態）
-    const DEMO_STORES = [
-      { code: '001234', name: '台北車站門市', section: '北一課', type: '一般店' },
-      { code: '002187', name: '信義威秀門市', section: '北一課', type: '隨盤點點檢店' },
-      { code: '003920', name: '內湖科技門市', section: '北二課', type: '一般店' },
-      { code: '004556', name: '板橋大遠百門市', section: '中區課', type: '一般店' },
-      { code: '005781', name: '桃園機場門市', section: '中區課', type: '隨盤點點檢店' },
-    ];
-
-    // 題庫（11506 版）— type: subdeduct(分區扣分，點選缺失區由滿分往下扣) / deduct(整題扣分制)
-    const DEMO_CHECKLIST = {
-      version: '115.6',
-      categories: [
-        { key: 'A', name: '活動告示 & 清潔維護', max: 35, items: [
-          { id: 'A1', name: '1.店外海報', max: 4, type: 'deduct', desc: '海報(大海報/Famihot/3合1/特殊商流靜電貼/自製/政令貼)張貼完整、無過期、脫落或破損，自製POP符合規範' },
-          { id: 'A2', name: '2.物流籃', max: 3, type: 'deduct', desc: '店外物流籃整齊堆疊不阻擋入店動線（高度≤120cm）' },
-          { id: 'A3', name: '3.店外環境清潔', max: 5, type: 'deduct', desc: '店外空間乾淨整潔（玻璃、門框、休憩區、地板、柱面…）' },
-          { id: 'A4', name: '4.後櫃台清潔', max: 3, type: 'deduct', desc: '後櫃台、洗手台、咖啡機、霜淇淋機、煮茶機乾淨無雜物' },
-          { id: 'A5', name: '5.FF區POP', max: 3, type: 'deduct', desc: 'FF區POP張貼完整無過期或破損褪色，且填寫銷售時段' },
-          { id: 'A6', name: '6.FF區清潔', max: 3, type: 'deduct', desc: 'FF區桌面、抽屜、機台、防塵罩、熟食夾及微波爐乾淨無髒污' },
-          { id: 'A7', name: '7.貨架清潔', max: 8, type: 'subdeduct', perPoint: 2, subs: ['OC', 'WI', '冷凍櫃', '口巧', '零食', '加工', 'TM前貨架', '六格陳列架', { label: '其他貨架', custom: true }], desc: '貨架層板、機台邊框乾淨無積塵髒污（每區缺失 -2分，滿分8分）' },
-          { id: 'A8', name: '8.店內活動資訊', max: 3, type: 'deduct', desc: 'FamiNews/WI/OC/立櫃看板 POP張貼完整且無過期' },
-          { id: 'A9', name: '9.店內地板', max: 3, type: 'deduct', desc: '店內地板清潔無明顯髒污且落實地墊貼膠' },
-        ]},
-        { key: 'B', name: '商品陳列', max: 55, items: [
-          { id: 'B10', name: '10.商品豐富陳列', max: 18, type: 'subdeduct', perPoint: 2, subs: ['OC', 'WI', '冷凍櫃', '口巧', '零食', '加工', 'TM前貨架', '六格陳列架', { label: '其他貨架', custom: true }], desc: '商品貨架豐富陳列（每區缺失 -2分，滿分18分）' },
-          { id: 'B11', name: '11.商品排面整齊', max: 8, type: 'subdeduct', perPoint: 1, subs: ['OC', 'WI', '冷凍櫃', '口巧', '零食', '加工', 'TM前貨架', { label: '其他貨架', custom: true }], desc: '商品貨架排面整齊（每區缺失 -1分，滿分8分）' },
-          { id: 'B12', name: '12.價格清楚標示', max: 12, type: 'subdeduct', perPoint: 2, subs: ['OC', 'WI', '冷凍櫃', '口巧', '零食', '加工', 'TM前貨架', { label: '其他貨架', custom: true }], desc: '價格標示清楚（每區缺失 -2分，滿分12分）' },
-          { id: 'B13', name: '13.FF區商品陳列', max: 9, type: 'subdeduct', perPoint: 3, subs: ['番薯機', { label: '馬鈴薯機+夯番麥', units: 2, note: '兩項都沒有才扣6分' }, '熱狗機', '蒸包機', { label: '蛋鍋', note: '不足1/2；麻辣蛋不觀察' }, '馬尚煮機', { label: '備品區', note: '醬包、袋子、熱狗麵包…' }, '炸烤物櫃', '現烤點心櫃', { label: '其他', custom: true }], desc: '商品、醬包、備品陳列整齊不可空架（每項缺失 -3分，滿分9分）' },
-          { id: 'B14', name: '14.溫層/中島櫃', max: 3, type: 'deduct', desc: '檔期主題商品集中陳列並搭配活動插卡/飾條/背板；中島櫃上方不得放置商品' },
-          { id: 'B15', name: '15.落地陳列', max: 5, type: 'deduct', desc: '上層陳列量≥一半且拉排面、POP完整；落地無異常堆疊、不遮門面/貨架、割箱一致' },
-        ]},
-        { key: 'C', name: '客用空間', max: 10, items: [
-          { id: 'C16', name: '16.休憩區', max: 7, type: 'deduct', desc: '休憩區桌椅及空間乾淨無髒污、桌貼無殘膠破損翹起；無阻擋座位區動線或佔用休憩區空間' },
-          { id: 'C17', name: '17.垃圾桶', max: 3, type: 'deduct', desc: '投入口無髒污膠痕垃圾滿溢；指示標籤清楚無破損外翻脫落' },
-        ]},
-      ],
-      // 觀察區：重點觀察題(拍照) + 廁所(有無) + 文字
+    // 觀察題預設值（維護專區未匯入觀察題時的內建預設；題庫/店鋪/人員一律由後端載入）
+    const DEFAULT_OBS = {
       keyObservations: [
         { id: 'KO1', name: '重點觀察題1.【店外全景照】' },
         { id: 'KO2', name: '重點觀察題2.【櫃台全景照】' },
@@ -180,7 +136,6 @@
         { id: 'O4', name: '店內有無廁所標示', opts: ['有', '無'], show: 'hasOrClosed' },
         { id: 'O5', name: '是否提供備品（衛生紙、洗手乳、芳香劑）', opts: ['有', '無'], show: 'has' },
       ],
-      // 廁所觀察題（對外廁所觀察記錄最下方，僅「有」時填）
       toiletInspect: [
         { id: 'T1', name: '廁所乾淨無髒污及垃圾桶無明顯滿溢' },
         { id: 'T2', name: '落實填寫廁間清潔表；無堆放雜物（ex.紙箱、物流籃、資源回收物…等）' },
@@ -189,7 +144,7 @@
     const IDENTITIES = ['店長', '副店', '正職', 'PT'];
     const PASS_SCORE = 85;
 
-    // 是否已設定後端（未設定＝DEMO 模式，用內建 mock 可離線展示）
+    // 後端是否已設定（未設定時停用，不載入任何內建假資料）
     const CONFIGURED = !!(window.SQC_CONFIG && window.SQC_CONFIG.GAS_URL && window.SQC_CONFIG.GAS_URL.indexOf('XXXXXXXX') < 0);
     const MONTH = (window.SQC_CONFIG && window.SQC_CONFIG.MONTH) || '11506';
 
@@ -214,9 +169,9 @@
       return {
         version: month,
         categories: order.map(function (k) { return map[k]; }),
-        keyObservations: pick(O.keyObservations, DEMO_CHECKLIST.keyObservations),
-        toiletObservations: pick(O.toiletObservations, DEMO_CHECKLIST.toiletObservations),
-        toiletInspect: pick(O.toiletInspect, DEMO_CHECKLIST.toiletInspect),
+        keyObservations: pick(O.keyObservations, DEFAULT_OBS.keyObservations),
+        toiletObservations: pick(O.toiletObservations, DEFAULT_OBS.toiletObservations),
+        toiletInspect: pick(O.toiletInspect, DEFAULT_OBS.toiletInspect),
       };
     }
 
@@ -320,8 +275,8 @@
     // 主應用
     // ============================================================
     function App() {
-      const currentUser = (() => { try { return JSON.parse(sessionStorage.getItem('sqc_user')) || {}; } catch (e) { return { name: sessionStorage.getItem('sqc_user') || 'demo' }; } })();
-      const user = currentUser.name || 'demo';
+      const currentUser = (() => { try { return JSON.parse(sessionStorage.getItem('sqc_user')) || {}; } catch (e) { return {}; } })();
+      const user = currentUser.name || '';
       const isManager = currentUser.role === '管理者';
       const [tab, setTab] = useState('basic');
 
@@ -329,8 +284,9 @@
       const [basic, setBasic] = useState({ time: taipeiNow(), dept: currentUser.dept || '', section: currentUser.section || '', staffId: currentUser.empId || '', storeCode: '', customStore: '', customInfo: null, storeType: '', noPhotoReason: '', noPhotoOther: '' });
       const workMonth = rocMonth(basic.time); // 依點檢時間對應的民國年月
 
-      // ---- 開場資料（依 workMonth 載入；DEMO 用內建 mock）----
-      const [boot, setBoot] = useState({ checklist: DEMO_CHECKLIST, stores: DEMO_STORES, staffs: DEMO_STAFFS, depts: DEMO_DEPTS });
+      // ---- 開場資料（依 workMonth 由後端載入；載入前為空）----
+      const [boot, setBoot] = useState({ checklist: buildChecklist([], MONTH), stores: [], staffs: [], depts: [] });
+      const [inspectedCodes, setInspectedCodes] = useState({}); // 當月已有點檢紀錄的店號
       const [custResults, setCustResults] = useState([]);
       const [loading, setLoading] = useState(CONFIGURED);
       const [bootErr, setBootErr] = useState('');
@@ -343,10 +299,18 @@
         });
         setBootErr('');
       }); };
+      const loadInspected = (m) => {
+        if (!CONFIGURED) return;
+        SqcApi.queryRecords(m || workMonth, {}).then(r => {
+          const map = {}; (r.records || []).forEach(x => { map[String(x.storeCode || '')] = true; });
+          setInspectedCodes(map);
+        }).catch(() => { });
+      };
       useEffect(() => {
         if (!CONFIGURED) return;
         setLoading(true);
         reloadBoot(workMonth).catch(e => setBootErr(e.message || '載入失敗')).finally(() => setLoading(false));
+        loadInspected(workMonth);
       }, [workMonth]);
       const checklist = boot.checklist, STORE_ROSTER = boot.stores, STAFFS = boot.staffs, DEPTS = boot.depts;
       const TOTAL_MAX = useMemo(() => checklist.categories.reduce((s, c) => s + c.max, 0), [checklist]);
@@ -372,12 +336,7 @@
       const [perfectPhotos, setPerfectPhotos] = useState({});
       const [paperForm, setPaperForm] = useState([]);        // 紙本點檢表（所有店必上傳）
       const [sign, setSign] = useState({ count: '', identity: '' }); // 在店店員人數 / 簽名人員身分別
-      const DEMO_RECORDS = [
-        { id: 1, date: '2026-06-25', store: '台北車站門市', section: '北一課', staff: '王小明', version: '115.6', total: 96, grade: '優良' },
-        { id: 2, date: '2026-06-24', store: '內湖科技門市', section: '北二課', staff: '李大華', version: '115.6', total: 88, grade: '合格' },
-        { id: 3, date: '2026-06-23', store: '板橋大遠百門市', section: '中區課', staff: '陳美玲', version: '115.6', total: 72, grade: '不合格' },
-      ];
-      const [records, setRecords] = useState(CONFIGURED ? [] : DEMO_RECORDS);
+      const [records, setRecords] = useState([]);
       // 正式模式：查詢紀錄/彙總 進場或改條件時，向後端查當月資料（只跑當月活頁）
       const loadRecords = () => {
         if (!CONFIGURED) return;
@@ -407,10 +366,6 @@
       const doLookup = async () => {
         const q = (basic.customStore || '').trim();
         if (!q) { setCustResults([]); return; }
-        if (!CONFIGURED) {
-          setCustResults(DEMO_STORES.filter(s => s.code === q || s.name.indexOf(q) >= 0).map(s => ({ code: s.code, name: s.name, section: s.section })));
-          return;
-        }
         try {
           const r = await SqcApi.lookupStore(q);
           const rows = r.rows || [];
@@ -424,6 +379,7 @@
 
       const submit = () => {
         if (!effStore) { alert('請先在「基本資料」選擇店鋪'); setTab('basic'); return; }
+        if (inspectedCodes[String(effStore.code)]) { alert('這家店本月已有點檢紀錄，不可重複點檢'); setTab('basic'); return; }
         if (!basic.storeType) { alert('請先在「基本資料」選擇可否拍照'); setTab('basic'); return; }
         if (!reasonOk) { alert('不可拍照店鋪請選擇原因'); setTab('basic'); return; }
         if (!basic.staffId) { alert('請先在「基本資料」選擇點檢人員'); setTab('basic'); return; }
@@ -497,16 +453,11 @@
           detail, observation, photos: photosJson, paperPhotos: (photosJson[[monthFolder, 'SQC點檢表完成照片'].join('/')] || []),
         };
 
-        if (!CONFIGURED) {
-          setRecords([{ id: recId, date: basic.time.slice(0, 10), store: storeName, section: basic.section, staff: staff?.name || user, version: checklist.version, total, grade: grade.txt }, ...records]);
-          alert(`✅ 已送出（DEMO 模擬）\n店鋪：${storeName}\n合計得分：${total}/${TOTAL_MAX}（${grade.txt}）\n照片 ${queue.length} 張（正式模式將壓縮後背景直傳 Drive）`);
-          resetWork(); setTab('records'); return;
-        }
-
-        // 正式模式：先背景排入照片（邊送邊傳），再寫入紀錄（秒回）
+        // 先背景排入照片（邊送邊傳），再寫入紀錄（秒回）
         queue.forEach(q => SqcUploader.enqueue({ ...q, recordId: recId }));
         SqcApi.submitRecord(record).then(() => {
           alert(`✅ 已送出\n店鋪：${storeName}　得分：${total}/${TOTAL_MAX}（${grade.txt}）\n照片 ${queue.length} 張背景上傳中，可離開此頁`);
+          setInspectedCodes(prev => ({ ...prev, [String(storeCode)]: true })); // 本店本月已點檢
           resetWork(); setTab('records'); loadRecords();
         }).catch(e => alert('送出失敗：' + e.message + '\n（照片仍會背景續傳，可稍後重試送出）'));
       };
@@ -562,7 +513,7 @@
       return (
         <div className="min-h-screen pb-32">
           <div className="sticky top-0 z-30 bg-emerald-700 text-white px-4 py-3 flex items-center justify-between shadow">
-            <div className="flex items-center gap-2"><span className="font-bold">SQC 評核系統</span><span className="text-xs opacity-75">v115.6</span></div>
+            <div className="flex items-center gap-2"><span className="font-bold">SQC 評核系統</span></div>
             <div className="flex items-center gap-3 text-sm"><span className="opacity-90">{user}</span><button onClick={logout} className="px-3 py-1 bg-white/20 rounded hover:bg-white/30">登出</button></div>
           </div>
 
@@ -599,7 +550,7 @@
                   <label className="block text-xs text-slate-500 mb-1">點檢店鋪名單<span className="text-slate-400">（依課別自動帶出，亦可自行新增）</span></label>
                   <select value={basic.storeCode} onChange={e => setBasic({ ...basic, storeCode: e.target.value, customStore: '', customInfo: null })} className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm">
                     <option value="">— 請選擇店鋪 —</option>
-                    {sectionStores.map(s => <option key={s.code} value={s.code}>{s.code} {s.name}{s.type ? '（' + s.type + '）' : ''}</option>)}
+                    {sectionStores.map(s => { const done = inspectedCodes[String(s.code)]; return <option key={s.code} value={s.code} disabled={done}>{s.code} {s.name}{s.type === '隨盤點點檢店' ? '（隨盤點點檢店）' : ''}{done ? ' ✓已點檢(不可選)' : ''}</option>; })}
                     <option value="__custom">＋ 自行新增店鋪…</option>
                   </select>
                   {basic.storeCode === '__custom' && (
@@ -776,7 +727,7 @@
                         <tr key={r.id} className="border-b border-slate-100">
                           <td className="py-2 px-3 text-slate-500">{r.date}</td><td className="font-medium text-slate-800">{r.store}</td><td className="text-slate-500">{r.section}</td><td className="text-slate-500">{r.staff}</td>
                           <td className="font-bold">{r.total}</td><td><span className={"text-xs px-2 py-0.5 rounded " + gradeOf(r.total).bg}>{r.grade}</span></td>
-                          <td className="px-3 whitespace-nowrap"><button onClick={() => { alert('原型模擬：載入此筆至點檢作業修改'); }} className="text-xs text-blue-600 mr-2">修改</button><button onClick={() => delRecord(r.id)} className="text-xs text-red-600">刪除</button></td>
+                          <td className="px-3 whitespace-nowrap"><button onClick={() => delRecord(r.id)} className="text-xs text-red-600">刪除</button></td>
                         </tr>
                       ))}
                       {filtered.length === 0 && <tr><td colSpan="7" className="py-8 text-center text-slate-400">無符合條件的紀錄</td></tr>}
@@ -963,7 +914,7 @@
 
       const onUpload = async (e) => {
         const f = e.target.files[0]; e.target.value = ''; if (!f) return;
-        if (!configured) { alert('DEMO 模式：設定 GAS 後才會實際寫入試算表'); return; }
+        if (!configured) { alert('尚未連線後端，無法匯入'); return; }
         try {
           const parsed = await parseFile(f);
           let data = parsed.json, convMsg = '';
@@ -987,13 +938,13 @@
       const blank = () => { const o = {}; area.fields.forEach(f => o[f.k] = (f.k === '排序') ? (rows.length + 1) : (f.t === 'select' ? f.opts[0] : '')); return o; };
       const save = async () => {
         if (!String(editing[area.key])) { alert(`「${area.key}」必填`); return; }
-        if (!configured) { alert('DEMO 模式不寫回；設定 GAS 後可存回試算表'); setEditing(null); return; }
+        if (!configured) { alert('尚未連線後端，無法儲存'); setEditing(null); return; }
         try { await SqcApi.upsertRow(area.importKind, month, editing); setEditing(null); load(); await onReload(); alert('✅ 已儲存'); }
         catch (e) { alert('儲存失敗：' + e.message); }
       };
       const remove = async (id) => {
         if (!confirm('確定刪除此筆？')) return;
-        if (!configured) { alert('DEMO 模式不寫回'); return; }
+        if (!configured) { alert('尚未連線後端，無法刪除'); return; }
         try { await SqcApi.deleteRow(area.importKind, month, id); load(); await onReload(); } catch (e) { alert('刪除失敗：' + e.message); }
       };
 
@@ -1021,7 +972,7 @@
                         <td className="py-2 px-2 text-slate-500 whitespace-nowrap">{r.time}</td><td className="px-2">{r.user}</td><td className="px-2">{r.action}</td><td className="px-2 text-slate-600">{r.target}</td><td className="px-2 text-slate-500">{r.note}</td>
                       </tr>
                     ))}
-                    {logRows.length === 0 && <tr><td colSpan="5" className="py-6 text-center text-slate-400">{configured ? '尚無異動紀錄' : 'DEMO 模式不載入'}</td></tr>}
+                    {logRows.length === 0 && <tr><td colSpan="5" className="py-6 text-center text-slate-400">{configured ? '尚無異動紀錄' : '尚未連線後端'}</td></tr>}
                   </tbody>
                 </table>
               </div>
@@ -1054,7 +1005,7 @@
                     </tr>
                   ))}
                   {rows.length > 500 && <tr><td colSpan={area.cols.length + 1} className="py-2 px-2 text-center text-slate-400 text-xs">僅顯示前 500 筆（共 {rows.length} 筆）；請用匯入或搜尋維護</td></tr>}
-                  {rows.length === 0 && <tr><td colSpan={area.cols.length + 1} className="py-6 text-center text-slate-400">{configured ? '尚無資料，請匯入或新增' : 'DEMO 模式不載入（請部署 GAS 後於正式環境維護）'}</td></tr>}
+                  {rows.length === 0 && <tr><td colSpan={area.cols.length + 1} className="py-6 text-center text-slate-400">{configured ? '尚無資料，請匯入或新增' : '尚未連線後端'}</td></tr>}
                 </tbody>
               </table>
             </div>

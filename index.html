@@ -83,16 +83,9 @@
       btn.textContent = '驗證中...';
 
       try {
-        // === DEMO 模式：GAS 未設定時，輸入 demo / demo 直接進入（原型展示）===
-        const notConfigured = !window.SQC_CONFIG || window.SQC_CONFIG.GAS_URL.includes('XXXXXXXX');
-        if (userId === 'demo' && password === 'demo') {
-          sessionStorage.setItem('sqc_user', JSON.stringify({ name: 'demo', role: '管理者', section: '', dept: '', empId: 'demo' }));
-          window.location.href = 'app.html';
-          return;
-        }
-        if (notConfigured) { showError('尚未設定後端網址；原型展示請用 demo / demo 登入'); return; }
+        if (!window.SQC_CONFIG || window.SQC_CONFIG.GAS_URL.includes('XXXXXXXX')) { showError('系統尚未設定後端網址，請聯絡管理員'); return; }
 
-        // === 正式：由 GAS 後端呼叫 CheckUserId 驗證並取得角色 ===
+        // 由 GAS 後端呼叫 CheckUserId 驗證並取得角色
         const r = await window.SqcApi.login(userId, password);
         if (r.ok) {
           sessionStorage.setItem('sqc_user', JSON.stringify(r.user));
