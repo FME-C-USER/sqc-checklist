@@ -90,10 +90,16 @@
               {label}{required && <span className="text-red-500"> *必須</span>}
               <span className="text-slate-400">（{list.length}/{max}）</span>
             </span>
-            <label className="text-xs px-2 py-1 bg-emerald-600 text-white rounded cursor-pointer hover:bg-emerald-700 whitespace-nowrap">
-              {busy ? '壓縮中…' : '+ 拍照/上傳'}
-              <input type="file" accept="image/*" capture="environment" multiple className="hidden" onChange={handleFile} disabled={busy} />
-            </label>
+            <div className="flex gap-1.5 shrink-0">
+              <label className={"text-xs px-2 py-1 rounded cursor-pointer whitespace-nowrap " + (busy ? "bg-slate-300 text-slate-500" : "bg-slate-600 text-white hover:bg-slate-700")}>
+                {busy ? '壓縮中…' : '🖼️ 相簿'}
+                <input type="file" accept="image/*" multiple className="hidden" onChange={handleFile} disabled={busy} />
+              </label>
+              <label className={"text-xs px-2 py-1 rounded cursor-pointer whitespace-nowrap " + (busy ? "bg-slate-300 text-slate-500" : "bg-emerald-600 text-white hover:bg-emerald-700")}>
+                {busy ? '壓縮中…' : '📷 拍照'}
+                <input type="file" accept="image/*" capture="environment" multiple className="hidden" onChange={handleFile} disabled={busy} />
+              </label>
+            </div>
           </div>
           {folderPath && <div className="text-[10px] text-slate-400 mt-1">📁 {folderPath}</div>}
           {list.length > 0 && (
@@ -231,7 +237,8 @@
       const labelOf = (sub) => typeof sub === 'string' ? sub : sub.label;
       const isCustom = (sub) => typeof sub === 'object' && sub.custom;
       const fixedUnits = (sub) => (typeof sub === 'object' && sub.units) ? sub.units : 1;
-      const nameUnits = (lbl) => (s.customNames?.[lbl] || '').split(/[\/、,，\s]+/).filter(Boolean).length;
+      const splitNames = (v) => String(v || '').split(/[\s,，、;；\/|]+/).filter(Boolean);
+      const nameUnits = (lbl) => splitNames(s.customNames?.[lbl]).length;
 
       // 缺失單位數：固定子項用其 units；可填子項用填入的名稱數（至少1）
       const totalUnits = (s.ngSubs || []).reduce((sum, lbl) => {
@@ -284,10 +291,11 @@
                 const lbl = labelOf(sub);
                 return (
                   <div key={lbl} className="mt-2">
+                    <div className="text-[10px] text-slate-500 mb-0.5">填入{lbl}名稱；<b className="text-red-500">多個貨架請用空格或符號（、,/）隔開</b>，系統依隔開的數量計算扣分</div>
                     <input value={s.customNames?.[lbl] || ''} onChange={e => setCustomName(lbl, e.target.value)}
-                      placeholder={`填入${lbl}名稱，多個以「、」分隔（如：日用品架、寵物貨架）`}
+                      placeholder="例：日用品架 寵物貨架　或　日用品架、寵物貨架"
                       className="w-full text-xs px-2 py-1.5 border border-red-300 rounded bg-red-50" />
-                    <div className="text-[10px] text-red-500 mt-0.5">已填 {nameUnits(lbl)} 項 → 扣 {Math.max(1, nameUnits(lbl)) * item.perPoint} 分</div>
+                    <div className="text-[10px] text-red-500 mt-0.5">辨識為 {nameUnits(lbl)} 個貨架 → 扣 {Math.max(1, nameUnits(lbl)) * item.perPoint} 分（{splitNames(s.customNames?.[lbl]).join('｜') || '尚未填寫'}）</div>
                   </div>
                 );
               })}
@@ -359,6 +367,7 @@
       const [scores, setScores] = useState({});
       const [keyObs, setKeyObs] = useState({});
       const [toilet, setToilet] = useState({});
+      const [toiletPhotos, setToiletPhotos] = useState({}); // 廁所觀察「不符合」缺失照片
       const [obsText, setObsText] = useState('');
       const [perfectPhotos, setPerfectPhotos] = useState({});
       const [paperForm, setPaperForm] = useState([]);        // 紙本點檢表（所有店必上傳）
@@ -411,7 +420,7 @@
         } catch (e) { alert('查詢失敗：' + e.message); }
       };
 
-      const resetWork = () => { setScores({}); setKeyObs({}); setToilet({}); setObsText(''); setPerfectPhotos({}); setPaperForm([]); setSign({ count: '', identity: '' }); };
+      const resetWork = () => { setScores({}); setKeyObs({}); setToilet({}); setToiletPhotos({}); setObsText(''); setPerfectPhotos({}); setPaperForm([]); setSign({ count: '', identity: '' }); };
 
       const submit = () => {
         if (!effStore) { alert('請先在「基本資料」選擇店鋪'); setTab('basic'); return; }
@@ -434,6 +443,12 @@
             for (const c of checklist.categories) for (const it of c.items) {
               const s = scores[it.id]; const sc = (s && s.score != null) ? s.score : it.max; const ng = sc < it.max;
               if (ng && (!s?.photos || !s.photos.length)) { alert(`「${it.name}」有扣分，請補上缺失照片`); return; }
+            }
+          }
+          // 廁所觀察題「不符合」需缺失照片
+          if (toilet['O1'] === '有') {
+            for (const t of checklist.toiletInspect) {
+              if (toilet[t.id] === '不符合' && !(toiletPhotos[t.id] || []).length) { alert(`廁所觀察「${t.name}」為不符合，請補上缺失照片`); return; }
             }
           }
         }
@@ -468,6 +483,7 @@
             if ((s.score != null ? s.score : it.max) < it.max) addPhotos([monthFolder, it.name, '缺失'], s.photos);
           }));
           checklist.keyObservations.forEach(k => addPhotos([monthFolder, k.name], keyObs[k.id]));
+          checklist.toiletInspect.forEach(t => { if (toilet[t.id] === '不符合') addPhotos([monthFolder, '廁所觀察', t.name, '缺失'], toiletPhotos[t.id]); });
           if (noDeductDefect) PERFECT_ZONES.forEach(z => addPhotos([monthFolder, '滿分照片', z], perfectPhotos[z]));
         }
         addPhotos([monthFolder, 'SQC點檢表完成照片'], paperForm);
@@ -692,9 +708,14 @@
                       {toilet['O1'] === '有' && (
                         <div className="mt-3 space-y-2">
                           {checklist.toiletInspect.map(t => (
-                            <div key={t.id} className="text-sm flex items-center justify-between gap-2">
-                              <span className="text-slate-700 flex-1">{t.name}</span>
-                              <div className="flex gap-1 shrink-0">{['符合', '不符合'].map(v => <button key={v} onClick={() => setToilet({ ...toilet, [t.id]: v })} className={"px-3 py-1 text-xs rounded border " + (toilet[t.id] === v ? (v === '符合' ? "bg-emerald-500 text-white border-emerald-500" : "bg-red-500 text-white border-red-500") : "bg-white text-slate-500 border-slate-300")}>{v}</button>)}</div>
+                            <div key={t.id} className="text-sm">
+                              <div className="flex items-center justify-between gap-2">
+                                <span className="text-slate-700 flex-1">{t.name}</span>
+                                <div className="flex gap-1 shrink-0">{['符合', '不符合'].map(v => <button key={v} onClick={() => setToilet({ ...toilet, [t.id]: v })} className={"px-3 py-1 text-xs rounded border " + (toilet[t.id] === v ? (v === '符合' ? "bg-emerald-500 text-white border-emerald-500" : "bg-red-500 text-white border-red-500") : "bg-white text-slate-500 border-slate-300")}>{v}</button>)}</div>
+                              </div>
+                              {toilet[t.id] === '不符合' && canPhoto && (
+                                <PhotoUpload label="缺失照片（不符合必須拍照）" required photos={toiletPhotos[t.id]} onChange={p => setToiletPhotos({ ...toiletPhotos, [t.id]: p })} folderPath={`${DRIVE_ROOT}/${monthFolder}/廁所觀察/${t.name}/缺失`} />
+                              )}
                             </div>
                           ))}
                         </div>
