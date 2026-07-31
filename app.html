@@ -564,12 +564,12 @@
         let done = new Set();
         if (CONFIGURED) {
           const q = await SqcApi.queryRecords(workMonth, { section: filter.section });
-          (q.records || []).forEach(r => done.add(String(r.storeCode || '')));
+          (q.records || []).forEach(r => done.add(normCode(r.storeCode)));
         } else {
           records.forEach(r => done.add(String(r.store)));
         }
         const roster = STORE_ROSTER.filter(s => !filter.section || s.section === filter.section);
-        const pending = roster.filter(s => !done.has(String(s.code)) && !done.has(String(s.name)));
+        const pending = roster.filter(s => !done.has(normCode(s.code)) && !done.has(String(s.name)));
         if (!pending.length) { alert('當月名單中沒有尚未點檢的店鋪 🎉'); return; }
         const head = ['店號', '店名', '課別', '店鋪型態'];
         const data = [head].concat(pending.map(s => [s.code, s.name, s.section, s.type || '一般店']));
