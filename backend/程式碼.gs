@@ -279,8 +279,9 @@ function submitRecord(rec) {
     var data = sh.getDataRange().getValues();
     var head = data[0];
     var storeCol = head.indexOf('店號');
+    var recCode = normCode(rec.storeCode);
     for (var i = 1; i < data.length; i++) {
-      if (String(data[i][storeCol]) === String(rec.storeCode) && String(rec.storeCode) !== '') {
+      if (recCode !== '' && normCode(data[i][storeCol]) === recCode) {
         return { ok: false, code: 'DUPLICATE', message: '這家店本月已有其他人送出點檢紀錄，請重新整理後至查詢紀錄編輯該筆' };
       }
     }
@@ -555,6 +556,8 @@ function nowStr() { return Utilities.formatDate(new Date(), 'Asia/Taipei', 'yyyy
 // 儲存格可能被 Sheet 自動轉為 Date 型別，統一正規化
 function toYmd(v) { return (v instanceof Date) ? Utilities.formatDate(v, 'Asia/Taipei', 'yyyy-MM-dd') : String(v || '').slice(0, 10); }
 function toDateTimeStr(v) { return (v instanceof Date) ? Utilities.formatDate(v, 'Asia/Taipei', 'yyyy-MM-dd HH:mm') : String(v || ''); }
+// 店號正規化：去除前導0與空白，避免 Sheet 自動轉數字掉0導致字串比對誤判「不同店」
+function normCode(c) { var s = String(c == null ? '' : c).trim(); var n = s.replace(/^0+(?=\d)/, ''); return n; }
 
 /** 將前端紀錄物件轉成該活頁欄位順序的列陣列 */
 function recordToRow(sh, rec) {

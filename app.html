@@ -155,6 +155,8 @@
     // 台北時間現在（datetime-local 預設值用）
     function taipeiNow() { return new Date(Date.now() + 8 * 3600 * 1000).toISOString().slice(0, 16); }
     function taipeiToday() { return taipeiNow().slice(0, 10); }
+    // 店號正規化：去除前導0與空白，避免不同來源(店鋪名單/店鋪主檔)格式不一致誤判成不同店
+    function normCode(c) { const s = String(c == null ? '' : c).trim(); return s.replace(/^0+(?=\d)/, ''); }
     // 點檢時間(YYYY-MM-DDTHH:mm) → 民國年月，如 2026-07 → 11507
     function rocMonth(dt) { if (!dt || dt.length < 7) return MONTH; return String(parseInt(dt.slice(0, 4)) - 1911) + dt.slice(5, 7); }
 
@@ -305,7 +307,7 @@
       const loadInspected = (m) => {
         if (!CONFIGURED) return;
         SqcApi.queryRecords(m || workMonth, {}).then(r => {
-          const map = {}; (r.records || []).forEach(x => { map[String(x.storeCode || '')] = true; });
+          const map = {}; (r.records || []).forEach(x => { map[normCode(x.storeCode)] = true; });
           setInspectedCodes(map);
         }).catch(() => { });
       };
@@ -417,7 +419,7 @@
       const submit = () => {
         const isEdit = !!editingRecordId;
         if (!effStore) { alert('請先在「基本資料」選擇店鋪'); setTab('basic'); return; }
-        if (!isEdit && inspectedCodes[String(effStore.code)]) { alert('這家店本月已有點檢紀錄，不可重複點檢（如需修正請至查詢紀錄編輯該筆）'); setTab('basic'); return; }
+        if (!isEdit && inspectedCodes[normCode(effStore.code)]) { alert('這家店本月已有點檢紀錄，不可重複點檢（如需修正請至查詢紀錄編輯該筆）'); setTab('basic'); return; }
         if (!basic.storeType) { alert('請先在「基本資料」選擇可否拍照'); setTab('basic'); return; }
         if (!reasonOk) { alert('不可拍照店鋪請選擇原因'); setTab('basic'); return; }
         if (!basic.staffId) { alert('請先在「基本資料」選擇點檢人員'); setTab('basic'); return; }
@@ -527,11 +529,11 @@
           if (result && result.ok === false) {
             // 後端二次把關（如同店本月已被他人搶先送出）
             alert('⚠ ' + (result.message || '送出失敗，請稍後再試'));
-            if (result.code === 'DUPLICATE') { setInspectedCodes(prev => ({ ...prev, [String(storeCode)]: true })); setTab('basic'); }
+            if (result.code === 'DUPLICATE') { setInspectedCodes(prev => ({ ...prev, [normCode(storeCode)]: true })); setTab('basic'); }
             return;
           }
           alert(`✅ ${isEdit ? '已更新' : '已送出'}\n店鋪：${storeName}　得分：${total}/${TOTAL_MAX}（${grade.txt}）` + (queue.length ? `\n新增照片 ${queue.length} 張背景上傳中` : ''));
-          if (!isEdit) setInspectedCodes(prev => ({ ...prev, [String(storeCode)]: true }));
+          if (!isEdit) setInspectedCodes(prev => ({ ...prev, [normCode(storeCode)]: true }));
           resetWork(); setTab('records'); loadRecords();
         }).catch(e => alert((isEdit ? '更新' : '送出') + '失敗：' + e.message));
       };
@@ -626,7 +628,7 @@
                     <option value="">— 請選擇店鋪 —</option>
                     {sectionStores.map(s => {
                       const isEditingThis = !!editingRecordId && String(s.code) === String(basic.storeCode);
-                      const done = inspectedCodes[String(s.code)] && !isEditingThis;
+                      const done = inspectedCodes[normCode(s.code)] && !isEditingThis;
                       return <option key={s.code} value={s.code} disabled={done}>{s.code} {s.name}{s.type === '隨盤點點檢店' ? '（隨盤點點檢店）' : ''}{done ? ' ✓已點檢(不可選)' : (isEditingThis ? ' (編輯中)' : '')}</option>;
                     })}
                     <option value="__custom">＋ 自行新增店鋪…</option>
