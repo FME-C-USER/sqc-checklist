@@ -66,7 +66,7 @@
       return { name: file.name.replace(/\.[^.]+$/, '') + '.jpg', sizeKB: Math.round(blob.size / 1024), quality: q, thumb, blob };
     }
 
-    function PhotoUpload({ label, photos, onChange, required, max = 10, folderPath }) {
+    function PhotoUpload({ label, photos, onChange, required, max = 10, folderPath, existingCount = 0 }) {
       const [busy, setBusy] = useState(false);
       const list = photos || [];
       const handleFile = async (e) => {
@@ -82,13 +82,15 @@
         setBusy(false);
       };
       const remove = (i) => onChange(list.filter((_, idx) => idx !== i));
-      const need = required && list.length === 0;
+      const satisfied = existingCount > 0 || list.length > 0;
+      const need = required && !satisfied;
       return (
         <div className={"mt-2 rounded-lg border p-2 " + (need ? "border-red-300 bg-red-50" : "border-slate-200 bg-slate-50")}>
           <div className="flex items-center justify-between gap-2">
             <span className="text-xs font-medium text-slate-600">
               {label}{required && <span className="text-red-500"> *必須</span>}
-              <span className="text-slate-400">（{list.length}/{max}）</span>
+              <span className="text-slate-400">（{existingCount > 0 ? `新增${list.length}` : list.length}/{max}）</span>
+              {existingCount > 0 && <span className="ml-1 text-emerald-600">✓ 已有 {existingCount} 張原照片（免重傳）</span>}
             </span>
             <div className="flex gap-1.5 shrink-0">
               <label className={"text-xs px-2 py-1 rounded cursor-pointer whitespace-nowrap " + (busy ? "bg-slate-300 text-slate-500" : "bg-slate-600 text-white hover:bg-slate-700")}>
@@ -187,7 +189,7 @@
     // ============================================================
     // 點檢項目列
     // ============================================================
-    function ItemRow({ item, state, setState, canPhoto, monthFolder }) {
+    function ItemRow({ item, state, setState, canPhoto, monthFolder, existingCount = 0 }) {
       const s = state || {};
       const labelOf = (sub) => typeof sub === 'string' ? sub : sub.label;
       const isCustom = (sub) => typeof sub === 'object' && sub.custom;
@@ -265,7 +267,7 @@
           )}
 
           {isNG && canPhoto && (
-            <PhotoUpload label="缺失照片（NG 項目必須拍照記錄）" required photos={s.photos} onChange={p => setState({ ...s, photos: p })} folderPath={`${DRIVE_ROOT}/${monthFolder}/${item.name}/缺失`} />
+            <PhotoUpload label="缺失照片（NG 項目必須拍照記錄）" required photos={s.photos} onChange={p => setState({ ...s, photos: p })} folderPath={`${DRIVE_ROOT}/${monthFolder}/${item.name}/缺失`} existingCount={existingCount} />
           )}
         </div>
       );
@@ -315,6 +317,8 @@
       const checklist = boot.checklist, STORE_ROSTER = boot.stores, STAFFS = boot.staffs, DEPTS = boot.depts;
       const TOTAL_MAX = useMemo(() => checklist.categories.reduce((s, c) => s + c.max, 0), [checklist]);
       const monthFolder = monthFolderOf(workMonth);
+      // 編輯既有紀錄時，查該欄位是否已有原照片（免重傳）；key 需與 submit() 的 addPhotos/hasExisting 一致
+      const existingCountAt = (parts) => (existingPhotos[parts.join('/')] || []).length;
 
       const sectionStores = STORE_ROSTER.filter(s => !basic.section || s.section === basic.section);
       const store = STORE_ROSTER.find(s => s.code === basic.storeCode);
@@ -472,6 +476,19 @@
 
         // 照片：編輯時以原有照片JSON 為基底，新增的接在後面
         const queue = [], photosJson = isEdit ? JSON.parse(JSON.stringify(existingPhotos || {})) : {};
+        if (isEdit) {
+          // 編輯時若項目已從缺失改為合格，清掉過時的缺失照片紀錄，避免資料不一致
+          checklist.categories.forEach(c => c.items.forEach(it => {
+            const s = scores[it.id] || {};
+            const ng = (s.score != null ? s.score : it.max) < it.max;
+            const key = [monthFolder, it.name, '缺失'].join('/');
+            if (!ng) delete photosJson[key];
+          }));
+          checklist.toiletInspect.forEach(t => {
+            const key = [monthFolder, '廁所觀察', t.name, '缺失'].join('/');
+            if (toilet[t.id] !== '不符合') delete photosJson[key];
+          });
+        }
         const addPhotos = (pathParts, arr) => {
           if (!arr || !arr.length) return;
           const key = pathParts.join('/');
@@ -600,7 +617,11 @@
                   <label className="block text-xs text-slate-500 mb-1">點檢店鋪名單<span className="text-slate-400">（依課別自動帶出，亦可自行新增）</span></label>
                   <select value={basic.storeCode} onChange={e => setBasic({ ...basic, storeCode: e.target.value, customStore: '', customInfo: null })} className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm">
                     <option value="">— 請選擇店鋪 —</option>
-                    {sectionStores.map(s => { const done = inspectedCodes[String(s.code)]; return <option key={s.code} value={s.code} disabled={done}>{s.code} {s.name}{s.type === '隨盤點點檢店' ? '（隨盤點點檢店）' : ''}{done ? ' ✓已點檢(不可選)' : ''}</option>; })}
+                    {sectionStores.map(s => {
+                      const isEditingThis = !!editingRecordId && String(s.code) === String(basic.storeCode);
+                      const done = inspectedCodes[String(s.code)] && !isEditingThis;
+                      return <option key={s.code} value={s.code} disabled={done}>{s.code} {s.name}{s.type === '隨盤點點檢店' ? '（隨盤點點檢店）' : ''}{done ? ' ✓已點檢(不可選)' : (isEditingThis ? ' (編輯中)' : '')}</option>;
+                    })}
                     <option value="__custom">＋ 自行新增店鋪…</option>
                   </select>
                   {basic.storeCode === '__custom' && (
@@ -676,7 +697,7 @@
                   return (
                     <div key={cat.key} className="bg-white rounded-xl shadow-sm overflow-hidden">
                       <div className="bg-slate-700 text-white px-4 py-2.5 flex justify-between"><span className="font-bold">{cat.name}</span><span className="text-sm">{cs} / {cat.max}</span></div>
-                      {cat.items.map(it => <ItemRow key={it.id} item={it} state={scores[it.id]} setState={st => setItemState(it.id, st)} canPhoto={canPhoto} monthFolder={monthFolder} />)}
+                      {cat.items.map(it => <ItemRow key={it.id} item={it} state={scores[it.id]} setState={st => setItemState(it.id, st)} canPhoto={canPhoto} monthFolder={monthFolder} existingCount={existingCountAt([monthFolder, it.name, '缺失'])} />)}
                     </div>
                   );
                 })}
@@ -687,7 +708,7 @@
                   <div className="p-4 space-y-3">
                     {/* 重點觀察題：僅可拍照店鋪需拍照 */}
                     {canPhoto && checklist.keyObservations.map(k => (
-                      <PhotoUpload key={k.id} label={k.name} required photos={keyObs[k.id]} onChange={p => setKeyObs({ ...keyObs, [k.id]: p })} folderPath={`${DRIVE_ROOT}/${monthFolder}/${k.name}`} />
+                      <PhotoUpload key={k.id} label={k.name} required photos={keyObs[k.id]} onChange={p => setKeyObs({ ...keyObs, [k.id]: p })} folderPath={`${DRIVE_ROOT}/${monthFolder}/${k.name}`} existingCount={existingCountAt([monthFolder, k.name])} />
                     ))}
 
                     {/* 對外廁所觀察記錄（條件式顯示） */}
@@ -728,7 +749,7 @@
                                 </div>
                               )}
                               {toilet[t.id] === '不符合' && canPhoto && (
-                                <PhotoUpload label="缺失照片（不符合必須拍照）" required photos={toiletPhotos[t.id]} onChange={p => setToiletPhotos({ ...toiletPhotos, [t.id]: p })} folderPath={`${DRIVE_ROOT}/${monthFolder}/廁所觀察/${t.name}/缺失`} />
+                                <PhotoUpload label="缺失照片（不符合必須拍照）" required photos={toiletPhotos[t.id]} onChange={p => setToiletPhotos({ ...toiletPhotos, [t.id]: p })} folderPath={`${DRIVE_ROOT}/${monthFolder}/廁所觀察/${t.name}/缺失`} existingCount={existingCountAt([monthFolder, '廁所觀察', t.name, '缺失'])} />
                               )}
                             </div>
                           ))}
@@ -747,7 +768,7 @@
                     <div className="p-4">
                       <p className="text-xs text-slate-500 mb-2">店鋪無缺失：請拍下列指定區域，每區可上傳 10 張；相鄰區域可共拍一張。</p>
                       <div className="grid md:grid-cols-2 gap-2">
-                        {PERFECT_ZONES.map(z => <PhotoUpload key={z} label={z} required photos={perfectPhotos[z]} onChange={p => setPerfectPhotos({ ...perfectPhotos, [z]: p })} folderPath={`${DRIVE_ROOT}/${monthFolder}/滿分照片/${z}`} />)}
+                        {PERFECT_ZONES.map(z => <PhotoUpload key={z} label={z} required photos={perfectPhotos[z]} onChange={p => setPerfectPhotos({ ...perfectPhotos, [z]: p })} folderPath={`${DRIVE_ROOT}/${monthFolder}/滿分照片/${z}`} existingCount={existingCountAt([monthFolder, '滿分照片', z])} />)}
                       </div>
                     </div>
                   </div>
@@ -767,7 +788,7 @@
                     </div>
                     <div>
                       <div className="text-sm font-semibold text-slate-600">📄 紙本點檢表上傳<span className="text-red-500 text-xs"> *所有店皆必須上傳才能送出</span></div>
-                      <PhotoUpload label="紙本點檢表照片" required photos={paperForm} onChange={setPaperForm} folderPath={`${DRIVE_ROOT}/${monthFolder}/SQC點檢表完成照片`} />
+                      <PhotoUpload label="紙本點檢表照片" required photos={paperForm} onChange={setPaperForm} folderPath={`${DRIVE_ROOT}/${monthFolder}/SQC點檢表完成照片`} existingCount={existingCountAt([monthFolder, 'SQC點檢表完成照片'])} />
                     </div>
                   </div>
                 </div>
