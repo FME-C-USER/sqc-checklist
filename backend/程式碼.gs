@@ -51,7 +51,12 @@ function doPost(e) {
       deleteItem: function () { return deleteItem(p.month, p.id); },
       upsertRow: function () { return upsertRow(p.kind, p.month, p.row); },
       deleteRow: function () { return deleteRowByKind(p.kind, p.month, p.id); },
-      getMaster: function () { ensureKindSheet(p.kind, p.month); return { rows: readSheet(sheetForKind(p.kind, p.month)) }; },
+      getMaster: function () {
+        ensureKindSheet(p.kind, p.month);
+        var all = readSheet(sheetForKind(p.kind, p.month));
+        var LIMIT = 800; // 大表(如店鋪主檔4000+筆)避免整包傳輸拖慢/逾時
+        return { rows: all.slice(0, LIMIT), total: all.length, truncated: all.length > LIMIT };
+      },
       getChangeLog: function () { return getChangeLog(p.limit); },
       lookupStore: function () { return lookupStore(p.q); },
     };

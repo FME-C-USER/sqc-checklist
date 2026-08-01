@@ -22,7 +22,7 @@
   </script>
 
   <script type="text/jsx" id="appCode">
-    const { useState, useMemo, useEffect } = React;
+    const { useState, useMemo, useEffect, useRef } = React;
 
     // ============================================================
     // 共用：照片壓縮工具（上傳壓縮 + 縮圖預覽）
@@ -1086,16 +1086,33 @@
       const [sub, setSub] = useState('items');
       const [month, setMonth] = useState(curMonth);
       const [rows, setRows] = useState([]);
+      const [rowsMeta, setRowsMeta] = useState({ total: 0, truncated: false });
       const [editing, setEditing] = useState(null);
       const [uploaded, setUploaded] = useState({});
       const [logRows, setLogRows] = useState([]);
+      const [loading, setLoading] = useState(false);
+      const [loadErr, setLoadErr] = useState('');
       const isLog = sub === 'log';
       const area = MAINT_AREAS.find(a => a.kind === sub);
 
+      // 請求序號防呆：分頁切換太快時，較早但較慢回來的請求不可覆蓋較新分頁的資料
+      const reqSeq = useRef(0);
       const load = () => {
-        if (!configured) { setRows([]); setLogRows([]); return; }
-        if (isLog) { SqcApi.getChangeLog(300).then(r => setLogRows(r.rows || [])).catch(() => setLogRows([])); return; }
-        SqcApi.getMaster(area.importKind, month).then(r => setRows(r.rows || [])).catch(() => setRows([]));
+        const myReq = ++reqSeq.current;
+        setLoading(true); setLoadErr('');
+        if (!configured) { setRows([]); setLogRows([]); setLoading(false); return; }
+        const done = () => { if (myReq === reqSeq.current) setLoading(false); };
+        if (isLog) {
+          SqcApi.getChangeLog(300)
+            .then(r => { if (myReq === reqSeq.current) setLogRows(r.rows || []); })
+            .catch(e => { if (myReq === reqSeq.current) { setLogRows([]); setLoadErr(e.message); } })
+            .finally(done);
+          return;
+        }
+        SqcApi.getMaster(area.importKind, month)
+          .then(r => { if (myReq === reqSeq.current) { setRows(r.rows || []); setRowsMeta({ total: r.total || (r.rows || []).length, truncated: !!r.truncated }); } })
+          .catch(e => { if (myReq === reqSeq.current) { setRows([]); setLoadErr(e.message); } })
+          .finally(done);
       };
       useEffect(() => { setEditing(null); load(); }, [sub, month]);
 
@@ -1116,9 +1133,11 @@
         reader.readAsArrayBuffer(file);
       });
 
+      const [uploading, setUploading] = useState(false);
       const onUpload = async (e) => {
         const f = e.target.files[0]; e.target.value = ''; if (!f) return;
         if (!configured) { alert('尚未連線後端，無法匯入'); return; }
+        setUploading(true);
         try {
           const parsed = await parseFile(f);
           let data = parsed.json, convMsg = '';
@@ -1137,6 +1156,7 @@
           load(); await onReload();
           alert(`✅ 已匯入「${f.name}」${r.count} 筆（同名覆蓋，以最新為主）` + convMsg);
         } catch (err) { alert('匯入失敗：' + err.message); }
+        finally { setUploading(false); }
       };
 
       const blank = () => { const o = {}; area.fields.forEach(f => o[f.k] = (f.k === '排序') ? (rows.length + 1) : (f.t === 'select' ? f.opts[0] : '')); return o; };
@@ -1161,11 +1181,20 @@
             <button onClick={() => setSub('log')} className={"px-3 py-1.5 text-sm rounded-lg " + (isLog ? "bg-emerald-600 text-white" : "text-slate-600 hover:bg-slate-100")}>📜 異動紀錄</button>
           </div>
 
+          {(loading || uploading) && (
+            <div className="h-1 w-full bg-slate-200 rounded-full overflow-hidden">
+              <div className="h-full w-1/3 bg-emerald-500 rounded-full" style={{ animation: 'sqc-progress 1s ease-in-out infinite' }} />
+              <style>{`@keyframes sqc-progress { 0%{margin-left:0%} 50%{margin-left:67%} 100%{margin-left:0%} }`}</style>
+            </div>
+          )}
+          {uploading && <div className="text-xs text-emerald-600">資料處理中，請稍候…</div>}
+          {loadErr && <div className="bg-red-50 border border-red-200 text-red-700 text-sm rounded-lg px-3 py-2 flex justify-between items-center"><span>載入失敗：{loadErr}</span><button onClick={load} className="text-xs bg-red-600 text-white px-2 py-1 rounded">重試</button></div>}
+
           {isLog && (
             <div className="bg-white rounded-xl shadow-sm p-5">
               <div className="flex items-center justify-between mb-3">
                 <h3 className="font-bold text-slate-700">📜 異動紀錄</h3>
-                <button onClick={load} className="text-sm px-3 py-1.5 bg-slate-100 rounded-lg hover:bg-slate-200">重新整理</button>
+                <button onClick={load} disabled={loading} className="text-sm px-3 py-1.5 bg-slate-100 rounded-lg hover:bg-slate-200 disabled:opacity-50">{loading ? '載入中…' : '重新整理'}</button>
               </div>
               <div className="overflow-x-auto">
                 <table className="w-full text-sm">
@@ -1176,7 +1205,7 @@
                         <td className="py-2 px-2 text-slate-500 whitespace-nowrap">{r.time}</td><td className="px-2">{r.user}</td><td className="px-2">{r.action}</td><td className="px-2 text-slate-600">{r.target}</td><td className="px-2 text-slate-500">{r.note}</td>
                       </tr>
                     ))}
-                    {logRows.length === 0 && <tr><td colSpan="5" className="py-6 text-center text-slate-400">{configured ? '尚無異動紀錄' : '尚未連線後端'}</td></tr>}
+                    {logRows.length === 0 && !loading && <tr><td colSpan="5" className="py-6 text-center text-slate-400">{configured ? '尚無異動紀錄' : '尚未連線後端'}</td></tr>}
                   </tbody>
                 </table>
               </div>
@@ -1193,7 +1222,7 @@
               <div className="flex items-center gap-2">
                 {area.monthly && <select value={month} onChange={e => setMonth(e.target.value)} className="px-3 py-1.5 border border-slate-300 rounded-lg text-sm"><option value="11506">115年06月</option><option value="11507">115年07月</option></select>}
                 <button onClick={() => setEditing(blank())} className="text-sm px-3 py-1.5 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700">+ 新增</button>
-                <label className="text-sm px-3 py-1.5 bg-slate-700 text-white rounded-lg cursor-pointer hover:bg-slate-800">📥 {uploaded[sub] ? '重新匯入' : 'Excel 匯入'}<input type="file" accept=".xlsx,.xls" className="hidden" onChange={onUpload} /></label>
+                <label className={"text-sm px-3 py-1.5 rounded-lg text-white " + (uploading ? "bg-slate-400" : "bg-slate-700 hover:bg-slate-800 cursor-pointer")}>📥 {uploading ? '匯入中…' : (uploaded[sub] ? '重新匯入' : 'Excel 匯入')}<input type="file" accept=".xlsx,.xls" className="hidden" onChange={onUpload} disabled={uploading} /></label>
               </div>
             </div>
             {uploaded[sub] && <div className="text-xs text-emerald-600 mb-3">✓ 最近匯入：{uploaded[sub]}</div>}
@@ -1208,8 +1237,8 @@
                       <td className="px-2 whitespace-nowrap"><button onClick={() => setEditing({ ...r })} className="text-xs text-blue-600 mr-2">編輯</button><button onClick={() => remove(r[area.key])} className="text-xs text-red-600">刪除</button></td>
                     </tr>
                   ))}
-                  {rows.length > 500 && <tr><td colSpan={area.cols.length + 1} className="py-2 px-2 text-center text-slate-400 text-xs">僅顯示前 500 筆（共 {rows.length} 筆）；請用匯入或搜尋維護</td></tr>}
-                  {rows.length === 0 && <tr><td colSpan={area.cols.length + 1} className="py-6 text-center text-slate-400">{configured ? '尚無資料，請匯入或新增' : '尚未連線後端'}</td></tr>}
+                  {(rows.length > 500 || rowsMeta.truncated) && <tr><td colSpan={area.cols.length + 1} className="py-2 px-2 text-center text-slate-400 text-xs">僅顯示前 {Math.min(rows.length, 500)} 筆（共 {rowsMeta.total} 筆）；請用匯入或搜尋維護</td></tr>}
+                  {rows.length === 0 && !loading && <tr><td colSpan={area.cols.length + 1} className="py-6 text-center text-slate-400">{configured ? '尚無資料，請匯入或新增' : '尚未連線後端'}</td></tr>}
                 </tbody>
               </table>
             </div>
