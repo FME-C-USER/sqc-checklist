@@ -35,6 +35,7 @@
     updateRecord: (month, id, record) => call('updateRecord', { month, id, record }),
     deleteRecord: (month, id) => call('deleteRecord', { month, id }),
     getSummary: (month, filter) => call('getSummary', { month, filter }),
+    buildMonthlyReport: (month, filter) => call('buildMonthlyReport', { month, filter }),
     importMaster: (kind, month, rows, fileName) => call('importMaster', { kind, month, rows, fileName }),
     upsertItem: (month, item) => call('upsertItem', { month, item }),
     deleteItem: (month, id) => call('deleteItem', { month, id }),

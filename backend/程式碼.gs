@@ -27,7 +27,7 @@ function doPost(e) {
 
     // ===== 授權閘門：除 login 外皆需有效 token；管理動作再驗管理者 =====
     var OPEN = { login: 1 };
-    var ADMIN_ONLY = { importMaster: 1, upsertItem: 1, deleteItem: 1, upsertRow: 1, deleteRow: 1, getMaster: 1, getChangeLog: 1 };
+    var ADMIN_ONLY = { importMaster: 1, upsertItem: 1, deleteItem: 1, upsertRow: 1, deleteRow: 1, getMaster: 1, getChangeLog: 1, buildMonthlyReport: 1 };
     var sess = null;
     if (!OPEN[action]) {
       sess = getSession(req.token);
@@ -45,6 +45,7 @@ function doPost(e) {
       updateRecord: function () { return updateRecord(p.month, p.id, p.record); },
       deleteRecord: function () { return deleteRecord(p.month, p.id); },
       getSummary: function () { return getSummary(p.month, p.filter); },
+      buildMonthlyReport: function () { return buildMonthlyReport(p.month, p.filter); },
       importMaster: function () { return importMaster(p.kind, p.month, p.rows, p.fileName); },
       upsertItem: function () { return upsertItem(p.month, p.item); },
       deleteItem: function () { return deleteItem(p.month, p.id); },
@@ -365,6 +366,95 @@ function getSummary(month, filter) {
     avg: recs.length ? Math.round(recs.reduce(function (s, r) { return s + Number(r.total || 0); }, 0) / recs.length) : 0,
     passRate: recs.length ? Math.round(recs.filter(function (r) { return Number(r.total) >= pass; }).length / recs.length * 100) : 0,
     records: recs,
+  };
+}
+
+// ============================================================
+// 月報表（課長版/客戶版 共用資料）
+//   把 點檢紀錄_月 的 JSON 明細攤平成「每題一欄」的主表列，
+//   加上部/課/擔當查找與依課別的 KPI 彙總，交給前端組成 xlsx。
+// ============================================================
+function buildMonthlyReport(month, filter) {
+  var checklist = getChecklist(month);
+  var records = queryRecords(month, filter);
+  var roster = readSheet('店鋪名單_' + month);
+  var storesMaster = readSheet('店鋪主檔');
+  var pass = Number(getSetting('及格分數') || 85);
+
+  var masterByCode = {}, rosterByCode = {};
+  storesMaster.forEach(function (r) { masterByCode[normCode(r['店號'])] = r; });
+  roster.forEach(function (r) { rosterByCode[normCode(r['店號'])] = r; });
+
+  // 依大分類分組題目，供小計與欄位排序用
+  var catOrder = [], catItems = {};
+  checklist.forEach(function (it) {
+    if (!catItems[it.cat]) { catItems[it.cat] = []; catOrder.push(it.cat); }
+    catItems[it.cat].push(it);
+  });
+
+  var rows = records.map(function (rec, idx) {
+    var code = normCode(rec.storeCode);
+    var sm = masterByCode[code] || {};
+    var ro = rosterByCode[code] || {};
+    var itemScores = {}, itemExtra = {};
+    checklist.forEach(function (it) {
+      var d = (rec.detail || {})[it.id];
+      itemScores[it.id] = d && d.score != null ? d.score : it.max;
+      if (d && d.ngSubs && d.ngSubs.length) itemExtra[it.id] = d.ngSubs.join('、');
+      if (d && d.customNames) {
+        var names = Object.keys(d.customNames).map(function (k) { return d.customNames[k]; }).filter(Boolean);
+        if (names.length) itemExtra[it.id] = (itemExtra[it.id] ? itemExtra[it.id] + '、' : '') + names.join('、');
+      }
+    });
+    var catSubtotal = {};
+    catOrder.forEach(function (cat) {
+      catSubtotal[cat] = catItems[cat].reduce(function (s, it) { return s + (itemScores[it.id] != null ? itemScores[it.id] : it.max); }, 0);
+    });
+    return {
+      序: idx + 1,
+      營業部: sm['營業部名稱'] || '', 營業課別: sm['營業課名稱'] || '', 營業擔當: sm['營業擔當'] || '',
+      店號: rec.storeCode, 店名: rec.storeName, 點檢時間: rec.time,
+      itemScores: itemScores, itemExtra: itemExtra, 分類小計: catSubtotal,
+      合計: Number(rec.total), 等第: rec.grade,
+      主責部: rec.dept || '', 主責課: rec.section || '',
+      點檢人員: rec.staffName, 在店人數: rec.staffCount, 身分別: rec.identity,
+      備註: rec.note || '', 店型態: rec.storeType,
+      遠程店: ro['遠程店'] || '否', 假日店: ro['假日店'] || '否', 預排梯次: ro['預排梯次'] || '',
+      觀察: rec.observation || {},
+    };
+  });
+
+  // 依課別 KPI 彙總（應點檢=名單配額；已點檢=實際送出）
+  var byDept = {};
+  var ensureDept = function (sect) { if (!byDept[sect]) byDept[sect] = { 課別: sect, 應點檢: 0, 已點檢: 0, scores: [], 不及格店: [] }; return byDept[sect]; };
+  roster.forEach(function (r) { ensureDept(r['課別'] || '(未分類)').應點檢++; });
+  rows.forEach(function (r) {
+    var d = ensureDept(r.主責課 || '(未分類)');
+    d.已點檢++; d.scores.push(r.合計);
+    if (r.合計 < pass) d.不及格店.push(r.店名);
+  });
+  var kpi = Object.keys(byDept).sort().map(function (sect) {
+    var d = byDept[sect];
+    var passCount = d.scores.filter(function (s) { return s >= pass; }).length;
+    return {
+      課別: d.課別, 應點檢: d.應點檢, 已點檢: d.已點檢, 未點檢: d.應點檢 - d.已點檢,
+      完成率: d.應點檢 ? Math.round(d.已點檢 / d.應點檢 * 100) + '%' : '-',
+      合格家數: passCount, 不合格家數: d.已點檢 - passCount,
+      合格率: d.已點檢 ? Math.round(passCount / d.已點檢 * 100) + '%' : '-',
+      平均分: d.scores.length ? Math.round(d.scores.reduce(function (a, b) { return a + b; }, 0) / d.scores.length) : '-',
+      最高分: d.scores.length ? Math.max.apply(null, d.scores) : '-',
+      最低分: d.scores.length ? Math.min.apply(null, d.scores) : '-',
+      不及格店: d.不及格店.join('、'),
+    };
+  });
+
+  return {
+    passScore: pass,
+    checklist: checklist.map(function (it) { return { id: it.id, name: it.name, cat: it.cat, max: it.max }; }),
+    catOrder: catOrder,
+    rows: rows,
+    kpi: kpi,
+    roster: roster.map(function (r) { return { 店號: r['店號'], 店名: r['店名'], 課別: r['課別'], 店鋪型態: r['店鋪型態'], 遠程店: r['遠程店'], 假日店: r['假日店'], 預排梯次: r['預排梯次'] }; }),
   };
 }
 
