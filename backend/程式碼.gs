@@ -41,6 +41,7 @@ function doPost(e) {
       getDriveToken: function () { return { token: getDriveToken() }; },
       getUploadFolderId: function () { return { folderId: getUploadFolderId(p.pathParts) }; },
       submitRecord: function () { return submitRecord(p.record); },
+      attachPhotoLinks: function () { return attachPhotoLinks(p.month, p.recordId, p.links); },
       queryRecords: function () { return { records: queryRecords(p.month, p.filter) }; },
       updateRecord: function () { return updateRecord(p.month, p.id, p.record); },
       deleteRecord: function () { return deleteRecord(p.month, p.id); },
@@ -306,6 +307,44 @@ function submitRecord(rec) {
   }
 }
 
+// 照片直傳 Drive 完成後，把雲端連結(fileId)回寫進紀錄的照片JSON，讓報表能列出連結
+// links: { "路徑/資料夾":[{name, fileId}, ...], ... }；可分批多次呼叫，累加合併不覆蓋既有連結
+function attachPhotoLinks(month, recordId, links) {
+  var lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  try {
+    var sh = SpreadsheetApp.openById(SPREADSHEET_ID).getSheetByName('點檢紀錄_' + month);
+    if (!sh) return { ok: false, message: '找不到月份活頁' };
+    var data = sh.getDataRange().getValues();
+    var head = data[0];
+    var idCol = head.indexOf('紀錄ID');
+    var photoCol = head.indexOf('照片JSON');
+    for (var i = 1; i < data.length; i++) {
+      if (String(data[i][idCol]) !== String(recordId)) continue;
+      var photos = safeJson(data[i][photoCol]);
+      Object.keys(links || {}).forEach(function (key) {
+        var arr = photos[key] || [];
+        (links[key] || []).forEach(function (link) {
+          var idx = -1;
+          for (var j = 0; j < arr.length; j++) {
+            var existingName = typeof arr[j] === 'string' ? arr[j] : arr[j].name;
+            if (existingName === link.name) { idx = j; break; }
+          }
+          var entry = { name: link.name, fileId: link.fileId };
+          if (idx >= 0) arr[idx] = entry; else arr.push(entry);
+        });
+        photos[key] = arr;
+      });
+      sh.getRange(i + 1, photoCol + 1).setValue(JSON.stringify(photos));
+      return { ok: true };
+    }
+    return { ok: false, message: '找不到紀錄' };
+  } finally {
+    SpreadsheetApp.flush();
+    lock.releaseLock();
+  }
+}
+
 function queryRecords(month, filter) {
   filter = filter || {};
   var rows = readSheet('點檢紀錄_' + month);
@@ -384,7 +423,28 @@ function buildMonthlyReport(month, filter) {
   var records = queryRecords(month, filter);
   var roster = readSheet('店鋪名單_' + month);
   var storesMaster = readSheet('店鋪主檔');
+  var staffList = readSheet('點檢人員');
   var pass = Number(getSetting('及格分數') || 85);
+
+  var obsRows = readSheet('觀察題_' + month);
+  var obsList = obsRows.map(function (r) {
+    return {
+      id: r['編號'], type: r['類型'], name: r['題目名稱'],
+      options: String(r['選項'] || '').split('|').filter(Boolean),
+      showIf: r['顯示條件'] || '', required: r['必填'] === '是', order: Number(r['排序']) || 0,
+    };
+  }).sort(function (a, b) { return a.order - b.order; });
+
+  // 部/課對照（來自點檢人員主檔，去重）
+  var deptSectionSeen = {}, deptSectionList = [];
+  staffList.forEach(function (r) {
+    var dept = r['部別'], sect = r['課別'];
+    if (!dept || !sect) return;
+    var key = dept + '|' + sect;
+    if (deptSectionSeen[key]) return;
+    deptSectionSeen[key] = true;
+    deptSectionList.push({ 部: dept, 課: sect });
+  });
 
   var masterByCode = {}, rosterByCode = {};
   storesMaster.forEach(function (r) { masterByCode[normCode(r['店號'])] = r; });
@@ -415,17 +475,25 @@ function buildMonthlyReport(month, filter) {
     catOrder.forEach(function (cat) {
       catSubtotal[cat] = catItems[cat].reduce(function (s, it) { return s + (itemScores[it.id] != null ? itemScores[it.id] : it.max); }, 0);
     });
+    // 照片群組：key 去掉開頭的月份資料夾(每筆都一樣)，剩下的路徑當作題目/區域的識別鍵；
+    // 只回傳已回寫雲端連結的照片(尚未回寫/舊資料的純檔名項目會被過濾掉，不會出現空連結)
+    var photoGroups = {};
+    Object.keys(rec.photos || {}).forEach(function (key) {
+      var groupKey = key.split('/').slice(1).join('/');
+      var urls = photoUrlsOf(rec.photos[key]);
+      if (urls.length) photoGroups[groupKey] = urls;
+    });
     return {
       序: idx + 1,
       營業部: sm['營業部名稱'] || '', 營業課別: sm['營業課名稱'] || '', 營業擔當: sm['營業擔當'] || '',
-      店號: rec.storeCode, 店名: rec.storeName, 點檢時間: rec.time,
+      店號: rec.storeCode, 店名: rec.storeName, 點檢時間: rec.time, 建立時間: rec.createdAt || '',
       itemScores: itemScores, itemExtra: itemExtra, 分類小計: catSubtotal,
       合計: Number(rec.total), 等第: rec.grade,
       主責部: rec.dept || '', 主責課: rec.section || '',
       點檢人員: rec.staffName, 在店人數: rec.staffCount, 身分別: rec.identity,
-      備註: rec.note || '', 店型態: rec.storeType,
+      備註: rec.note || '', 店型態: ro['店鋪型態'] || '一般店', 拍照類型: rec.storeType,
       遠程店: ro['遠程店'] || '否', 假日店: ro['假日店'] || '否', 預排梯次: ro['預排梯次'] || '',
-      觀察: rec.observation || {},
+      觀察: rec.observation || {}, photoGroups: photoGroups,
     };
   });
 
@@ -455,11 +523,20 @@ function buildMonthlyReport(month, filter) {
 
   return {
     passScore: pass,
-    checklist: checklist.map(function (it) { return { id: it.id, name: it.name, cat: it.cat, max: it.max }; }),
+    checklist: checklist.map(function (it) { return { id: it.id, name: it.name, cat: it.cat, max: it.max, type: it.type }; }),
+    obsList: obsList,
+    deptSectionList: deptSectionList,
     catOrder: catOrder,
     rows: rows,
     kpi: kpi,
-    roster: roster.map(function (r) { return { 店號: r['店號'], 店名: r['店名'], 課別: r['課別'], 店鋪型態: r['店鋪型態'], 遠程店: r['遠程店'], 假日店: r['假日店'], 預排梯次: r['預排梯次'] }; }),
+    roster: roster.map(function (r) {
+      var sm = masterByCode[normCode(r['店號'])] || {};
+      return {
+        店號: r['店號'], 店名: r['店名'], 課別: r['課別'], 店鋪型態: r['店鋪型態'],
+        遠程店: r['遠程店'], 假日店: r['假日店'], 預排梯次: r['預排梯次'],
+        營業部: sm['營業部名稱'] || '', 營業擔當: sm['營業擔當'] || '', 地址: sm['地址'] || '',
+      };
+    }),
   };
 }
 
@@ -657,6 +734,12 @@ function toYmd(v) { return (v instanceof Date) ? Utilities.formatDate(v, 'Asia/T
 function toDateTimeStr(v) { return (v instanceof Date) ? Utilities.formatDate(v, 'Asia/Taipei', 'yyyy-MM-dd HH:mm') : String(v || ''); }
 // 店號正規化：去除前導0與空白，避免 Sheet 自動轉數字掉0導致字串比對誤判「不同店」
 function normCode(c) { var s = String(c == null ? '' : c).trim(); var n = s.replace(/^0+(?=\d)/, ''); return n; }
+// 照片項目轉雲端連結；尚未回寫 fileId(上傳中/舊紀錄)則回傳空字串
+function photoUrlOf(entry) {
+  var fileId = entry && typeof entry === 'object' ? entry.fileId : '';
+  return fileId ? ('https://drive.google.com/open?id=' + fileId) : '';
+}
+function photoUrlsOf(arr) { return (arr || []).map(photoUrlOf).filter(Boolean); }
 
 /** 將前端紀錄物件轉成該活頁欄位順序的列陣列 */
 function recordToRow(sh, rec) {

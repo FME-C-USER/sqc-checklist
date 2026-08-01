@@ -56,6 +56,7 @@
     getDriveToken: () => call('getDriveToken'),
     getUploadFolderId: (pathParts) => call('getUploadFolderId', { pathParts }),
     submitRecord: (record) => call('submitRecord', { record }),
+    attachPhotoLinks: (month, recordId, links) => call('attachPhotoLinks', { month, recordId, links }),
     queryRecords: (month, filter) => call('queryRecords', { month, filter }),
     updateRecord: (month, id, record) => call('updateRecord', { month, id, record }),
     deleteRecord: (month, id) => call('deleteRecord', { month, id }),

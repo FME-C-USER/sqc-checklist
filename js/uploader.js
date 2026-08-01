@@ -65,9 +65,11 @@
           }
         }));
         emit();
+        await Promise.all([...new Set(batch.map((p) => p.recordId))].map(flushLinksIfDone));
         await new Promise((r) => setTimeout(r, 300));
         pend = (await window.SqcDB.pendingPhotos()).filter((p) => !p.nextAt || p.nextAt <= Date.now());
       }
+      await reconcileLinks(); // 涵蓋 App 重啟後、上次已全數 done 但尚未回寫連結的紀錄
     } finally {
       _running = false;
       emit();
@@ -75,11 +77,36 @@
   }
 
   // 排入一張壓縮後照片
-  async function enqueue({ blob, name, pathParts, recordId, thumb }) {
+  async function enqueue({ blob, name, pathParts, recordId, month, thumb }) {
     const id = 'ph_' + Date.now() + '_' + Math.random().toString(16).slice(2);
-    await window.SqcDB.addPhoto({ id, blob, name, pathParts, recordId, thumb, status: 'pending', tries: 0 });
+    await window.SqcDB.addPhoto({ id, blob, name, pathParts, recordId, month, thumb, status: 'pending', tries: 0 });
     pump();
     return id;
+  }
+
+  // 一筆紀錄的照片全部上傳完成(狀態皆為done)後，把雲端連結一次回寫進該筆紀錄，之後標記linked避免重送
+  async function flushLinksIfDone(recordId) {
+    if (!recordId) return;
+    const list = await window.SqcDB.photosOfRecord(recordId);
+    if (!list.length) return;
+    if (list.some((p) => p.status !== 'done' && p.status !== 'linked')) return; // 還有上傳中/失敗中的，先不送
+    const toLink = list.filter((p) => p.status === 'done');
+    if (!toLink.length) return; // 已全部 linked 過了
+    const month = toLink[0].month;
+    const links = {};
+    toLink.forEach((p) => { const k = (p.pathParts || []).join('/'); (links[k] = links[k] || []).push({ name: p.name, fileId: p.fileId }); });
+    try {
+      await window.SqcApi.attachPhotoLinks(month, recordId, links);
+      await Promise.all(toLink.map((p) => window.SqcDB.updatePhoto({ ...p, status: 'linked' })));
+    } catch (e) { /* 回寫失敗就維持 done，下次 pump 週期再試一次 */ }
+  }
+
+  // 每次 pump 週期，找出「所有照片都已上傳完成但還沒回寫連結」的紀錄一併補送
+  // (涵蓋 App 重啟、上傳完成當下漏觸發等情況)
+  async function reconcileLinks() {
+    const all = await window.SqcDB.allPhotos();
+    const recordIds = new Set(all.filter((p) => p.status === 'done').map((p) => p.recordId));
+    for (const id of recordIds) await flushLinksIfDone(id);
   }
 
   async function counts() {

@@ -35,6 +35,12 @@ function makeRange(sheet, r, c, numRows, numCols) {
       }
       return this;
     },
+    setValue(value) {
+      const rowIdx = r - 1;
+      while (sheet.rows.length <= rowIdx) sheet.rows.push([]);
+      sheet.rows[rowIdx][c - 1] = value;
+      return this;
+    },
     setFontWeight() { return this; },
     setBackground() { return this; },
     setFontColor() { return this; },

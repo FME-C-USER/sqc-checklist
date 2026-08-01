@@ -18,9 +18,14 @@ function seed(ctx) {
   ctx.upsertItem('11507', { 排序: 2, 編號: 'B1', 大分類: '商品陳列', 題號名稱: '10.商品豐富陳列', 配分: 10, 計分方式: '分區扣分', 每項扣分: 2, 子項清單: 'X|Y|其他:填寫' });
   // 店鋪主檔（店的「營業」部課，跟盤點主責課是不同維度）
   ctx.upsertRow('stores', null, { 序號: 1, 店號: '017246', 店名: '基隆武勝店', 營業本部名稱: '北一本部', 營業部名稱: '北一二區', 營業課名稱: '台北一課', 營業擔當: '王小明' });
-  // 店鋪名單_11507：兩家店同課，只有一家會被點檢（測試「未點檢」計算）
-  ctx.upsertRow('roster', '11507', { 店號: '017246', 店名: '基隆武勝店', 課別: '北三課', 店鋪型態: '一般店', 遠程店: '是', 假日店: '否', 預排梯次: '第一梯' });
+  // 店鋪名單_11507：兩家店同課，只有一家會被點檢（測試「未點檢」計算）；店鋪型態＝「隨盤點點檢店」，驗證不會被誤用成拍照類型
+  ctx.upsertRow('roster', '11507', { 店號: '017246', 店名: '基隆武勝店', 課別: '北三課', 店鋪型態: '隨盤點點檢店', 遠程店: '是', 假日店: '否', 預排梯次: '第一梯' });
   ctx.upsertRow('roster', '11507', { 店號: '020847', 店名: '台東四維店', 課別: '北三課', 店鋪型態: '一般店', 遠程店: '否', 假日店: '否', 預排梯次: '第一梯' });
+  // 點檢人員主檔：測試部/課對照表去重
+  ctx.upsertRow('staff', null, { 部別: '一部', 課別: '北三課', 工號: 'A001', 姓名: '測試員', 職稱: '', AD帳號: '', 角色: '點檢人員' });
+  ctx.upsertRow('staff', null, { 部別: '一部', 課別: '北三課', 工號: 'A002', 姓名: '測試員2', 職稱: '', AD帳號: '', 角色: '點檢人員' });
+  // 觀察題
+  ctx.upsertRow('obs', '11507', { 排序: 1, 編號: 'O1', 類型: '有無', 題目名稱: '店舖有無對外廁所', 選項: '有|無', 顯示條件: 'always', 必填: '' });
   // 及格分數設定
   const settingSh = ctx.ensureSheetNamed('設定', ['參數', '值']);
   settingSh.appendRow(['及格分數', 85]);
@@ -31,7 +36,12 @@ function seed(ctx) {
     storeCode: '017246', storeName: '基隆武勝店', storeType: '可拍照',
     total: 90, grade: '合格', staffCount: '2', identity: '店長', note: '',
     detail: { A1: { score: 4, ngSubs: [], customNames: {} }, B1: { score: 6, ngSubs: ['X'], customNames: {} } },
-    observation: { toilet: { O1: '無' }, obsText: '' }, photos: {}, paperPhotos: [],
+    observation: { toilet: { O1: '無' }, obsText: '' },
+    photos: { '115年07月/1.店外海報/缺失': ['017246_2026-07-15_店外海報缺失_1.jpg'] }, paperPhotos: [],
+  });
+  // 該筆紀錄的照片完成上傳並回寫雲端連結
+  ctx.attachPhotoLinks('11507', 'R1', {
+    '115年07月/1.店外海報/缺失': [{ name: '017246_2026-07-15_店外海報缺失_1.jpg', fileId: 'FILE_A' }],
   });
 }
 
@@ -50,6 +60,19 @@ assertEqual(row.itemExtra.B1, 'X', 'B1應記錄缺失子項X');
 assertEqual(row.分類小計['活動告示'], 4, '活動告示分類小計應為4');
 assertEqual(row.分類小計['商品陳列'], 6, '商品陳列分類小計應為6');
 assertEqual(row.遠程店, '是', '遠程店應從店鋪名單帶出');
+assertEqual(row.店型態, '隨盤點點檢店', '店型態應來自店鋪名單(角色/名單分類)，而非拍照類型');
+assertEqual(row.拍照類型, '可拍照', '拍照類型應來自紀錄本身，與店型態是不同欄位');
+assertEqual(row.photoGroups['1.店外海報/缺失'], ['https://drive.google.com/open?id=FILE_A'], '已回寫連結的照片應出現在photoGroups(去掉月份資料夾前綴)');
+
+assertEqual(report.obsList.length, 1, '應回傳觀察題定義供報表產生欄位使用');
+assertEqual(report.obsList[0].id, 'O1', '觀察題編號');
+
+assertEqual(report.deptSectionList.length, 1, '部/課對照表應依點檢人員主檔去重(2位同課員工只算1筆)');
+assertEqual(report.deptSectionList[0], { 部: '一部', 課: '北三課' }, '部/課對照內容');
+
+const rosterEntry = report.roster.find(r => r.店號 === '017246');
+assertEqual(rosterEntry.營業部, '北一二區', '名單也應帶出店鋪主檔資訊(供未點檢店也能顯示部別/擔當)');
+assertEqual(rosterEntry.營業擔當, '王小明', '名單應帶出營業擔當');
 
 assertEqual(report.kpi.length, 1, 'KPI應只有1個課別');
 const kpi = report.kpi[0];
