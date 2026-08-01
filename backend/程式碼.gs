@@ -224,7 +224,11 @@ function getStores(month, section) {
   return rows.filter(function (r) {
     return !section || String(r['課別']) === String(section);
   }).map(function (r) {
-    return { code: String(r['店號']), name: r['店名'], section: r['課別'], type: r['店鋪型態'] || '一般店' };
+    var yn = function (v) { return v === true || v === 'V' || v === 'v' || v === '是' || v === '1'; };
+    return {
+      code: String(r['店號']), name: r['店名'], section: r['課別'], type: r['店鋪型態'] || '一般店',
+      remote: yn(r['遠程店']), holiday: yn(r['假日店']), batch: r['預排梯次'] || '',
+    };
   });
 }
 
@@ -445,7 +449,7 @@ function keyForKind(kind) {
 var HEADERS_MAP = {
   checklist: ['排序', '編號', '大分類', '題號名稱', '配分', '計分方式', '每項扣分', '子項清單', '規範說明'],
   obs: ['排序', '編號', '類型', '題目名稱', '選項', '顯示條件', '必填'],
-  roster: ['店號', '店名', '課別', '店鋪型態'],
+  roster: ['店號', '店名', '課別', '店鋪型態', '遠程店', '假日店', '預排梯次'],
   staff: ['部別', '課別', '工號', '姓名', '職稱', 'AD帳號', '角色'],
   stores: ['序號', '店號', '店名', '營業本部名稱', '營業部名稱', '營業課名稱', '營業擔當', '縣市', '鄉鎮', '地址'],
   record: ['紀錄ID', '點檢時間', '部別', '課別', '員編', '點檢人員', '店號', '店名', '店鋪型態', '備註', '題庫版本', '合計得分', '等第', '在店店員人數', '簽名身分別', '明細JSON', '觀察JSON', '照片JSON', '紙本照片', '照片資料夾', '同步狀態', '建立時間', '更新時間'],

@@ -956,17 +956,35 @@
     function rosterToRows(sheets) {
       if (!sheets || !sheets.length) return null;
       const clean = s => String(s == null ? '' : s).replace(/[\r\n\s]/g, '').trim();
+      const isMark = v => { const s = String(v == null ? '' : v).trim().toUpperCase(); return s === 'V' || s === '是' || s === '1' || s === 'Y'; };
       for (const sh of sheets) {
         const head = (sh.aoa[0] || []).map(clean);
-        const ci = { code: head.indexOf('店號'), name: head.indexOf('店名'), sect: head.findIndex(h => h.indexOf('主責課') >= 0), follow: head.indexOf('隨盤點') };
-        if (ci.code < 0 || ci.sect < 0) continue; // 不是名單資料頁
+        const codeIdx = head.indexOf('店號');
+        const nameIdx = head.indexOf('店名');
+        let sectIdx = head.findIndex(h => h.indexOf('主責課') >= 0);
+        if (sectIdx < 0) {
+          // 部分名單格式「主責部」「主責課」欄名可能因窄欄被視覺換行成單純「主責」，取最後一個「主責」欄當課別
+          const respIdx = head.map((h, i) => ({ h, i })).filter(x => x.h.indexOf('主責') >= 0);
+          if (respIdx.length) sectIdx = respIdx[respIdx.length - 1].i;
+        }
+        if (codeIdx < 0 || sectIdx < 0) continue; // 不是名單資料頁
+        const followIdx = head.findIndex(h => h.indexOf('隨盤') >= 0);
+        const remoteIdx = head.indexOf('遠程店');
+        const holidayIdx = head.indexOf('假日店');
+        const batchIdx = head.indexOf('預排梯次') >= 0 ? head.indexOf('預排梯次') : head.indexOf('梯次');
         const rows = [];
         for (let i = 1; i < sh.aoa.length; i++) {
           const r = sh.aoa[i] || [];
-          const code = String(r[ci.code] == null ? '' : r[ci.code]).trim();
+          const code = String(r[codeIdx] == null ? '' : r[codeIdx]).trim();
           if (!code) continue;
-          const follow = ci.follow >= 0 ? String(r[ci.follow] == null ? '' : r[ci.follow]).trim() : '';
-          rows.push({ 店號: code, 店名: String(r[ci.name] || '').trim(), 課別: String(r[ci.sect] || '').trim(), 店鋪型態: follow ? '隨盤點點檢店' : '一般店' });
+          const follow = followIdx >= 0 ? isMark(r[followIdx]) : false;
+          rows.push({
+            店號: code, 店名: String(r[nameIdx] || '').trim(), 課別: String(r[sectIdx] || '').trim(),
+            店鋪型態: follow ? '隨盤點點檢店' : '一般店',
+            遠程店: remoteIdx >= 0 && isMark(r[remoteIdx]) ? '是' : '否',
+            假日店: holidayIdx >= 0 && isMark(r[holidayIdx]) ? '是' : '否',
+            預排梯次: batchIdx >= 0 ? String(r[batchIdx] || '').trim() : '',
+          });
         }
         if (rows.length) return rows;
       }
@@ -984,9 +1002,10 @@
         cols: ['編號', '類型', '題目名稱', '選項'],
         fields: [{ k: '排序', t: 'number' }, { k: '編號', t: 'text' }, { k: '類型', t: 'select', opts: ['拍照', '有無', '符合'] }, { k: '題目名稱', t: 'text' }, { k: '選項', t: 'text', ph: '有|無|廁所封閉' }, { k: '顯示條件', t: 'select', opts: ['always', 'has', 'hasOrClosed'] }, { k: '必填', t: 'select', opts: ['否', '是'] }] },
       { kind: 'roster', importKind: 'roster', label: '店鋪名單', monthly: true, key: '店號',
-        note: '分月轉入；課別＝盤點主責課；可直接匯入官方委外名單(自動轉)。店號請設文字格式避免掉 0',
-        cols: ['店號', '店名', '課別', '店鋪型態'],
-        fields: [{ k: '店號', t: 'text' }, { k: '店名', t: 'text' }, { k: '課別', t: 'text' }, { k: '店鋪型態', t: 'select', opts: ['一般店', '隨盤點點檢店'] }] },
+        note: '分月轉入；課別＝盤點主責課；可直接匯入官方委外名單或查核店鋪名單(自動轉)。店號請設文字格式避免掉 0',
+        cols: ['店號', '店名', '課別', '店鋪型態', '遠程店', '假日店', '預排梯次'],
+        fields: [{ k: '店號', t: 'text' }, { k: '店名', t: 'text' }, { k: '課別', t: 'text' }, { k: '店鋪型態', t: 'select', opts: ['一般店', '隨盤點點檢店'] },
+          { k: '遠程店', t: 'select', opts: ['否', '是'] }, { k: '假日店', t: 'select', opts: ['否', '是'] }, { k: '預排梯次', t: 'text', ph: '第一梯' }] },
       { kind: 'stores', importKind: 'stores', label: '店鋪主檔', monthly: false, key: '店號',
         note: '全門市主檔（常駐；可直接匯入官方「店庫」總表，店號請設文字格式）',
         cols: ['店號', '店名', '營業課名稱', '縣市', '鄉鎮'],
