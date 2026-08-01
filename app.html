@@ -347,16 +347,25 @@
       const [editingRecordId, setEditingRecordId] = useState(null); // 非 null＝編輯既有紀錄
       const [existingPhotos, setExistingPhotos] = useState({});      // 編輯時保留原有照片JSON
       const [records, setRecords] = useState([]);
-      // 正式模式：查詢紀錄/彙總 進場或改條件時，向後端查當月資料（只跑當月活頁）
+      // 正式模式：查詢紀錄/彙總 進場或改條件時，向後端查資料
+      // 注意：紀錄依「點檢時間」分月活頁存放，查詢用的月份必須依查詢日期範圍(filter.from/to)決定，
+      // 不可用 workMonth（那是「點檢作業」新增紀錄用的時間，換月後兩者會不同，否則查不到上月的紀錄）
+      const queryMonthsOf = (from, to) => {
+        const a = rocMonth(from || basic.time), b = rocMonth(to || from || basic.time);
+        return Array.from(new Set([a, b]));
+      };
       const loadRecords = () => {
         if (!CONFIGURED) return;
         const f = { from: filter.from, to: filter.to, section: filter.section, empId: isManager ? undefined : currentUser.empId };
-        SqcApi.queryRecords(workMonth, f).then(r => {
-          setRecords((r.records || []).map(x => ({
-            id: x.id, date: String(x.time).slice(0, 10), store: x.storeName, section: x.section,
-            staff: x.staffName, version: x.month, total: Number(x.total), grade: x.grade, _raw: x,
-          })));
-        }).catch(e => alert('查詢失敗：' + e.message));
+        const months = queryMonthsOf(filter.from, filter.to);
+        Promise.all(months.map(m => SqcApi.queryRecords(m, f).catch(() => ({ records: [] }))))
+          .then(results => {
+            const all = results.flatMap(r => r.records || []);
+            setRecords(all.map(x => ({
+              id: x.id, date: String(x.time).slice(0, 10), store: x.storeName, section: x.section,
+              staff: x.staffName, version: x.month, total: Number(x.total), grade: x.grade, _raw: x,
+            })));
+          }).catch(e => alert('查詢失敗：' + e.message));
       };
 
       const total = useMemo(() => {
@@ -543,10 +552,10 @@
       const filtered = records.filter(r => (!filter.from || r.date >= filter.from) && (!filter.to || r.date <= filter.to) && (!filter.section || r.section === filter.section));
       // 正式模式：進查詢/彙總頁或改條件時，重新向後端查當月
       useEffect(() => { if (CONFIGURED && (tab === 'records' || tab === 'summary')) loadRecords(); }, [tab, filter.from, filter.to, filter.section]);
-      const delRecord = (id) => {
+      const delRecord = (id, recordMonth) => {
         if (!confirm('確定刪除此筆評核紀錄？')) return;
         if (!CONFIGURED) { setRecords(records.filter(r => r.id !== id)); return; }
-        SqcApi.deleteRecord(workMonth, id).then(() => loadRecords()).catch(e => alert('刪除失敗：' + e.message));
+        SqcApi.deleteRecord(recordMonth || workMonth, id).then(() => loadRecords()).catch(e => alert('刪除失敗：' + e.message));
       };
 
       const exportExcel = () => {
@@ -585,8 +594,9 @@
       const exportMonthlyReports = async () => {
         if (!CONFIGURED) { alert('請先設定後端連線'); return; }
         setBuildingReport(true);
+        const reportMonth = rocMonth(filter.from); // 依查詢的起始日期決定報表月份，而非「點檢作業」目前的時間
         try {
-          const report = await SqcApi.buildMonthlyReport(workMonth, { section: filter.section });
+          const report = await SqcApi.buildMonthlyReport(reportMonth, { section: filter.section });
           const itemCols = report.checklist.map(it => ({ id: it.id, label: `${it.name}(滿分${it.max})` }));
           const catCols = report.catOrder;
 
@@ -624,7 +634,7 @@
             return XLSX.utils.aoa_to_sheet(data);
           };
 
-          const monthLabel = monthFolderOf(workMonth).replace('年', '').replace('月', '');
+          const monthLabel = monthFolderOf(reportMonth).replace('年', '').replace('月', '');
           const wb1 = XLSX.utils.book_new();
           XLSX.utils.book_append_sheet(wb1, buildDetailSheet(false), 'SQC點檢明細');
           XLSX.utils.book_append_sheet(wb1, buildKpiSheet(false), '課別KPI');
@@ -885,7 +895,7 @@
                         <tr key={r.id} className="border-b border-slate-100">
                           <td className="py-2 px-3 text-slate-500">{r.date}</td><td className="font-medium text-slate-800">{r.store}</td><td className="text-slate-500">{r.section}</td><td className="text-slate-500">{r.staff}</td>
                           <td className="font-bold">{r.total}</td><td><span className={"text-xs px-2 py-0.5 rounded " + gradeOf(r.total).bg}>{r.grade}</span></td>
-                          <td className="px-3 whitespace-nowrap"><button onClick={() => openEdit(r)} className="text-xs text-blue-600 mr-2">編輯</button><button onClick={() => delRecord(r.id)} className="text-xs text-red-600">刪除</button></td>
+                          <td className="px-3 whitespace-nowrap"><button onClick={() => openEdit(r)} className="text-xs text-blue-600 mr-2">編輯</button><button onClick={() => delRecord(r.id, r.version)} className="text-xs text-red-600">刪除</button></td>
                         </tr>
                       ))}
                       {filtered.length === 0 && <tr><td colSpan="7" className="py-8 text-center text-slate-400">無符合條件的紀錄</td></tr>}
