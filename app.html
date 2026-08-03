@@ -558,15 +558,6 @@
         SqcApi.deleteRecord(recordMonth || workMonth, id).then(() => loadRecords()).catch(e => alert('刪除失敗：' + e.message));
       };
 
-      const exportExcel = () => {
-        const head = ['日期', '店鋪', '課別', '稽核員', '版本', '得分', '結果'];
-        const data = [head].concat(filtered.map(r => [r.date, r.store, r.section, r.staff, r.version, r.total, r.grade]));
-        const ws = XLSX.utils.aoa_to_sheet(data);
-        ws['!cols'] = [{ wch: 12 }, { wch: 18 }, { wch: 10 }, { wch: 10 }, { wch: 8 }, { wch: 8 }, { wch: 8 }];
-        const wb = XLSX.utils.book_new();
-        XLSX.utils.book_append_sheet(wb, ws, '彙總');
-        XLSX.writeFile(wb, `SQC彙總_${filter.from || '全部'}_${filter.to || ''}.xlsx`);
-      };
 
       // 匯出「當月名單中尚未點檢」的店鋪（本月已點檢者排除；可依課別）
       const exportUninspected = async () => {
@@ -1051,7 +1042,6 @@
                     {isManager && <button onClick={exportManagerReport} disabled={buildingManager} className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white rounded-lg">{buildingManager ? '產出中…' : '📘 產出課長版'}</button>}
                     {isManager && <button onClick={exportCustomerReport} disabled={buildingCustomer} className="px-4 py-2 bg-violet-600 hover:bg-violet-700 disabled:opacity-50 text-white rounded-lg">{buildingCustomer ? '產出中…' : '📗 產出客戶版'}</button>}
                     <button onClick={exportUninspected} className="px-4 py-2 bg-amber-500 hover:bg-amber-600 text-white rounded-lg">🏪 尚未點檢名單</button>
-                    <button onClick={exportExcel} className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg">📤 匯出 Excel</button>
                   </div>
                 </div>
                 <div className="grid grid-cols-3 gap-3">
