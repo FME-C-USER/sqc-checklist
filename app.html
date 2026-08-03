@@ -159,6 +159,19 @@
     function normCode(c) { const s = String(c == null ? '' : c).trim(); return s.replace(/^0+(?=\d)/, ''); }
     // 點檢時間(YYYY-MM-DDTHH:mm) → 民國年月，如 2026-07 → 11507
     function rocMonth(dt) { if (!dt || dt.length < 7) return MONTH; return String(parseInt(dt.slice(0, 4)) - 1911) + dt.slice(5, 7); }
+    // 民國年月字串前後推移，如 shiftRocMonth('11512', 1) → '11601'（跨年）
+    function shiftRocMonth(m, delta) {
+      let y = parseInt(m.slice(0, 3), 10), mo = parseInt(m.slice(3, 5), 10) + delta;
+      while (mo > 12) { mo -= 12; y++; }
+      while (mo < 1) { mo += 12; y--; }
+      return String(y) + String(mo).padStart(2, '0');
+    }
+    // 維護專區月份下拉選單：以目前月份為準，往前12個月＋往後1個月，確保換月後新月份一定選得到
+    function monthOptions(center) {
+      const list = [];
+      for (let d = -12; d <= 1; d++) list.push(shiftRocMonth(center, d));
+      return list;
+    }
 
     // 將後端扁平題目陣列組成 categories 結構（附上固定的觀察題定義）
     function buildChecklist(items, month, obs) {
@@ -1358,7 +1371,7 @@
                 <p className="text-xs text-slate-400">{area.note}　·　同檔名再次匯入將以最新覆蓋</p>
               </div>
               <div className="flex items-center gap-2">
-                {area.monthly && <select value={month} onChange={e => setMonth(e.target.value)} className="px-3 py-1.5 border border-slate-300 rounded-lg text-sm"><option value="11506">115年06月</option><option value="11507">115年07月</option></select>}
+                {area.monthly && <select value={month} onChange={e => setMonth(e.target.value)} className="px-3 py-1.5 border border-slate-300 rounded-lg text-sm">{monthOptions(curMonth).map(m => <option key={m} value={m}>{monthFolderOf(m)}</option>)}</select>}
                 <button onClick={() => setEditing(blank())} className="text-sm px-3 py-1.5 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700">+ 新增</button>
                 <label className={"text-sm px-3 py-1.5 rounded-lg text-white " + (uploading ? "bg-slate-400" : "bg-slate-700 hover:bg-slate-800 cursor-pointer")}>📥 {uploading ? '匯入中…' : (uploaded[sub] ? '重新匯入' : 'Excel 匯入')}<input type="file" accept=".xlsx,.xls" className="hidden" onChange={onUpload} disabled={uploading} /></label>
               </div>
