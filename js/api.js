@@ -9,12 +9,20 @@
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
   async function attempt(action, payload) {
-    const res = await fetch(window.SQC_CONFIG.GAS_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      body: JSON.stringify({ action, token: token(), payload: payload || {} }),
-      redirect: 'follow',
-    });
+    let res;
+    try {
+      res = await fetch(window.SQC_CONFIG.GAS_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: JSON.stringify({ action, token: token(), payload: payload || {} }),
+        redirect: 'follow',
+      });
+    } catch (e) {
+      // fetch 本身拋錯＝網路層失敗(手機訊號瞬斷/連線中斷)，標記為可重試，不是後端問題
+      const err = new Error('網路連線中斷，請稍後再試（' + (e && e.message || '') + '）');
+      err.transient = true;
+      throw err;
+    }
     const text = await res.text();
     let data;
     try { data = JSON.parse(text); }
@@ -34,19 +42,19 @@
     return data.result;
   }
 
-  // 非 JSON / 網路層失敗視為暫時性，重試一次(間隔0.8秒)再放棄
+  // 網路層失敗 / 非 JSON 回應視為暫時性，重試最多2次(間隔漸增)再放棄，涵蓋手機訊號短暫中斷的情況
   async function call(action, payload) {
-    try {
-      return await attempt(action, payload);
-    } catch (e) {
-      if (e.transient) {
-        await sleep(800);
-        try { return await attempt(action, payload); } catch (e2) {
-          throw e2.transient ? new Error('伺服器忙碌中，請稍後再試一次') : e2;
-        }
+    const delays = [800, 2000];
+    let lastErr;
+    for (let i = 0; i <= delays.length; i++) {
+      try { return await attempt(action, payload); }
+      catch (e) {
+        lastErr = e;
+        if (!e.transient) throw e;
+        if (i < delays.length) await sleep(delays[i]);
       }
-      throw e;
     }
+    throw new Error('伺服器忙碌中，請稍後再試一次（' + (lastErr && lastErr.message || '') + '）');
   }
 
   window.SqcApi = {
