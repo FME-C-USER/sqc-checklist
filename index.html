@@ -94,7 +94,7 @@
           showError(r.message || '登入失敗');
         }
       } catch (err) {
-        showError('無法連線驗證服務，請稍後再試');
+        showError((err && err.message) || '無法連線驗證服務，請稍後再試');
       } finally {
         btn.disabled = false;
         btn.textContent = '登入';
