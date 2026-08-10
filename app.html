@@ -9,6 +9,7 @@
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js"></script>
   <script src="js/config.js"></script>
   <script src="js/api.js"></script>
   <script src="js/db.js"></script>
@@ -356,7 +357,7 @@
       const [obsText, setObsText] = useState('');
       const [perfectPhotos, setPerfectPhotos] = useState({});
       const [paperForm, setPaperForm] = useState([]);        // 紙本點檢表（所有店必上傳）
-      const [sign, setSign] = useState({ count: '', identity: '' }); // 在店店員人數 / 簽名人員身分別
+      const [sign, setSign] = useState({ count: '', identity: '', remark: '' }); // 在店店員人數 / 簽名人員身分別 / 備註(特殊情況)
       const [editingRecordId, setEditingRecordId] = useState(null); // 非 null＝編輯既有紀錄
       const [existingPhotos, setExistingPhotos] = useState({});      // 編輯時保留原有照片JSON
       const [records, setRecords] = useState([]);
@@ -407,7 +408,7 @@
         } catch (e) { alert('查詢失敗：' + e.message); }
       };
 
-      const resetWork = () => { setScores({}); setKeyObs({}); setToilet({}); setToiletPhotos({}); setToiletReasons({}); setObsText(''); setPerfectPhotos({}); setPaperForm([]); setSign({ count: '', identity: '' }); setEditingRecordId(null); setExistingPhotos({}); };
+      const resetWork = () => { setScores({}); setKeyObs({}); setToilet({}); setToiletPhotos({}); setToiletReasons({}); setObsText(''); setPerfectPhotos({}); setPaperForm([]); setSign({ count: '', identity: '', remark: '' }); setEditingRecordId(null); setExistingPhotos({}); };
 
       // 編輯既有紀錄：把該筆載回點檢作業
       const openEdit = (row) => {
@@ -419,9 +420,13 @@
         setToilet(o.toilet || {}); setObsText(o.obsText || ''); setToiletReasons(o.toiletReasons || {});
         setKeyObs({}); setToiletPhotos({}); setPerfectPhotos({}); setPaperForm([]);
         setExistingPhotos(rec.photos || {});
-        setSign({ count: String(rec.staffCount || ''), identity: rec.identity || '' });
+        // 備註欄與「不可拍照原因」共用同一個後端欄位，用固定分隔字串拆開還原
+        const rawNote = String(rec.note || '');
+        const sepIdx = rawNote.indexOf('｜備註：');
+        const note = sepIdx >= 0 ? rawNote.slice(0, sepIdx) : rawNote;
+        const remark = sepIdx >= 0 ? rawNote.slice(sepIdx + 4) : '';
+        setSign({ count: String(rec.staffCount || ''), identity: rec.identity || '', remark });
         // 不可拍照原因還原
-        const note = String(rec.note || '');
         const npr = note.indexOf('其他') === 0 ? '其他' : (note === '廠區店' || note === '營區店' ? note : '');
         const npo = note.indexOf('其他') === 0 ? note.replace(/^其他[:：]?/, '') : '';
         const inRoster = STORE_ROSTER.find(s => String(s.code) === String(rec.storeCode));
@@ -541,7 +546,7 @@
           dept: basic.dept, section: basic.section, empId: basic.staffId, staffName: staff ? staff.name : user,
           storeCode, storeName, storeType: canPhoto ? '可拍照' : '不可拍照',
           total, grade: grade.txt, staffCount: sign.count, identity: sign.identity,
-          note: noPhotoReasonText,
+          note: [noPhotoReasonText, sign.remark.trim() ? '｜備註：' + sign.remark.trim() : ''].join(''),
           detail, observation, photos: photosJson, paperPhotos: (photosJson[[monthFolder, 'SQC點檢表完成照片'].join('/')] || []),
         };
 
@@ -585,7 +590,7 @@
         const pending = roster.filter(s => !done.has(normCode(s.code)) && !done.has(String(s.name)));
         if (!pending.length) { alert('當月名單中沒有尚未點檢的店鋪 🎉'); return; }
         const head = ['店號', '店名', '課別', '店鋪型態'];
-        const data = [head].concat(pending.map(s => [s.code, s.name, s.section, s.type || '一般店']));
+        const data = [head].concat(pending.map(s => [padStoreCode(s.code), s.name, s.section, s.type || '一般店']));
         const ws = XLSX.utils.aoa_to_sheet(data);
         ws['!cols'] = [{ wch: 12 }, { wch: 18 }, { wch: 10 }, { wch: 10 }];
         const wb = XLSX.utils.book_new();
@@ -596,6 +601,7 @@
       // 產出課長版/客戶版月報表（管理者限定；後端已彙整明細+KPI+照片連結，這裡負責排版成跟人工版本對應的分頁）
       // 課長版：盤點中心&隨盤點、不及格店、查核店鋪名單、SQC Google點檢表單、SQC週彙總表
       // 客戶版：查核店鋪名單、SQC Google點檢表單、SQC週彙總表（不含內部管理用的部課對照與不及格店名單）
+      // 註：顏色/格線樣式(查核店鋪名單) SheetJS免費版無法寫入，改用ExcelJS產出整份報表
       const [buildingManager, setBuildingManager] = useState(false);
       const [buildingCustomer, setBuildingCustomer] = useState(false);
 
@@ -607,32 +613,42 @@
       };
       const mmdd = (t) => { const s = String(t || ''); return s.length >= 10 ? `${s.slice(5, 7)}/${s.slice(8, 10)}` : ''; };
       const joinLinks = (arr) => (arr || []).join(', ');
+      // 店號補回前導0並確保以文字寫入(避免Excel開啟時把"017246"顯示成17246)
+      const padStoreCode = (c) => { const s = String(c == null ? '' : c).trim(); return /^\d+$/.test(s) && s.length < 6 ? ('000000' + s).slice(-6) : s; };
+
+      // 依 aoa(二維陣列)+merges 建立一般(無樣式)分頁
+      const addPlainSheet = (wb, name, aoa, merges) => {
+        const ws = wb.addWorksheet(name);
+        aoa.forEach(row => ws.addRow(row));
+        (merges || []).forEach(m => ws.mergeCells(m.s.r + 1, m.s.c + 1, m.e.r + 1, m.e.c + 1));
+        return ws;
+      };
 
       // 盤點中心&隨盤點：部/課對照表（來自點檢人員主檔）
-      const buildDeptSectionSheet = (report) => XLSX.utils.aoa_to_sheet(
-        [['部', '課']].concat(report.deptSectionList.map(d => [d.部, d.課])));
+      const buildDeptSectionSheet = (report) =>
+        [['部', '課']].concat(report.deptSectionList.map(d => [d.部, d.課]));
 
       // 不及格店：本次查詢範圍內未達及格分數的店
       const buildFailStoreSheet = (report) => {
         const fails = report.rows.filter(r => r.合計 < report.passScore);
         const head = ['序號', '分數', '店號', '店名', '日期-時間', '主責課', '點檢人員', '部別', '課別', '擔當'];
-        const data = [head].concat(fails.map((r, i) => [
-          i + 1, `${r.合計} / 100`, r.店號, r.店名, timeCompact(r.點檢時間), r.主責課, r.點檢人員, r.營業部, r.營業課別, r.營業擔當,
+        return [head].concat(fails.map((r, i) => [
+          i + 1, `${r.合計} / 100`, padStoreCode(r.店號), r.店名, timeCompact(r.點檢時間), r.主責課, r.點檢人員, r.營業部, r.營業課別, r.營業擔當,
         ]));
-        return XLSX.utils.aoa_to_sheet(data);
       };
 
-      // 查核店鋪名單：左半＝名單逐店的實際點檢狀態；右半＝課別KPI彙總
+      // 查核店鋪名單：左半＝名單逐店的實際點檢狀態；右半＝課別KPI彙總(黃底標頭+全框線)
       // 註：人工版右側原本是逐週手動插入的日曆式進度表，會依每月點檢梯次數量而異，屬於人工排版產物、
       // 無法穩定重現；這裡改用等價、乾淨的一張「課別×期間KPI」表取代，資訊涵蓋範圍相同
-      const buildRosterCheckSheet = (report, customerFacing) => {
+      const buildRosterCheckSheet = (wb, report, customerFacing) => {
+        const ws = wb.addWorksheet('查核店鋪名單');
         const byCode = {}; report.rows.forEach(r => { byCode[normCode(r.店號)] = r; });
         const head = customerFacing
           ? ['序', '既存店號', '店舖名稱', '部別', '課別', '擔當', '地址', '隨盤點', '預排梯次', '日期', '是(否)點檢']
           : ['序', '既存店號', '店舖名稱', '部別', '課別', '擔當', '地址', '隨盤點', '實際點檢課', '實際點檢人員', '實際點檢梯次', '主責課', '預排梯次', '日期', '是(否)點檢'];
         const rosterRows = report.roster.map((s, i) => {
           const rec = byCode[normCode(s.店號)];
-          const common = [i + 1, s.店號, s.店名, s.營業部, s.課別, s.營業擔當, s.地址, s.店鋪型態 === '隨盤點點檢店' ? 'V' : ''];
+          const common = [i + 1, padStoreCode(s.店號), s.店名, s.營業部, s.課別, s.營業擔當, s.地址, s.店鋪型態 === '隨盤點點檢店' ? 'V' : ''];
           const tail = rec ? [mmdd(rec.點檢時間), '已點檢'] : ['', '未點檢'];
           return customerFacing
             ? [...common, s.預排梯次 || '', ...tail]
@@ -646,58 +662,82 @@
         const blankLeft = new Array(head.length).fill('');
         const blankRight = new Array(kpiHead.length).fill('');
         const maxRows = Math.max(rosterRows.length, kpiRows.length);
-        const body = [];
-        for (let i = 0; i < maxRows; i++) body.push([...(rosterRows[i] || blankLeft), '', ...(kpiRows[i] || blankRight)]);
-        return XLSX.utils.aoa_to_sheet([[...head, '', ...kpiHead], ...body]);
+
+        ws.addRow([...head, '', ...kpiHead]);
+        for (let i = 0; i < maxRows; i++) ws.addRow([...(rosterRows[i] || blankLeft), '', ...(kpiRows[i] || blankRight)]);
+
+        const thin = { style: 'thin', color: { argb: 'FF000000' } };
+        const border = { top: thin, left: thin, bottom: thin, right: thin };
+        const kpiStartCol = head.length + 2, kpiEndCol = kpiStartCol + kpiHead.length - 1;
+        for (let c = kpiStartCol; c <= kpiEndCol; c++) {
+          const cell = ws.getRow(1).getCell(c);
+          cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFF200' } };
+          cell.font = { bold: true };
+          cell.border = border;
+        }
+        for (let r = 2; r <= 1 + maxRows; r++) {
+          for (let c = kpiStartCol; c <= kpiEndCol; c++) ws.getRow(r).getCell(c).border = border;
+        }
+        return ws;
       };
 
       // SQC Google點檢表單：逐店逐題原始資料，含每題缺失照片雲端連結（比照原本Google表單回覆試算表格式）
       const buildRawFormSheet = (report) => {
         const items = report.checklist;
-        const koItems = report.obsList.filter(o => o.type === '拍照');
-        const oItems = report.obsList.filter(o => o.type === '有無');
+        const obsById = {}; report.obsList.forEach(o => { obsById[o.id] = o; });
         const tItems = report.obsList.filter(o => o.type === '符合');
+        const zonesA = PERFECT_ZONES.slice(0, 4), zonesB = PERFECT_ZONES.slice(4);
         const head = ['營業部', '營業課別', '營業擔當', '時間戳記', '分數', '店號', '店名', '日期-時間', '點檢人員', '在店店員人數', '簽名店鋪人員身分別'];
         items.forEach(it => {
           head.push(it.name);
           if (it.type === 'subdeduct') head.push(`${it.name}-缺失子項`);
           head.push(`${it.name}-缺失照片上傳`);
         });
-        koItems.forEach(k => head.push(k.name));
-        tItems.forEach(t => head.push(t.name, `${t.name}-缺失照片上傳`));
-        oItems.forEach(o => head.push(o.name));
-        PERFECT_ZONES.forEach(z => head.push(`滿分照片-${z}`));
-        head.push('備註', 'SQC點檢表完成照片', '店型態');
+        head.push(
+          '【對外廁所觀察記錄 】店舖有無對外廁所', '對外廁所(觀察題) ', '缺失照片上傳',
+          '【對外廁所觀察記錄 】店舖有無開放對外廁所', '【對外廁所觀察記錄 】店外招牌有無廁所標示',
+          '【對外廁所觀察記錄 】店內有無廁所標示', '【對外廁所觀察記錄 】是否有提供以下備品(衛生紙、洗手乳、芳香劑)',
+          '重點觀察題1. 【 店外全景照】照片上傳', '重點觀察題2. 【 櫃台全景照】 照片上傳', '重點觀察題3.【  FF區全景照】照片上傳',
+          '100分照片上傳-1', '100分照片上傳-2', '備註(例：廠區店無法拍照)', 'SQC點檢表完成照片', '修正原因', '店型態');
 
-        const data = [head].concat(report.rows.map(r => {
-          const line = [r.營業部, r.營業課別, r.營業擔當, r.建立時間, `${r.合計} / 100`, r.店號, r.店名, timeCompact(r.點檢時間), r.點檢人員, r.在店人數, r.身分別];
+        return [head].concat(report.rows.map(r => {
+          const line = [r.營業部, r.營業課別, r.營業擔當, r.建立時間, `${r.合計} / 100`, padStoreCode(r.店號), r.店名, timeCompact(r.點檢時間), r.點檢人員, r.在店人數, r.身分別];
           items.forEach(it => {
             line.push(r.itemScores[it.id]);
             if (it.type === 'subdeduct') line.push(r.itemExtra[it.id] || '');
             line.push(joinLinks((r.photoGroups || {})[`${it.name}/缺失`]));
           });
-          koItems.forEach(k => line.push(joinLinks((r.photoGroups || {})[k.name])));
           const toilet = (r.觀察 || {}).toilet || {}, toiletReasons = (r.觀察 || {}).toiletReasons || {};
-          tItems.forEach(t => {
-            line.push(toilet[t.id] || '');
-            line.push(joinLinks((r.photoGroups || {})[`廁所觀察/${t.name}/缺失`]));
-          });
-          oItems.forEach(o => line.push(toilet[o.id] || ''));
-          PERFECT_ZONES.forEach(z => line.push(joinLinks((r.photoGroups || {})[`滿分照片/${z}`])));
-          line.push(r.備註, joinLinks((r.photoGroups || {})['SQC點檢表完成照片']), r.店型態);
+          const hasToilet = toilet['O1'] && toilet['O1'] !== '無';
+          const ngT = tItems.filter(t => toilet[t.id] === '不符合');
+          const tPhotos = tItems.flatMap(t => (r.photoGroups || {})[`廁所觀察/${t.name}/缺失`] || []);
+          line.push(
+            toilet['O1'] || '',
+            hasToilet ? (ngT.length ? ngT.flatMap(t => toiletReasons[t.id] || []).join('、') : '無以上缺失') : '',
+            joinLinks(tPhotos),
+            hasToilet ? (toilet['O2'] || '') : '',
+            hasToilet ? (toilet['O3'] || '') : '',
+            hasToilet ? (toilet['O4'] || '') : '',
+            hasToilet ? (toilet['O5'] || '') : '',
+            joinLinks((r.photoGroups || {})[obsById['KO1'] ? obsById['KO1'].name : '']),
+            joinLinks((r.photoGroups || {})[obsById['KO2'] ? obsById['KO2'].name : '']),
+            joinLinks((r.photoGroups || {})[obsById['KO3'] ? obsById['KO3'].name : '']),
+            joinLinks(zonesA.flatMap(z => (r.photoGroups || {})[`滿分照片/${z}`] || [])),
+            joinLinks(zonesB.flatMap(z => (r.photoGroups || {})[`滿分照片/${z}`] || [])),
+            r.備註, joinLinks((r.photoGroups || {})['SQC點檢表完成照片']), '', r.店型態);
           return line;
         }));
-        return XLSX.utils.aoa_to_sheet(data);
       };
 
-      // SQC週彙總表：逐店逐題分數彙整（大分類/項目/配分三層表頭），比照人工版排版
+      // SQC週彙總表：逐店逐題分數彙整（大分類/項目/配分三層表頭），比照人工版排版；缺失子項只留13/17題
       const buildWeeklyScoreSheet = (report, customerFacing) => {
         const items = report.checklist;
         const catOrder = report.catOrder;
         const catMax = {}; catOrder.forEach(c => { catMax[c] = items.filter(it => it.cat === c).reduce((s, it) => s + it.max, 0); });
         const tItems = report.obsList.filter(o => o.type === '符合');
         const oItems = report.obsList.filter(o => o.type === '有無');
-        const subItems = items.filter(it => it.type === 'subdeduct');
+        const subItems = items.filter(it => ['13', '17'].includes(itemNumberOf(it.name)));
+        const subNoteLabel = (it) => (itemNumberOf(it.name) === '13' ? 'FF區空架機台' : '被扣分的【垃圾桶】區域');
 
         const FIXED = 7; // NO,營業部,營業課別,店號,店名,營業擔當,年份-日期-時間
         const itemStart = FIXED, itemEnd = itemStart + items.length - 1;
@@ -739,11 +779,11 @@
         row3[0] = 'NO'; row3[1] = '營業部'; row3[2] = '營業課別'; row3[3] = '店號'; row3[4] = '店名'; row3[5] = '營業擔當'; row3[6] = '年份-日期-時間';
         items.forEach((it, i) => { row3[itemStart + i] = it.max; });
         catOrder.forEach(cat => { row3[catStart + catOrder.indexOf(cat)] = catMax[cat]; });
-        subItems.forEach((it, i) => { row3[subNoteStart + i] = `${it.name}-缺失子項`; });
+        subItems.forEach((it, i) => { row3[subNoteStart + i] = subNoteLabel(it); });
 
         const dataRows = report.rows.map((r, i) => {
           const line = blankRow();
-          line[0] = i + 1; line[1] = r.營業部; line[2] = r.營業課別; line[3] = r.店號; line[4] = r.店名; line[5] = r.營業擔當; line[6] = r.點檢時間;
+          line[0] = i + 1; line[1] = r.營業部; line[2] = r.營業課別; line[3] = padStoreCode(r.店號); line[4] = r.店名; line[5] = r.營業擔當; line[6] = r.點檢時間;
           items.forEach((it, j) => { line[itemStart + j] = r.itemScores[it.id]; });
           const toilet = (r.觀察 || {}).toilet || {}, toiletReasons = (r.觀察 || {}).toiletReasons || {};
           const hasToilet = toilet['O1'] && toilet['O1'] !== '無';
@@ -763,9 +803,7 @@
           return line;
         });
 
-        const ws = XLSX.utils.aoa_to_sheet([row0, row1, row2, row3, ...dataRows]);
-        ws['!merges'] = merges;
-        return ws;
+        return { aoa: [row0, row1, row2, row3, ...dataRows], merges };
       };
 
       const exportOneReport = async (customerFacing, setBuilding, label) => {
@@ -774,16 +812,25 @@
         const reportMonth = rocMonth(filter.from); // 依查詢的起始日期決定報表月份，而非「點檢作業」目前的時間
         try {
           const report = await SqcApi.buildMonthlyReport(reportMonth, { section: filter.section });
-          const wb = XLSX.utils.book_new();
+          const wb = new ExcelJS.Workbook();
           if (!customerFacing) {
-            XLSX.utils.book_append_sheet(wb, buildDeptSectionSheet(report), '盤點中心&隨盤點');
-            XLSX.utils.book_append_sheet(wb, buildFailStoreSheet(report), '不及格店');
+            addPlainSheet(wb, '盤點中心&隨盤點', buildDeptSectionSheet(report));
+            addPlainSheet(wb, '不及格店', buildFailStoreSheet(report));
           }
-          XLSX.utils.book_append_sheet(wb, buildRosterCheckSheet(report, customerFacing), '查核店鋪名單');
-          XLSX.utils.book_append_sheet(wb, buildRawFormSheet(report), 'SQC Google點檢表單');
-          XLSX.utils.book_append_sheet(wb, buildWeeklyScoreSheet(report, customerFacing), 'SQC週彙總表');
-          const monthLabel = monthFolderOf(reportMonth).replace('年', '').replace('月', '');
-          XLSX.writeFile(wb, `SQC點檢彙總表-${monthLabel}-${label}.xlsx`);
+          buildRosterCheckSheet(wb, report, customerFacing);
+          addPlainSheet(wb, 'SQC Google點檢表單', buildRawFormSheet(report));
+          const weekly = buildWeeklyScoreSheet(report, customerFacing);
+          addPlainSheet(wb, 'SQC週彙總表', weekly.aoa, weekly.merges);
+
+          const fromMMDD = (filter.from || '').replace(/-/g, '').slice(4);
+          const toMMDD = (filter.to || '').replace(/-/g, '').slice(4);
+          const fname = `(${reportMonth})SQC點檢彙總表-${fromMMDD}-${toMMDD}-${report.rows.length}-${label}.xlsx`;
+          const buf = await wb.xlsx.writeBuffer();
+          const blob = new Blob([buf], { type: 'application/octet-stream' });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a'); a.href = url; a.download = fname;
+          document.body.appendChild(a); a.click(); document.body.removeChild(a);
+          setTimeout(() => URL.revokeObjectURL(url), 1000);
           alert(`✅ 已產出${label}（共 ${report.rows.length} 筆點檢紀錄）`);
         } catch (e) {
           alert(`產出${label}失敗：` + e.message);
@@ -1009,6 +1056,8 @@
                         <select value={sign.identity} onChange={e => setSign({ ...sign, identity: e.target.value })} className="w-full px-3 py-2 border border-slate-300 rounded-lg">
                           <option value="">— 請選擇 —</option>{IDENTITIES.map(i => <option key={i}>{i}</option>)}</select></div>
                     </div>
+                    <div><label className="block text-xs text-slate-500 mb-1">備註<span className="text-slate-400">（選填，可記錄特殊情況）</span></label>
+                      <textarea value={sign.remark} onChange={e => setSign({ ...sign, remark: e.target.value })} rows={2} className="w-full px-3 py-2 border border-slate-300 rounded-lg" placeholder="例：店長臨時外出、店內裝修中…"></textarea></div>
                     <div>
                       <div className="text-sm font-semibold text-slate-600">📄 紙本點檢表上傳<span className="text-red-500 text-xs"> *所有店皆必須上傳才能送出</span></div>
                       <PhotoUpload label="紙本點檢表照片" required photos={paperForm} onChange={setPaperForm} folderPath={`${DRIVE_ROOT}/${monthFolder}/SQC點檢表完成照片`} existingCount={existingCountAt([monthFolder, 'SQC點檢表完成照片'])} />
