@@ -21,6 +21,10 @@ function seed(ctx) {
   // 店鋪名單_11507：兩家店同課，只有一家會被點檢（測試「未點檢」計算）；店鋪型態＝「隨盤點點檢店」，驗證不會被誤用成拍照類型
   ctx.upsertRow('roster', '11507', { 店號: '017246', 店名: '基隆武勝店', 課別: '北三課', 店鋪型態: '隨盤點點檢店', 遠程店: '是', 假日店: '否', 預排梯次: '第一梯' });
   ctx.upsertRow('roster', '11507', { 店號: '020847', 店名: '台東四維店', 課別: '北三課', 店鋪型態: '一般店', 遠程店: '否', 假日店: '否', 預排梯次: '第一梯' });
+  // 店號重新編號情境：名單上是舊碼(025604)，店鋪主檔已換成新碼(026045)，店名也差一個「店」字尾
+  // 應仍能以店名比對到店鋪主檔資訊，不能因為店號不同就找不到
+  ctx.upsertRow('stores', null, { 序號: 2, 店號: '026045', 店名: '淡水新崙店', 營業本部名稱: '北一本部', 營業部名稱: '北一二區', 營業課名稱: '北東四課', 營業擔當: '吳晉宏' });
+  ctx.upsertRow('roster', '11507', { 店號: '025604', 店名: '淡水新崙', 課別: '北一課', 店鋪型態: '一般店', 遠程店: '否', 假日店: '否', 預排梯次: '第一梯' });
   // 點檢人員主檔：測試部/課對照表去重
   ctx.upsertRow('staff', null, { 部別: '一部', 課別: '北三課', 工號: 'A001', 姓名: '測試員', 職稱: '', AD帳號: '', 角色: '點檢人員' });
   ctx.upsertRow('staff', null, { 部別: '一部', 課別: '北三課', 工號: 'A002', 姓名: '測試員2', 職稱: '', AD帳號: '', 角色: '點檢人員' });
@@ -74,8 +78,14 @@ const rosterEntry = report.roster.find(r => r.店號 === '017246');
 assertEqual(rosterEntry.營業部, '北一二區', '名單也應帶出店鋪主檔資訊(供未點檢店也能顯示部別/擔當)');
 assertEqual(rosterEntry.營業擔當, '王小明', '名單應帶出營業擔當');
 
-assertEqual(report.kpi.length, 1, 'KPI應只有1個課別');
-const kpi = report.kpi[0];
+// 店號重新編號(舊碼025604 vs 主檔新碼026045)，仍應靠店名比對到店鋪主檔資訊
+const renamedEntry = report.roster.find(r => r.店號 === '025604');
+assertEqual(renamedEntry.營業部, '北一二區', '店號不同但店名對得上，仍應帶出店鋪主檔的營業部(以店名為主比對)');
+assertEqual(renamedEntry.營業擔當, '吳晉宏', '店號不同但店名對得上，仍應帶出營業擔當');
+
+assertEqual(report.kpi.length, 2, 'KPI應有2個課別(北三課+新增的北一課)');
+const kpiByDept = {}; report.kpi.forEach(k => { kpiByDept[k.課別] = k; });
+const kpi = kpiByDept['北三課'];
 assertEqual(kpi.課別, '北三課', 'KPI課別');
 assertEqual(kpi.應點檢, 2, '應點檢=名單2家');
 assertEqual(kpi.已點檢, 1, '已點檢=1家');

@@ -446,9 +446,14 @@ function buildMonthlyReport(month, filter) {
     deptSectionList.push({ 部: dept, 課: sect });
   });
 
-  var masterByCode = {}, rosterByCode = {};
-  storesMaster.forEach(function (r) { masterByCode[normCode(r['店號'])] = r; });
+  // 店號可能因店鋪重新編號而新舊不一(同一家店在名單/主檔各存不同店號)，比對店鋪主檔一律以店名為主、店號僅作備援
+  var masterByCode = {}, masterByName = {}, rosterByCode = {};
+  storesMaster.forEach(function (r) {
+    masterByCode[normCode(r['店號'])] = r;
+    var nm = normName(r['店名']); if (nm) masterByName[nm] = r;
+  });
   roster.forEach(function (r) { rosterByCode[normCode(r['店號'])] = r; });
+  var findMaster = function (code, name) { return masterByName[normName(name)] || masterByCode[normCode(code)] || {}; };
 
   // 依大分類分組題目，供小計與欄位排序用
   var catOrder = [], catItems = {};
@@ -459,7 +464,7 @@ function buildMonthlyReport(month, filter) {
 
   var rows = records.map(function (rec, idx) {
     var code = normCode(rec.storeCode);
-    var sm = masterByCode[code] || {};
+    var sm = findMaster(rec.storeCode, rec.storeName);
     var ro = rosterByCode[code] || {};
     var itemScores = {}, itemExtra = {};
     checklist.forEach(function (it) {
@@ -530,7 +535,7 @@ function buildMonthlyReport(month, filter) {
     rows: rows,
     kpi: kpi,
     roster: roster.map(function (r) {
-      var sm = masterByCode[normCode(r['店號'])] || {};
+      var sm = findMaster(r['店號'], r['店名']);
       return {
         店號: r['店號'], 店名: r['店名'], 課別: r['課別'], 店鋪型態: r['店鋪型態'],
         遠程店: r['遠程店'], 假日店: r['假日店'], 預排梯次: r['預排梯次'],
@@ -734,6 +739,8 @@ function toYmd(v) { return (v instanceof Date) ? Utilities.formatDate(v, 'Asia/T
 function toDateTimeStr(v) { return (v instanceof Date) ? Utilities.formatDate(v, 'Asia/Taipei', 'yyyy-MM-dd HH:mm') : String(v || ''); }
 // 店號正規化：去除前導0與空白，避免 Sheet 自動轉數字掉0導致字串比對誤判「不同店」
 function normCode(c) { var s = String(c == null ? '' : c).trim(); var n = s.replace(/^0+(?=\d)/, ''); return n; }
+// 店名正規化：去除頭尾空白與結尾「店」字，供店號異動(舊碼/新碼)時仍能以店名比對店鋪主檔
+function normName(n) { return String(n == null ? '' : n).trim().replace(/店$/, ''); }
 // 照片項目轉雲端連結；尚未回寫 fileId(上傳中/舊紀錄)則回傳空字串
 function photoUrlOf(entry) {
   var fileId = entry && typeof entry === 'object' ? entry.fileId : '';
