@@ -119,6 +119,8 @@
   }
 
   window.addEventListener('online', pump);
+  // App 從背景切回前景時，手機瀏覽器常會暫停背景計時器/連線，導致連結回寫卡住；回到前景立即補跑一次
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') pump(); });
   setInterval(pump, 15000); // 週期性嘗試補傳
 
   window.SqcUploader = { enqueue, pump, counts, onChange };
