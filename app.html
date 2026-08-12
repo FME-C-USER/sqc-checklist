@@ -368,10 +368,12 @@
         const a = rocMonth(from || basic.time), b = rocMonth(to || from || basic.time);
         return Array.from(new Set([a, b]));
       };
+      const [queryLoading, setQueryLoading] = useState(false);
       const loadRecords = () => {
         if (!CONFIGURED) return;
         const f = { from: filter.from, to: filter.to, section: filter.section, empId: isManager ? undefined : currentUser.empId };
         const months = queryMonthsOf(filter.from, filter.to);
+        setQueryLoading(true);
         Promise.all(months.map(m => SqcApi.queryRecords(m, f).catch(() => ({ records: [] }))))
           .then(results => {
             const all = results.flatMap(r => (r && r.records) || []);
@@ -379,7 +381,7 @@
               id: x.id, date: String(x.time).slice(0, 10), store: x.storeName, section: x.section,
               staff: x.staffName, version: x.month, total: Number(x.total), grade: x.grade, _raw: x,
             })));
-          }).catch(e => alert('查詢失敗：' + e.message));
+          }).catch(e => alert('查詢失敗：' + e.message)).finally(() => setQueryLoading(false));
       };
 
       const total = useMemo(() => {
@@ -575,7 +577,8 @@
       const [filter, setFilter] = useState({ from: taipeiToday(), to: taipeiToday(), section: '' });
       const filtered = records.filter(r => (!filter.from || r.date >= filter.from) && (!filter.to || r.date <= filter.to) && (!filter.section || r.section === filter.section));
       // 正式模式：進查詢/彙總頁或改條件時，重新向後端查當月
-      useEffect(() => { if (CONFIGURED && (tab === 'records' || tab === 'summary')) loadRecords(); }, [tab, filter.from, filter.to, filter.section]);
+      // 只在切換進「查詢紀錄/彙總」分頁時自動查一次；改變日期/課別後需按「查詢」才會重新查詢
+      useEffect(() => { if (CONFIGURED && (tab === 'records' || tab === 'summary')) loadRecords(); }, [tab]);
       const delRecord = (id, recordMonth) => {
         if (!confirm('確定刪除此筆評核紀錄？')) return;
         if (!CONFIGURED) { setRecords(records.filter(r => r.id !== id)); return; }
@@ -1063,7 +1066,7 @@
                           <option value="">— 請選擇 —</option>{IDENTITIES.map(i => <option key={i}>{i}</option>)}</select></div>
                     </div>
                     <div><label className="block text-xs text-slate-500 mb-1">備註<span className="text-slate-400">（選填，可記錄特殊情況）</span></label>
-                      <textarea value={sign.remark} onChange={e => setSign({ ...sign, remark: e.target.value })} rows={2} className="w-full px-3 py-2 border border-slate-300 rounded-lg" placeholder="例：店長臨時外出、店內裝修中…"></textarea></div>
+                      <textarea value={sign.remark} onChange={e => setSign({ ...sign, remark: e.target.value })} rows={2} className="w-full px-3 py-2 border border-slate-300 rounded-lg" placeholder="例：蕃薯機調理中、熱狗機已報修"></textarea></div>
                     <div>
                       <div className="text-sm font-semibold text-slate-600">📄 紙本點檢表上傳<span className="text-red-500 text-xs"> *所有店皆必須上傳才能送出</span></div>
                       <PhotoUpload label="紙本點檢表照片" required photos={paperForm} onChange={setPaperForm} folderPath={`${DRIVE_ROOT}/${monthFolder}/SQC點檢表完成照片`} existingCount={existingCountAt([monthFolder, 'SQC點檢表完成照片'])} />
@@ -1080,7 +1083,17 @@
                   <div><label className="block text-xs text-slate-500 mb-1">起始日期</label><input type="date" value={filter.from} onChange={e => setFilter({ ...filter, from: e.target.value })} className="px-3 py-2 border border-slate-300 rounded-lg" /></div>
                   <div><label className="block text-xs text-slate-500 mb-1">結束日期</label><input type="date" value={filter.to} onChange={e => setFilter({ ...filter, to: e.target.value })} className="px-3 py-2 border border-slate-300 rounded-lg" /></div>
                   <div><label className="block text-xs text-slate-500 mb-1">課別</label><select value={filter.section} onChange={e => setFilter({ ...filter, section: e.target.value })} className="px-3 py-2 border border-slate-300 rounded-lg"><option value="">全部</option>{allSections.map(s => <option key={s}>{s}</option>)}</select></div>
+                  <button onClick={loadRecords} disabled={queryLoading} className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white rounded-lg">{queryLoading ? '查詢中…' : '🔍 查詢'}</button>
                 </div>
+                {queryLoading && (
+                  <div className="bg-white rounded-xl shadow-sm p-3">
+                    <div className="h-1 w-full bg-slate-200 rounded-full overflow-hidden">
+                      <div className="h-full w-1/3 bg-emerald-500 rounded-full" style={{ animation: 'sqc-progress 1s ease-in-out infinite' }} />
+                      <style>{`@keyframes sqc-progress { 0%{margin-left:0%} 50%{margin-left:67%} 100%{margin-left:0%} }`}</style>
+                    </div>
+                    <div className="text-xs text-emerald-600 mt-1">查詢中，請稍候…</div>
+                  </div>
+                )}
                 <div className="bg-white rounded-xl shadow-sm overflow-hidden">
                   <table className="w-full text-sm">
                     <thead><tr className="text-left text-slate-500 border-b bg-slate-50"><th className="py-2 px-3">日期</th><th>店鋪</th><th>課別</th><th>稽核員</th><th>得分</th><th>結果</th><th className="px-3">操作</th></tr></thead>
@@ -1106,12 +1119,22 @@
                   <div><label className="block text-xs text-slate-500 mb-1">起始日期</label><input type="date" value={filter.from} onChange={e => setFilter({ ...filter, from: e.target.value })} className="px-3 py-2 border border-slate-300 rounded-lg" /></div>
                   <div><label className="block text-xs text-slate-500 mb-1">結束日期</label><input type="date" value={filter.to} onChange={e => setFilter({ ...filter, to: e.target.value })} className="px-3 py-2 border border-slate-300 rounded-lg" /></div>
                   <div><label className="block text-xs text-slate-500 mb-1">課別</label><select value={filter.section} onChange={e => setFilter({ ...filter, section: e.target.value })} className="px-3 py-2 border border-slate-300 rounded-lg"><option value="">全部</option>{allSections.map(s => <option key={s}>{s}</option>)}</select></div>
+                  <button onClick={loadRecords} disabled={queryLoading} className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white rounded-lg">{queryLoading ? '查詢中…' : '🔍 查詢'}</button>
                   <div className="ml-auto flex flex-wrap gap-3">
                     {isManager && <button onClick={exportManagerReport} disabled={buildingManager} className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white rounded-lg">{buildingManager ? '產出中…' : '📘 產出課長版'}</button>}
                     {isManager && <button onClick={exportCustomerReport} disabled={buildingCustomer} className="px-4 py-2 bg-violet-600 hover:bg-violet-700 disabled:opacity-50 text-white rounded-lg">{buildingCustomer ? '產出中…' : '📗 產出客戶版'}</button>}
                     <button onClick={exportUninspected} className="px-4 py-2 bg-amber-500 hover:bg-amber-600 text-white rounded-lg">🏪 尚未點檢名單</button>
                   </div>
                 </div>
+                {queryLoading && (
+                  <div className="bg-white rounded-xl shadow-sm p-3">
+                    <div className="h-1 w-full bg-slate-200 rounded-full overflow-hidden">
+                      <div className="h-full w-1/3 bg-emerald-500 rounded-full" style={{ animation: 'sqc-progress 1s ease-in-out infinite' }} />
+                      <style>{`@keyframes sqc-progress { 0%{margin-left:0%} 50%{margin-left:67%} 100%{margin-left:0%} }`}</style>
+                    </div>
+                    <div className="text-xs text-emerald-600 mt-1">查詢中，請稍候…</div>
+                  </div>
+                )}
                 <div className="grid grid-cols-3 gap-3">
                   <div className="bg-white rounded-xl shadow-sm p-4 text-center"><div className="text-xs text-slate-500">執行店數</div><div className="text-3xl font-extrabold text-emerald-600">{filtered.length}</div></div>
                   <div className="bg-white rounded-xl shadow-sm p-4 text-center"><div className="text-xs text-slate-500">平均得分</div><div className="text-3xl font-extrabold text-slate-700">{filtered.length ? Math.round(filtered.reduce((s, r) => s + r.total, 0) / filtered.length) : '—'}</div></div>
@@ -1136,7 +1159,10 @@
               <div className="max-w-4xl mx-auto px-4 py-3 flex items-center justify-between">
                 <div><div className="text-xs text-slate-400">合計得分（及格 {PASS_SCORE}）</div>
                   <div className="flex items-baseline gap-2"><span className="text-3xl font-extrabold text-slate-800">{total}</span><span className="text-slate-400">/ {TOTAL_MAX}</span><span className={"ml-2 font-bold " + grade.c}>{grade.txt}</span>{noDeductDefect && canPhoto && <span className="ml-1 text-xs bg-amber-100 text-amber-700 px-2 py-0.5 rounded">需拍滿分照片</span>}</div></div>
-                <button onClick={submit} className="px-8 py-3 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl shadow-lg">{editingRecordId ? '完成編輯' : '送出評核'}</button>
+                <div className="flex gap-2">
+                  {editingRecordId && <button onClick={() => { if (confirm('確定要放棄這次編輯的變更嗎？')) { resetWork(); setTab('records'); } }} className="px-5 py-3 bg-slate-200 hover:bg-slate-300 text-slate-700 font-bold rounded-xl">返回</button>}
+                  <button onClick={submit} className="px-8 py-3 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl shadow-lg">{editingRecordId ? '完成編輯' : '送出評核'}</button>
+                </div>
               </div>
             </div>
           )}
