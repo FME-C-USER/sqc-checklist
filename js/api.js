@@ -39,6 +39,10 @@
       }
       throw new Error(data.error || 'API 錯誤');
     }
+    // 後端回 ok 但沒帶 result（多半是線上部署版本較舊、該動作尚未存在或回傳空值）
+    if (data.result === undefined) {
+      throw new Error('後端未回傳資料（動作：' + action + '），請確認 Apps Script 已重新部署新版本');
+    }
     return data.result;
   }
 

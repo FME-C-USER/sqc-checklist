@@ -374,7 +374,7 @@
         const months = queryMonthsOf(filter.from, filter.to);
         Promise.all(months.map(m => SqcApi.queryRecords(m, f).catch(() => ({ records: [] }))))
           .then(results => {
-            const all = results.flatMap(r => r.records || []);
+            const all = results.flatMap(r => (r && r.records) || []);
             setRecords(all.map(x => ({
               id: x.id, date: String(x.time).slice(0, 10), store: x.storeName, section: x.section,
               staff: x.staffName, version: x.month, total: Number(x.total), grade: x.grade, _raw: x,

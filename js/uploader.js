@@ -96,7 +96,10 @@
     const links = {};
     toLink.forEach((p) => { const k = (p.pathParts || []).join('/'); (links[k] = links[k] || []).push({ name: p.name, fileId: p.fileId }); });
     try {
-      await window.SqcApi.attachPhotoLinks(month, recordId, links);
+      const res = await window.SqcApi.attachPhotoLinks(month, recordId, links);
+      // 照片是在紀錄送出「之前」就開始上傳的，所以可能比紀錄本身更早完成 → 後端會回「找不到紀錄」。
+      // 這種情況必須維持 done、等下次 pump 週期紀錄存在後再送，不可標記 linked(否則連結永久遺失)。
+      if (res && res.ok === false) return;
       await Promise.all(toLink.map((p) => window.SqcDB.updatePhoto({ ...p, status: 'linked' })));
     } catch (e) { /* 回寫失敗就維持 done，下次 pump 週期再試一次 */ }
   }
