@@ -445,6 +445,12 @@
 
       const submit = () => {
         const isEdit = !!editingRecordId;
+        // 題庫是計分依據：尚在載入或載入失敗(題庫為空)時送出，會把明細與分數寫成 0 分覆蓋掉原紀錄，必須先擋下
+        if (loading) { alert('題庫仍在載入中，請稍候幾秒再送出'); return; }
+        if (!checklist.categories.length) {
+          alert('目前沒有載入到本月題庫，為避免分數被覆蓋成 0 分，已阻止送出。\n請重新整理頁面；若仍為空，請確認「維護專區→點檢題目」該月份已匯入題庫。');
+          return;
+        }
         if (!effStore) { alert('請先在「基本資料」選擇店鋪'); setTab('basic'); return; }
         if (!isEdit && inspectedCodes[normCode(effStore.code)]) { alert('這家店本月已有點檢紀錄，不可重複點檢（如需修正請至查詢紀錄編輯該筆）'); setTab('basic'); return; }
         if (!basic.storeType) { alert('請先在「基本資料」選擇可否拍照'); setTab('basic'); return; }
