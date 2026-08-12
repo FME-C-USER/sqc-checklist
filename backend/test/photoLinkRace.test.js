@@ -67,7 +67,9 @@ const settle = () => new Promise((r) => setTimeout(r, 300));
   assertEqual(calls.length >= 1, true, '應已嘗試呼叫過 attachPhotoLinks');
 
   // ===== 情境2：紀錄送出完成後，下一輪 pump 應自動補寫連結成功 =====
+  // 回寫失敗會設退避時間(首次1.5秒)，等過了退避才會真的重送
   exists = true;
+  await new Promise((r) => setTimeout(r, 1700));
   await uploader.pump();
   await settle();
   all = Array.from(photos.values());
@@ -82,6 +84,20 @@ const settle = () => new Promise((r) => setTimeout(r, 300));
   await uploader.pump();
   await settle();
   assertEqual(calls.length, before, '已回寫過的照片不應重複呼叫 attachPhotoLinks');
+
+  // ===== 情境4：紀錄永遠不存在(例如送出失敗)時要放棄，不可無限每輪重送佔用後端 =====
+  const b = loadUploader({ recordExists: () => false });
+  await b.uploader.enqueue({ blob: 'b', name: 'z.jpg', pathParts: ['115年08月', 'X'], recordId: 'GHOST', month: '11508' });
+  await settle();
+  for (let i = 0; i < 30; i++) {                     // 反覆觸發遠超過放棄上限的次數
+    const p = Array.from(b.photos.values())[0];
+    b.photos.set(p.id, { ...p, linkNextAt: 0 });     // 先清掉退避時間，直接測「放棄上限」邏輯
+    await b.uploader.pump();
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  const ghost = Array.from(b.photos.values())[0];
+  assertEqual(ghost.status, 'orphan', '重試達上限後應標記 orphan 並停止重送');
+  assertEqual(b.calls.length <= 20, true, `重送次數應被上限擋住(實際 ${b.calls.length} 次)`);
 
   console.log(failed === 0 ? '\n✅ 全部通過' : `\n❌ ${failed} 項失敗`);
   process.exit(failed === 0 ? 0 : 1);

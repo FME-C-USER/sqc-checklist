@@ -8,22 +8,32 @@
   }
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+  const TIMEOUT_MS = 15000; // GAS 偶發會讓連線一直掛著不回應，必須設上限否則畫面會永遠停在「查詢中」
+
   async function attempt(action, payload) {
-    let res;
+    let text;
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
     try {
-      res = await fetch(window.SQC_CONFIG.GAS_URL, {
+      const res = await fetch(window.SQC_CONFIG.GAS_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'text/plain;charset=utf-8' },
         body: JSON.stringify({ action, token: token(), payload: payload || {} }),
         redirect: 'follow',
+        signal: ctrl.signal,
       });
+      text = await res.text(); // 逾時計時器需涵蓋讀取內容，否則連線掛在讀取階段仍會卡住
     } catch (e) {
-      // fetch 本身拋錯＝網路層失敗(手機訊號瞬斷/連線中斷)，標記為可重試，不是後端問題
-      const err = new Error('網路連線中斷，請稍後再試（' + (e && e.message || '') + '）');
+      // fetch 拋錯＝網路層失敗(訊號瞬斷)或逾時被中止，兩者都標記為可重試，不是後端邏輯問題
+      const aborted = e && e.name === 'AbortError';
+      const err = new Error(aborted
+        ? '伺服器逾時未回應（' + (TIMEOUT_MS / 1000) + ' 秒）'
+        : '網路連線中斷，請稍後再試（' + (e && e.message || '') + '）');
       err.transient = true;
       throw err;
+    } finally {
+      clearTimeout(timer);
     }
-    const text = await res.text();
     let data;
     try { data = JSON.parse(text); }
     catch (e) {

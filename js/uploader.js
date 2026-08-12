@@ -85,6 +85,7 @@
   }
 
   // 一筆紀錄的照片全部上傳完成(狀態皆為done)後，把雲端連結一次回寫進該筆紀錄，之後標記linked避免重送
+  const LINK_MAX_TRIES = 20; // 紀錄始終不存在(例如送出失敗)時要放棄，否則每15秒重送一次會無限佔用後端
   async function flushLinksIfDone(recordId) {
     if (!recordId) return;
     const list = await window.SqcDB.photosOfRecord(recordId);
@@ -92,16 +93,27 @@
     if (list.some((p) => p.status !== 'done' && p.status !== 'linked')) return; // 還有上傳中/失敗中的，先不送
     const toLink = list.filter((p) => p.status === 'done');
     if (!toLink.length) return; // 已全部 linked 過了
+    // 退避：回寫失敗過就等一段時間再試，避免密集打後端(會與使用者的查詢互相搶資源)
+    const now = Date.now();
+    if (toLink.some((p) => p.linkNextAt && p.linkNextAt > now)) return;
     const month = toLink[0].month;
     const links = {};
     toLink.forEach((p) => { const k = (p.pathParts || []).join('/'); (links[k] = links[k] || []).push({ name: p.name, fileId: p.fileId }); });
+    const backoff = async (reason) => {
+      await Promise.all(toLink.map((p) => {
+        const linkTries = (p.linkTries || 0) + 1;
+        const status = linkTries >= LINK_MAX_TRIES ? 'orphan' : p.status; // 放棄後不再重送，保留資料供人工查
+        // 首次退避短一點(紀錄通常在1~2秒內就寫入完成)，之後逐步拉長上限5分鐘
+        return window.SqcDB.updatePhoto({ ...p, linkTries, status, linkErr: reason, linkNextAt: Date.now() + Math.min(300000, 1500 * linkTries) });
+      }));
+    };
     try {
       const res = await window.SqcApi.attachPhotoLinks(month, recordId, links);
       // 照片是在紀錄送出「之前」就開始上傳的，所以可能比紀錄本身更早完成 → 後端會回「找不到紀錄」。
       // 這種情況必須維持 done、等下次 pump 週期紀錄存在後再送，不可標記 linked(否則連結永久遺失)。
-      if (res && res.ok === false) return;
+      if (res && res.ok === false) { await backoff(res.message || '找不到紀錄'); return; }
       await Promise.all(toLink.map((p) => window.SqcDB.updatePhoto({ ...p, status: 'linked' })));
-    } catch (e) { /* 回寫失敗就維持 done，下次 pump 週期再試一次 */ }
+    } catch (e) { await backoff(String(e && e.message || e)); }
   }
 
   // 每次 pump 週期，找出「所有照片都已上傳完成但還沒回寫連結」的紀錄一併補送
