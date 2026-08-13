@@ -369,6 +369,13 @@
         return Array.from(new Set([a, b]));
       };
       const [queryLoading, setQueryLoading] = useState(false);
+      // 顯示 API 自動重試狀態（Google 轉送層偶發變慢/回404，重試通常就會恢復）
+      const [retryInfo, setRetryInfo] = useState(null);
+      useEffect(() => {
+        if (!window.SqcApi || !window.SqcApi.onRetry) return; // api.js 未載入時不可讓整頁掛掉
+        return window.SqcApi.onRetry(info => setRetryInfo(info && !info.done ? info : null));
+      }, []);
+      const busyText = retryInfo ? `連線不穩，自動重試中（第 ${retryInfo.attempt}/${retryInfo.maxAttempts} 次）…` : '';
       const loadRecords = () => {
         if (!CONFIGURED) return;
         const f = { from: filter.from, to: filter.to, section: filter.section, empId: isManager ? undefined : currentUser.empId };
@@ -873,6 +880,15 @@
           </div>
 
           <div className="max-w-4xl mx-auto p-4 space-y-4">
+            {(loading || retryInfo) && (
+              <div className="bg-white rounded-xl shadow-sm p-3">
+                <div className="h-1 w-full bg-slate-200 rounded-full overflow-hidden">
+                  <div className="h-full w-1/3 bg-emerald-500 rounded-full" style={{ animation: 'sqc-progress 1s ease-in-out infinite' }} />
+                  <style>{`@keyframes sqc-progress { 0%{margin-left:0%} 50%{margin-left:67%} 100%{margin-left:0%} }`}</style>
+                </div>
+                <div className={"text-xs mt-1 " + (retryInfo ? "text-amber-600" : "text-emerald-600")}>{busyText || '載入當月資料中，請稍候…'}</div>
+              </div>
+            )}
             {bootErr && <div className="bg-red-50 border border-red-200 text-red-700 text-sm rounded-lg px-3 py-2 flex justify-between items-center gap-3"><span>載入當月資料失敗：{bootErr}（可能連線逾時，請重新登入或稍後再試）</span><span className="flex items-center gap-2 shrink-0"><button onClick={() => { setLoading(true); reloadBoot(workMonth).catch(e => setBootErr(e.message || '載入失敗')).finally(() => setLoading(false)); }} className="text-red-700 underline">重試</button><button onClick={() => setBootErr('')} className="text-red-400">✕</button></span></div>}
             {/* ========== 基本資料 ========== */}
             {tab === 'basic' && (
@@ -1091,7 +1107,7 @@
                       <div className="h-full w-1/3 bg-emerald-500 rounded-full" style={{ animation: 'sqc-progress 1s ease-in-out infinite' }} />
                       <style>{`@keyframes sqc-progress { 0%{margin-left:0%} 50%{margin-left:67%} 100%{margin-left:0%} }`}</style>
                     </div>
-                    <div className="text-xs text-emerald-600 mt-1">查詢中，請稍候…</div>
+                    <div className={"text-xs mt-1 " + (retryInfo ? "text-amber-600" : "text-emerald-600")}>{busyText || '查詢中，請稍候…'}</div>
                   </div>
                 )}
                 <div className="bg-white rounded-xl shadow-sm overflow-hidden">
@@ -1132,7 +1148,7 @@
                       <div className="h-full w-1/3 bg-emerald-500 rounded-full" style={{ animation: 'sqc-progress 1s ease-in-out infinite' }} />
                       <style>{`@keyframes sqc-progress { 0%{margin-left:0%} 50%{margin-left:67%} 100%{margin-left:0%} }`}</style>
                     </div>
-                    <div className="text-xs text-emerald-600 mt-1">查詢中，請稍候…</div>
+                    <div className={"text-xs mt-1 " + (retryInfo ? "text-amber-600" : "text-emerald-600")}>{busyText || '查詢中，請稍候…'}</div>
                   </div>
                 )}
                 <div className="grid grid-cols-3 gap-3">

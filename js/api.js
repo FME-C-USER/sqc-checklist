@@ -8,7 +8,13 @@
   }
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-  const TIMEOUT_MS = 15000; // GAS 偶發會讓連線一直掛著不回應，必須設上限否則畫面會永遠停在「查詢中」
+  // Google 的 Web App 轉送層偶發會慢或回 404（實測後端本身都 1~2 秒完成，但回應可能 17 秒才回 404），
+  // 且通常下一次就恢復 → 設較短逾時、多retry幾次，並對外通報重試狀態讓畫面不會看起來像卡住
+  const TIMEOUT_MS = 12000;
+  const RETRY_DELAYS = [700, 1500, 3000];
+  const _retryListeners = new Set();
+  const onRetry = (fn) => { _retryListeners.add(fn); return () => _retryListeners.delete(fn); };
+  const emitRetry = (info) => _retryListeners.forEach((fn) => { try { fn(info); } catch (e) {} });
 
   async function attempt(action, payload) {
     let text;
@@ -56,23 +62,31 @@
     return data.result;
   }
 
-  // 網路層失敗 / 非 JSON 回應視為暫時性，重試最多2次(間隔漸增)再放棄，涵蓋手機訊號短暫中斷的情況
+  // 網路層失敗 / 逾時 / 非 JSON 回應皆視為暫時性，重試數次(間隔漸增)再放棄
   async function call(action, payload) {
-    const delays = [800, 2000];
+    const maxAttempts = RETRY_DELAYS.length + 1;
     let lastErr;
-    for (let i = 0; i <= delays.length; i++) {
-      try { return await attempt(action, payload); }
-      catch (e) {
+    for (let i = 0; i < maxAttempts; i++) {
+      try {
+        const out = await attempt(action, payload);
+        if (i > 0) emitRetry({ action, attempt: 0, maxAttempts, done: true }); // 通報已恢復
+        return out;
+      } catch (e) {
         lastErr = e;
         if (!e.transient) throw e;
-        if (i < delays.length) await sleep(delays[i]);
+        if (i < RETRY_DELAYS.length) {
+          emitRetry({ action, attempt: i + 2, maxAttempts, done: false });
+          await sleep(RETRY_DELAYS[i]);
+        }
       }
     }
+    emitRetry({ action, attempt: 0, maxAttempts, done: true });
     throw new Error('伺服器忙碌中，請稍後再試一次（' + (lastErr && lastErr.message || '') + '）');
   }
 
   window.SqcApi = {
     call,
+    onRetry, // 供UI顯示「重試中 n/m」，避免暫時性失敗看起來像卡住
     login: (userId, password) => call('login', { userId, password }),
     getBootstrap: (month, section) => call('getBootstrap', { month, section }),
     getDriveToken: () => call('getDriveToken'),
