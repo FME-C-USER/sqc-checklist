@@ -309,27 +309,44 @@
       const [custResults, setCustResults] = useState([]);
       const [loading, setLoading] = useState(CONFIGURED);
       const [bootErr, setBootErr] = useState('');
+      const [bootWarn, setBootWarn] = useState(''); // 用快取撐著時的提示（非阻斷式）
+      // 開場資料快取：Google 轉送層偶發不穩時，用上次成功的資料先讓 App 可用，
+      // 避免整頁卡在「載入失敗」，也避免題庫為空導致分數被算成 0
+      const bootCacheKey = (m) => 'sqc_boot_' + m;
+      const readBootCache = (m) => { try { const raw = localStorage.getItem(bootCacheKey(m)); return raw ? JSON.parse(raw) : null; } catch (e) { return null; } };
+      const writeBootCache = (m, b) => { try { localStorage.setItem(bootCacheKey(m), JSON.stringify({ at: Date.now(), b })); } catch (e) { /* 空間不足就算了 */ } };
+      const applyBoot = (b, mo) => setBoot({
+        checklist: buildChecklist(b.checklist || [], mo, b.observations),
+        stores: b.stores || [],
+        staffs: (b.staffs || []).map(s => ({ id: s.empId, name: s.name, dept: s.dept, section: s.section })),
+        depts: b.depts || [],
+      });
       const reloadBoot = (m) => { const mo = m || workMonth; return SqcApi.getBootstrap(mo, '').then(b => {
-        setBoot({
-          checklist: buildChecklist(b.checklist || [], mo, b.observations),
-          stores: b.stores || [],
-          staffs: (b.staffs || []).map(s => ({ id: s.empId, name: s.name, dept: s.dept, section: s.section })),
-          depts: b.depts || [],
-        });
-        setBootErr('');
+        applyBoot(b, mo);
+        writeBootCache(mo, b);
+        setBootErr(''); setBootWarn('');
+        return b;
       }); };
       const loadInspected = (m) => {
-        if (!CONFIGURED) return;
-        SqcApi.queryRecords(m || workMonth, {}).then(r => {
+        if (!CONFIGURED) return Promise.resolve();
+        return SqcApi.queryRecords(m || workMonth, {}).then(r => {
           const map = {}; (r.records || []).forEach(x => { map[normCode(x.storeCode)] = true; });
           setInspectedCodes(map);
         }).catch(() => { });
       };
       useEffect(() => {
         if (!CONFIGURED) return;
-        setLoading(true);
-        reloadBoot(workMonth).catch(e => setBootErr(e.message || '載入失敗')).finally(() => setLoading(false));
-        loadInspected(workMonth);
+        const cached = readBootCache(workMonth);
+        if (cached && cached.b) { applyBoot(cached.b, workMonth); setLoading(false); } // 先用快取讓畫面立即可用
+        else setLoading(true);
+        reloadBoot(workMonth)
+          .catch(e => {
+            if (cached && cached.b) setBootWarn('連線不穩，目前顯示上次載入的資料（' + (e.message || '載入失敗') + '）');
+            else setBootErr(e.message || '載入失敗');
+          })
+          .finally(() => setLoading(false))
+          // 兩支API改為接續呼叫而非同時發送：同時打會提高撞上轉送層不穩的機率
+          .then(() => loadInspected(workMonth));
       }, [workMonth]);
       const checklist = boot.checklist, STORE_ROSTER = boot.stores, STAFFS = boot.staffs, DEPTS = boot.depts;
       const TOTAL_MAX = useMemo(() => checklist.categories.reduce((s, c) => s + c.max, 0), [checklist]);
@@ -889,6 +906,7 @@
                 <div className={"text-xs mt-1 " + (retryInfo ? "text-amber-600" : "text-emerald-600")}>{busyText || '載入當月資料中，請稍候…'}</div>
               </div>
             )}
+            {bootWarn && <div className="bg-amber-50 border border-amber-200 text-amber-700 text-sm rounded-lg px-3 py-2 flex justify-between items-center gap-3"><span>⚠ {bootWarn}</span><span className="flex items-center gap-2 shrink-0"><button onClick={() => { setLoading(true); reloadBoot(workMonth).catch(e => setBootWarn('連線不穩，目前顯示上次載入的資料（' + (e.message || '載入失敗') + '）')).finally(() => setLoading(false)); }} className="text-amber-700 underline">重新載入</button><button onClick={() => setBootWarn('')} className="text-amber-400">✕</button></span></div>}
             {bootErr && <div className="bg-red-50 border border-red-200 text-red-700 text-sm rounded-lg px-3 py-2 flex justify-between items-center gap-3"><span>載入當月資料失敗：{bootErr}（可能連線逾時，請重新登入或稍後再試）</span><span className="flex items-center gap-2 shrink-0"><button onClick={() => { setLoading(true); reloadBoot(workMonth).catch(e => setBootErr(e.message || '載入失敗')).finally(() => setLoading(false)); }} className="text-red-700 underline">重試</button><button onClick={() => setBootErr('')} className="text-red-400">✕</button></span></div>}
             {/* ========== 基本資料 ========== */}
             {tab === 'basic' && (
