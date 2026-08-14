@@ -147,6 +147,16 @@
     const IDENTITIES = ['店長', '副店', '正職', 'PT'];
     const PASS_SCORE = 85;
 
+    // 報表用的觀察題定義備援：該月「觀察題」活頁未匯入時後端會回空陣列，
+    // 但 App 點檢時是用 DEFAULT_OBS 進行(照片資料夾也用這些名稱)，報表必須用同一份定義才對得上
+    function defaultObsList() {
+      const out = [];
+      DEFAULT_OBS.keyObservations.forEach((k, i) => out.push({ id: k.id, type: '拍照', name: k.name, options: [], showIf: 'always', required: true, order: i + 1 }));
+      DEFAULT_OBS.toiletObservations.forEach((o, i) => out.push({ id: o.id, type: '有無', name: o.name, options: o.opts || [], showIf: o.show || 'always', required: false, order: 10 + i }));
+      DEFAULT_OBS.toiletInspect.forEach((t, i) => out.push({ id: t.id, type: '符合', name: t.name, options: t.opts || [], showIf: 'has', required: false, order: 20 + i }));
+      return out;
+    }
+
     // 後端是否已設定（未設定時停用，不載入任何內建假資料）
     const CONFIGURED = !!(window.SQC_CONFIG && window.SQC_CONFIG.GAS_URL && window.SQC_CONFIG.GAS_URL.indexOf('XXXXXXXX') < 0);
     const MONTH = (window.SQC_CONFIG && window.SQC_CONFIG.MONTH) || '11506';
@@ -667,6 +677,11 @@
       };
       const mmdd = (t) => { const s = String(t || ''); return s.length >= 10 ? `${s.slice(5, 7)}/${s.slice(8, 10)}` : ''; };
       const joinLinks = (arr) => (arr || []).join(', ');
+      // 依「照片資料夾名稱」直接比對取連結，不依賴觀察題活頁的題目名稱是否與當初上傳時一致
+      // （活頁未匯入時 App 會用內建預設題名上傳，用名稱精準比對會全部落空）
+      const groupLinks = (groups, pred) => Object.keys(groups || {}).filter(pred).reduce((acc, k) => acc.concat(groups[k] || []), []);
+      const keyObsLinks = (r, n) => groupLinks(r.photoGroups, k => k.indexOf('重點觀察題' + n) === 0);
+      const toiletDefectLinks = (r) => groupLinks(r.photoGroups, k => k.indexOf('廁所觀察/') === 0);
       // 店號補回前導0並確保以文字寫入(避免Excel開啟時把"017246"顯示成17246)
       const padStoreCode = (c) => { const s = String(c == null ? '' : c).trim(); return /^\d+$/.test(s) && s.length < 6 ? ('000000' + s).slice(-6) : s; };
 
@@ -738,8 +753,6 @@
       // SQC Google點檢表單：逐店逐題原始資料，含每題缺失照片雲端連結（比照原本Google表單回覆試算表格式）
       const buildRawFormSheet = (report) => {
         const items = report.checklist;
-        const obsById = {}; report.obsList.forEach(o => { obsById[o.id] = o; });
-        const tItems = report.obsList.filter(o => o.type === '符合');
         const zonesA = PERFECT_ZONES.slice(0, 4), zonesB = PERFECT_ZONES.slice(4);
         const head = ['營業部', '營業課別', '營業擔當', '時間戳記', '分數', '店號', '店名', '日期-時間', '點檢人員', '在店店員人數', '簽名店鋪人員身分別'];
         items.forEach(it => {
@@ -763,19 +776,19 @@
           });
           const toilet = (r.觀察 || {}).toilet || {}, toiletReasons = (r.觀察 || {}).toiletReasons || {};
           const hasToilet = toilet['O1'] && toilet['O1'] !== '無';
-          const ngT = tItems.filter(t => toilet[t.id] === '不符合');
-          const tPhotos = tItems.flatMap(t => (r.photoGroups || {})[`廁所觀察/${t.name}/缺失`] || []);
+          // 缺失項目直接取紀錄裡勾選的內容，不經由題目名稱比對（活頁未匯入時仍正確）
+          const ngReasons = Object.keys(toiletReasons).reduce((acc, k) => acc.concat(toiletReasons[k] || []), []);
           line.push(
             toilet['O1'] || '',
-            hasToilet ? (ngT.length ? ngT.flatMap(t => toiletReasons[t.id] || []).join('、') : '無以上缺失') : '',
-            joinLinks(tPhotos),
+            hasToilet ? (ngReasons.length ? ngReasons.join('、') : '無以上缺失') : '',
+            joinLinks(toiletDefectLinks(r)),
             hasToilet ? (toilet['O2'] || '') : '',
             hasToilet ? (toilet['O3'] || '') : '',
             hasToilet ? (toilet['O4'] || '') : '',
             hasToilet ? (toilet['O5'] || '') : '',
-            joinLinks((r.photoGroups || {})[obsById['KO1'] ? obsById['KO1'].name : '']),
-            joinLinks((r.photoGroups || {})[obsById['KO2'] ? obsById['KO2'].name : '']),
-            joinLinks((r.photoGroups || {})[obsById['KO3'] ? obsById['KO3'].name : '']),
+            joinLinks(keyObsLinks(r, 1)),
+            joinLinks(keyObsLinks(r, 2)),
+            joinLinks(keyObsLinks(r, 3)),
             joinLinks(zonesA.flatMap(z => (r.photoGroups || {})[`滿分照片/${z}`] || [])),
             joinLinks(zonesB.flatMap(z => (r.photoGroups || {})[`滿分照片/${z}`] || [])),
             r.備註, joinLinks((r.photoGroups || {})['SQC點檢表完成照片']), '', r.店型態);
@@ -866,6 +879,9 @@
         const reportMonth = rocMonth(filter.from); // 依查詢的起始日期決定報表月份，而非「點檢作業」目前的時間
         try {
           const report = await SqcApi.buildMonthlyReport(reportMonth, { section: filter.section });
+          // 該月「觀察題」活頁未匯入時後端回空陣列，但點檢當時是用內建預設題目進行的，
+          // 報表改用同一份預設定義，否則觀察區的欄位與照片連結會整片空白
+          if (!report.obsList || !report.obsList.length) report.obsList = defaultObsList();
           const wb = new ExcelJS.Workbook();
           if (!customerFacing) {
             addPlainSheet(wb, '盤點中心&隨盤點', buildDeptSectionSheet(report));
