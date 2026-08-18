@@ -163,14 +163,15 @@
     const MONTH = (window.SQC_CONFIG && window.SQC_CONFIG.MONTH) || '11506';
 
     // 民國年月 11506 → 「115年06月」
-    function monthFolderOf(m) { return m.slice(0, 3) + '年' + m.slice(3, 5) + '月'; }
+    // 一律先轉字串：民國年月從 Sheet 讀出來可能是數字(11508)，直接 .slice() 會拋 TypeError
+    function monthFolderOf(m) { const s = String(m == null ? '' : m); return s.slice(0, 3) + '年' + s.slice(3, 5) + '月'; }
     // 台北時間現在（datetime-local 預設值用）
     function taipeiNow() { return new Date(Date.now() + 8 * 3600 * 1000).toISOString().slice(0, 16); }
     function taipeiToday() { return taipeiNow().slice(0, 10); }
     // 店號正規化：去除前導0與空白，避免不同來源(店鋪名單/店鋪主檔)格式不一致誤判成不同店
     function normCode(c) { const s = String(c == null ? '' : c).trim(); return s.replace(/^0+(?=\d)/, ''); }
     // 點檢時間(YYYY-MM-DDTHH:mm) → 民國年月，如 2026-07 → 11507
-    function rocMonth(dt) { if (!dt || dt.length < 7) return MONTH; return String(parseInt(dt.slice(0, 4)) - 1911) + dt.slice(5, 7); }
+    function rocMonth(dt) { const s = String(dt == null ? '' : dt); if (s.length < 7) return MONTH; return String(parseInt(s.slice(0, 4)) - 1911) + s.slice(5, 7); }
     // 民國年月字串前後推移，如 shiftRocMonth('11512', 1) → '11601'（跨年）
     function shiftRocMonth(m, delta) {
       let y = parseInt(m.slice(0, 3), 10), mo = parseInt(m.slice(3, 5), 10) + delta;
@@ -575,7 +576,7 @@
           noPhotoReason: npr, noPhotoOther: npo,
         });
         setEditingRecordId(rec.id);
-        setEditingMonth(rec.month || rocMonth(String(rec.time || '')));
+        setEditingMonth(String(rec.month || rocMonth(rec.time))); // 轉字串：Sheet 的題庫版本可能是數字，比對月份時會誤判成跨月
         setTab('work');
       };
 
@@ -699,8 +700,8 @@
         // 紀錄依「點檢時間」分月存放。編輯時若把點檢時間改到別的月份，該筆就必須從原月份活頁搬到新月份，
         // 否則用新月份去更新會找不到原列(原紀錄不會被改到)。搬移採「先寫入新月份、成功後才刪原月份」的順序，
         // 中途失敗時寧可暫時重複(看得到、可補救)，也不要先刪造成資料遺失。
-        const origMonth = editingMonth || workMonth;
-        const crossMonth = isEdit && origMonth !== workMonth;
+        const origMonth = String(editingMonth || workMonth);
+        const crossMonth = isEdit && origMonth !== String(workMonth);
         if (crossMonth && !confirm(`點檢時間已改到 ${monthFolderOf(workMonth)}，這筆紀錄會從 ${monthFolderOf(origMonth)} 搬到 ${monthFolderOf(workMonth)}。\n確定要這樣做嗎？`)) return;
 
         const api = !isEdit ? SqcApi.submitRecord(record)
