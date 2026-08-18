@@ -1331,6 +1331,19 @@
 
       const allSections = DEPTS.flatMap(d => d.sections);
 
+      // 課別是全系統的比對鍵（店鋪名單帶店、人員下拉、報表分組都靠它）。
+      // 兩邊名稱若不一致（例如人員主檔寫「教育訓練課」、店鋪名單寫「訓練課」），
+      // 會出現「選了人卻沒有店可選」這種難以察覺的問題 → 這裡主動比對並提示。
+      const sectionMismatch = useMemo(() => {
+        if (!STORE_ROSTER.length || !allSections.length) return null;
+        const inRoster = {}; STORE_ROSTER.forEach(s => { if (s.section) inRoster[s.section] = true; });
+        const inStaff = {}; allSections.forEach(s => { if (s) inStaff[s] = true; });
+        const onlyRoster = Object.keys(inRoster).filter(s => !inStaff[s]);
+        const onlyStaff = Object.keys(inStaff).filter(s => !inRoster[s]);
+        return (onlyRoster.length || onlyStaff.length) ? { onlyRoster, onlyStaff } : null;
+      }, [STORE_ROSTER, DEPTS]);
+      const [hideMismatch, setHideMismatch] = useState(false);
+
       // ============================================================
       const TABS = [['basic', '📋 基本資料'], ['work', '📝 點檢作業'], ['records', '🔍 查詢紀錄'], ['summary', '📊 彙總專區']]
         .concat(isManager ? [['maintain', '⚙️ 維護專區']] : []);
@@ -1365,6 +1378,17 @@
               <div className="text-xs text-slate-400 flex items-center gap-2 px-1">
                 <span>資料更新時間：{fmtStamp(bootAt)}</span>
                 <button onClick={() => { setLoading(true); reloadBoot(workMonth).catch(e => setBootWarn('連線不穩，目前顯示上次載入的資料（' + (e.message || '載入失敗') + '）')).finally(() => setLoading(false)); }} className="underline hover:text-slate-600">重新載入</button>
+              </div>
+            )}
+            {sectionMismatch && !hideMismatch && (
+              <div className="bg-amber-50 border border-amber-300 text-amber-800 text-sm rounded-lg px-3 py-2 flex justify-between items-start gap-3">
+                <div>
+                  <div className="font-bold">⚠ 課別名稱不一致，請到維護專區修正</div>
+                  {!!sectionMismatch.onlyStaff.length && <div className="text-xs mt-1">「點檢人員」有、但「店鋪名單」沒有：<b>{sectionMismatch.onlyStaff.join('、')}</b> → 選這些課的人員時會沒有店可選</div>}
+                  {!!sectionMismatch.onlyRoster.length && <div className="text-xs mt-1">「店鋪名單」有、但「點檢人員」沒有：<b>{sectionMismatch.onlyRoster.join('、')}</b> → 報表會歸入「(未分類)」</div>}
+                  <div className="text-xs mt-1 text-amber-700">課別名稱兩邊必須完全相同（含全形/空白）才會被視為同一課。</div>
+                </div>
+                <button onClick={() => setHideMismatch(true)} className="text-amber-500 shrink-0">✕</button>
               </div>
             )}
             {bootWarn && <div className="bg-amber-50 border border-amber-200 text-amber-700 text-sm rounded-lg px-3 py-2 flex justify-between items-center gap-3"><span>⚠ {bootWarn}</span><span className="flex items-center gap-2 shrink-0"><button onClick={() => { setLoading(true); reloadBoot(workMonth).catch(e => setBootWarn('連線不穩，目前顯示上次載入的資料（' + (e.message || '載入失敗') + '）')).finally(() => setLoading(false)); }} className="text-amber-700 underline">重新載入</button><button onClick={() => setBootWarn('')} className="text-amber-400">✕</button></span></div>}
