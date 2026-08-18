@@ -69,14 +69,17 @@ const total = kpi[1];
 assertEqual(total[1], 214, '合計應點檢=名單214家');
 assertEqual(total[2], 134, '合計已點檢=134家');
 assertEqual(total[3], 80, '合計未點檢=80家');
-assertEqual(total[4], '62.62%', '完成率=134/214');
+// 百分比輸出比例數值(0~1)由Excel套百分比格式；不可是字串，否則無法計算
+assertEqual(typeof total[4], 'number', '完成率應為數值(非字串)');
+assertEqual(total[4].toFixed(4), (134 / 214).toFixed(4), '完成率=134/214');
 const sec1 = kpi.find(r => r[0] === '北一課');
 assertEqual(sec1[1], 144, '北一課應點檢=100+44');
 assertEqual(sec1[2], 70, '北一課已點檢=3+67');
 assertEqual(sec1[6], 0, '北一課不合格家數=0(皆90分)');
 const sec2 = kpi.find(r => r[0] === '台中課');
 assertEqual(sec2[6], 54, '台中課不合格家數=54(80分那批)');
-assertEqual(sec2[7], '93.10%', '台中課不合格佔比=54/58');
+assertEqual(sec2[7].toFixed(4), (54 / 58).toFixed(4), '台中課不合格佔比=54/58');
+assertEqual(typeof sec2[8], 'number', '平均分數應為數值(由Excel套兩位小數格式)');
 assertEqual(sec2[11].split('、').length, 54, '不及格店名單應列在最後一欄(台中課54家)');
 
 // ===== 3. 梯次表 =====

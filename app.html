@@ -380,14 +380,15 @@
         const okCnt = scores.filter(v => v >= pass).length;
         const ngCnt = scores.length - okCnt;
         const fails = recs.filter(r => Number(r.合計) < pass).map(r => r.店名);
-        const f2 = (v) => v.toFixed(2);
+        // 百分比輸出「比例數值」(0~1)、分數輸出數值，交由 Excel 套用百分比/小數格式，
+        // 這樣欄位可繼續被計算，也不會出現文字型數字
         return [plan, scores.length, plan - scores.length,
-          plan ? f2(scores.length / plan * 100) + '%' : '-',
+          plan ? scores.length / plan : '',
           okCnt, ngCnt,
-          scores.length ? f2(ngCnt / scores.length * 100) + '%' : '-',
-          scores.length ? f2(scores.reduce((a, b) => a + b, 0) / scores.length) : '-',
-          scores.length ? f2(Math.max.apply(null, scores)) : '-',
-          scores.length ? f2(Math.min.apply(null, scores)) : '-',
+          scores.length ? ngCnt / scores.length : '',
+          scores.length ? scores.reduce((a, b) => a + b, 0) / scores.length : '',
+          scores.length ? Math.max.apply(null, scores) : '',
+          scores.length ? Math.min.apply(null, scores) : '',
           withFails ? fails.join('、') : ''];
       };
 
@@ -918,7 +919,7 @@
       };
 
       // 產出課長版/客戶版月報表（管理者限定；後端已彙整明細+KPI+照片連結，這裡負責排版成跟人工版本對應的分頁）
-      // 課長版：盤點中心&隨盤點、不及格店、查核店鋪名單、SQC Google點檢表單、SQC週彙總表
+      // 課長版：不及格店、查核店鋪名單、SQC Google點檢表單、SQC週彙總表
       // 客戶版：查核店鋪名單、SQC Google點檢表單、SQC週彙總表（不含內部管理用的部課對照與不及格店名單）
       // 註：顏色/格線樣式(查核店鋪名單) SheetJS免費版無法寫入，改用ExcelJS產出整份報表
       const [buildingManager, setBuildingManager] = useState(false);
@@ -931,10 +932,6 @@
         (merges || []).forEach(m => ws.mergeCells(m.s.r + 1, m.s.c + 1, m.e.r + 1, m.e.c + 1));
         return ws;
       };
-
-      // 盤點中心&隨盤點：部/課對照表（來自點檢人員主檔）
-      const buildDeptSectionSheet = (report) =>
-        [['部', '課']].concat(report.deptSectionList.map(d => [d.部, d.課]));
 
       // 不及格店：本次查詢範圍內未達及格分數的店
       const buildFailStoreSheet = (report) => {
@@ -980,23 +977,86 @@
           ws.addRow([...pad(rosterRows[i - 1], LEFT_W), '', ...pad(daily[i], DAILY_W), '', ...pad(right[i], rightW)]);
         }
 
-        // 樣式：右段與中段標頭黃底粗體、資料區全框線（比照人工版）
+        // ===== 樣式 =====
         const thin = { style: 'thin', color: { argb: 'FF000000' } };
         const border = { top: thin, left: thin, bottom: thin, right: thin };
+        const C = { 深綠: 'FF1F6B3B', 黃: 'FFFFF200', 淺綠: 'FFE2EFDA', 淺粉: 'FFF8CBCB' };
+        const fillOf = (argb) => ({ type: 'pattern', pattern: 'solid', fgColor: { argb } });
         const dailyStart = LEFT_W + 2, dailyEnd = dailyStart + DAILY_W - 1;
         const kpiStart = dailyEnd + (DAILY_W ? 2 : 1), kpiEnd = kpiStart + rightW - 1;
-        const paint = (r, c, headerish) => {
-          const cell = ws.getRow(r).getCell(c);
-          if (cell.value === '' || cell.value == null) return;
-          cell.border = border;
-          if (headerish) { cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFF200' } }; cell.font = { bold: true }; }
-          // 只有標頭列自動折行；資料列不折行，列高才能統一（比照人工版，過長的不及格店名單以溢出顯示）
-          cell.alignment = { vertical: 'middle', horizontal: headerish ? 'center' : undefined, wrapText: !!headerish };
+        const batchHeadRow = kpiRowCount + 3; // 梯次表第一層表頭所在列
+
+        // 部別名稱（用來判斷小計列上色）：以點檢人員主檔為主，紀錄補齊
+        const deptNames = {};
+        (report.deptSectionList || []).forEach(d => { if (d.部) deptNames[d.部] = true; });
+        report.rows.forEach(r => { if (r.主責部) deptNames[r.主責部] = true; });
+
+        // 整塊套框線（不論有無資料都要有格線）
+        const frame = (r1, r2, c1, c2) => {
+          for (let r = r1; r <= r2; r++) for (let c = c1; c <= c2; c++) ws.getRow(r).getCell(c).border = border;
         };
-        const batchHeadRow = kpiRowCount + 3; // 梯次表的第一層表頭在整張表的第幾列
-        for (let r = 1; r <= n; r++) {
-          for (let c = dailyStart; c <= dailyEnd; c++) paint(r, c, r === 1 || ws.getRow(r).getCell(dailyStart).value === '日期');
-          for (let c = kpiStart; c <= kpiEnd; c++) paint(r, c, r === 1 || r === batchHeadRow || r === batchHeadRow + 1);
+        frame(1, 1 + rosterRows.length, 1, LEFT_W);                       // 左：名單明細
+        if (DAILY_W) frame(1, daily.length, dailyStart, dailyEnd);        // 中：每日店數表
+        frame(1, kpiRowCount, kpiStart, kpiEnd);                         // 右上：KPI
+        if (batch.length) frame(batchHeadRow, batchHeadRow + batch.length - 1, kpiStart, kpiEnd);
+
+        // 左側標題列：深綠底白字
+        for (let c = 1; c <= LEFT_W; c++) {
+          const cell = ws.getRow(1).getCell(c);
+          cell.fill = fillOf(C.深綠);
+          cell.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+          cell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
+        }
+
+        // 標頭列（黃底粗體置中）：中段星期列/各週日期列、右上KPI表頭、梯次表兩層表頭
+        const headerRows = { 1: true, [batchHeadRow]: true, [batchHeadRow + 1]: true };
+        const markHeader = (r, c) => {
+          const cell = ws.getRow(r).getCell(c);
+          cell.fill = fillOf(C.黃); cell.font = { bold: true };
+          cell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
+        };
+        for (let c = dailyStart; c <= dailyEnd; c++) {
+          for (let r = 1; r <= daily.length; r++) {
+            if (r === 1 || ws.getRow(r).getCell(dailyStart).value === '日期') markHeader(r, c);
+          }
+        }
+        for (let c = kpiStart; c <= kpiEnd; c++) {
+          Object.keys(headerRows).forEach(rs => { const r = Number(rs); if (r <= kpiRowCount || r >= batchHeadRow) markHeader(r, c); });
+        }
+
+        // 合計列淺綠、部別小計列淺粉（KPI表、梯次表、每日店數表同規則）
+        const tintRow = (r, c1, c2, argb) => {
+          for (let c = c1; c <= c2; c++) ws.getRow(r).getCell(c).fill = fillOf(argb);
+        };
+        const labelAt = (arr, i) => (arr[i] && arr[i][0] != null ? String(arr[i][0]) : '');
+        for (let i = 1; i < right.length; i++) {
+          const label = labelAt(right, i), r = i + 1;
+          if (r === batchHeadRow || r === batchHeadRow + 1) continue;
+          if (label === '合計') tintRow(r, kpiStart, kpiEnd, C.淺綠);
+          else if (deptNames[label]) tintRow(r, kpiStart, kpiEnd, C.淺粉);
+        }
+        if (DAILY_W) {
+          for (let i = 1; i < daily.length; i++) {
+            const label = labelAt(daily, i), r = i + 1;
+            if (label === '合計') tintRow(r, dailyStart, dailyEnd, C.淺綠);
+            else if (deptNames[label]) tintRow(r, dailyStart, dailyEnd, C.淺粉);
+          }
+        }
+
+        // 數字格式：整數千分位、百分比、分數兩位小數
+        const setFmt = (r, c, fmt) => { const cell = ws.getRow(r).getCell(c); if (typeof cell.value === 'number') cell.numFmt = fmt; };
+        for (let r = 2; r <= kpiRowCount; r++) {
+          [1, 2, 3, 5, 6].forEach(o => setFmt(r, kpiStart + o, '#,##0'));   // 應點檢/已點檢/未點檢/≧/<
+          [4, 7].forEach(o => setFmt(r, kpiStart + o, '0.00%'));            // 完成率/不合格佔比
+          [8, 9, 10].forEach(o => setFmt(r, kpiStart + o, '0.00'));         // 平均/最高/最低分
+        }
+        if (batch.length) {
+          for (let r = batchHeadRow + 2; r <= batchHeadRow + batch.length - 1; r++) {
+            for (let c = kpiStart + 1; c <= kpiEnd; c++) setFmt(r, c, '#,##0');
+          }
+        }
+        if (DAILY_W) {
+          for (let r = 2; r <= daily.length; r++) for (let c = dailyStart; c <= dailyEnd; c++) setFmt(r, c, '#,##0');
         }
 
         // 梯次表的「第一梯/第二梯」跨兩欄置中（其下為 預計/實際 兩欄）
@@ -1007,14 +1067,11 @@
             try { ws.mergeCells(batchHeadRow, c1, batchHeadRow, c2); } catch (e) { /* 已合併則略過 */ }
             const cell = ws.getRow(batchHeadRow).getCell(c1);
             cell.alignment = { vertical: 'middle', horizontal: 'center' };
-            cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFF200' } };
-            cell.font = { bold: true };
-            cell.border = border;
+            cell.fill = fillOf(C.黃); cell.font = { bold: true }; cell.border = border;
           }
         }
 
-        // 第二列以下列高統一
-        for (let r = 2; r <= n; r++) ws.getRow(r).height = 16.5;
+        for (let r = 2; r <= n; r++) ws.getRow(r).height = 18; // 第二列以下列高統一
         return ws;
       };
 
@@ -1111,10 +1168,7 @@
           // 報表改用同一份預設定義，否則觀察區的欄位與照片連結會整片空白
           if (!report.obsList || !report.obsList.length) report.obsList = defaultObsList();
           const wb = new ExcelJS.Workbook();
-          if (!customerFacing) {
-            addPlainSheet(wb, '盤點中心&隨盤點', buildDeptSectionSheet(report));
-            addPlainSheet(wb, '不及格店', buildFailStoreSheet(report));
-          }
+          if (!customerFacing) addPlainSheet(wb, '不及格店', buildFailStoreSheet(report));
           buildRosterCheckSheet(wb, report, customerFacing);
           addPlainSheet(wb, 'SQC Google點檢表單', buildRawFormSheet(report));
           const weekly = buildWeeklyScoreSheet(report, customerFacing);
