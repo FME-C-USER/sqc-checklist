@@ -302,6 +302,29 @@
         return line;
       }));
     }
+    // ===== 報表共用樣式 =====
+    const REPORT_FONT = '微軟正黑體';
+    const REPORT_COLORS = {
+      深綠: 'FF1F6B3B', 黃: 'FFFFFFCC', 淺綠: 'FFE2EFDA', 淺粉: 'FFF8CBCB',
+      紅: 'FFFF0000', 白: 'FFFFFFFF', 粉: 'FFFFC7CE', 紅字: 'FF9C0006',
+    };
+    const thinBorder = () => { const t = { style: 'thin', color: { argb: 'FF000000' } }; return { top: t, left: t, bottom: t, right: t }; };
+    /** 整張表套用字體與置中；leftCols 內的欄位靠左（例如地址不置中）*/
+    const applyFontAndCenter = (ws, leftCols) => {
+      const noCenter = leftCols || {};
+      ws.eachRow({ includeEmpty: true }, (row) => {
+        row.eachCell({ includeEmpty: true }, (cell, c) => {
+          const prev = cell.font || {};
+          cell.font = Object.assign({}, prev, { name: REPORT_FONT });
+          const prevAlign = cell.alignment || {};
+          cell.alignment = Object.assign({}, prevAlign, {
+            vertical: 'middle',
+            horizontal: noCenter[c] ? 'left' : (prevAlign.horizontal || 'center'),
+          });
+        });
+      });
+    };
+
     // ===== 每日店數表（星期/日期/合計/各部，逐週一列一列往下排）=====
     const WEEK_CN = ['日', '一', '二', '三', '四', '五', '六'];
     const ymdAdd = (ymd, n) => { const d = new Date(ymd + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); };
@@ -925,6 +948,45 @@
       const [buildingManager, setBuildingManager] = useState(false);
       const [buildingCustomer, setBuildingCustomer] = useState(false);
 
+      // SQC週彙總表樣式：完整格線、微軟正黑體、資料置中、
+      //   合計不及格→紅底白字、各項得分0分→粉紅底紅字、B~G欄有資料→淺綠底
+      const styleWeeklySheet = (ws, weekly) => {
+        const C = REPORT_COLORS, border = thinBorder();
+        const m = weekly.meta, rowsTotal = weekly.aoa.length;
+        const fillOf = (argb) => ({ type: 'pattern', pattern: 'solid', fgColor: { argb } });
+
+        for (let r = 1; r <= rowsTotal; r++) {
+          for (let c = 1; c <= m.totalCols; c++) ws.getRow(r).getCell(c).border = border; // 完整格線
+        }
+        // 表頭四列淺黃底粗體
+        for (let r = 1; r <= m.headRows; r++) {
+          for (let c = 1; c <= m.totalCols; c++) {
+            const cell = ws.getRow(r).getCell(c);
+            cell.fill = fillOf(C.黃); cell.font = { bold: true };
+          }
+        }
+        for (let r = m.headRows + 1; r <= rowsTotal; r++) {
+          // B~G欄（營業部/營業課別/店號/店名/營業擔當/年份-日期-時間）有資料就淺綠底
+          for (let c = 2; c <= 7; c++) {
+            const cell = ws.getRow(r).getCell(c);
+            if (cell.value !== '' && cell.value != null) cell.fill = fillOf(C.淺綠);
+          }
+          // 各項得分 0 分 → 粉紅底紅字
+          for (let c = m.itemStart + 1; c <= m.itemEnd + 1; c++) {
+            const cell = ws.getRow(r).getCell(c);
+            if (cell.value === 0) { cell.fill = fillOf(C.粉); cell.font = { bold: true, color: { argb: C.紅字 } }; }
+          }
+          // 合計未達及格分數 → 紅底白字
+          const tot = ws.getRow(r).getCell(m.totalCol + 1);
+          if (typeof tot.value === 'number' && tot.value < m.passScore) {
+            tot.fill = fillOf(C.紅); tot.font = { bold: true, color: { argb: C.白 } };
+          }
+          ws.getRow(r).height = 18;
+        }
+        applyFontAndCenter(ws);
+        return ws;
+      };
+
       // 依 aoa(二維陣列)+merges 建立一般(無樣式)分頁
       const addPlainSheet = (wb, name, aoa, merges) => {
         const ws = wb.addWorksheet(name);
@@ -962,7 +1024,7 @@
 
         // 中段：每日店數表；右段：KPI（上）＋梯次表（下），中間空一列分隔
         const daily = buildDailyCountBlock(report, filter.from, filter.to);
-        const batch = buildBatchBlock(report, '期間\n' + periodLabel);
+        const batch = buildBatchBlock(report, periodLabel); // 第二列首欄放期間區間文字（第一列已有「期間」標題）
         const right = buildKpiBlock(report, periodLabel);
         const kpiRowCount = right.length;
         if (batch.length) { right.push([], []); batch.forEach(r => right.push(r)); }
@@ -978,9 +1040,9 @@
         }
 
         // ===== 樣式 =====
-        const thin = { style: 'thin', color: { argb: 'FF000000' } };
-        const border = { top: thin, left: thin, bottom: thin, right: thin };
-        const C = { 深綠: 'FF1F6B3B', 黃: 'FFFFF200', 淺綠: 'FFE2EFDA', 淺粉: 'FFF8CBCB' };
+        const border = thinBorder();
+        const C = REPORT_COLORS;
+        const batchW = batch.length ? batch[0].length : 0; // 梯次表比KPI表窄，樣式不可畫到KPI表的寬度
         const fillOf = (argb) => ({ type: 'pattern', pattern: 'solid', fgColor: { argb } });
         const dailyStart = LEFT_W + 2, dailyEnd = dailyStart + DAILY_W - 1;
         const kpiStart = dailyEnd + (DAILY_W ? 2 : 1), kpiEnd = kpiStart + rightW - 1;
@@ -998,7 +1060,7 @@
         frame(1, 1 + rosterRows.length, 1, LEFT_W);                       // 左：名單明細
         if (DAILY_W) frame(1, daily.length, dailyStart, dailyEnd);        // 中：每日店數表
         frame(1, kpiRowCount, kpiStart, kpiEnd);                         // 右上：KPI
-        if (batch.length) frame(batchHeadRow, batchHeadRow + batch.length - 1, kpiStart, kpiEnd);
+        if (batch.length) frame(batchHeadRow, batchHeadRow + batch.length - 1, kpiStart, kpiStart + batchW - 1);
 
         // 左側標題列：深綠底白字
         for (let c = 1; c <= LEFT_W; c++) {
@@ -1020,8 +1082,9 @@
             if (r === 1 || ws.getRow(r).getCell(dailyStart).value === '日期') markHeader(r, c);
           }
         }
-        for (let c = kpiStart; c <= kpiEnd; c++) {
-          Object.keys(headerRows).forEach(rs => { const r = Number(rs); if (r <= kpiRowCount || r >= batchHeadRow) markHeader(r, c); });
+        for (let c = kpiStart; c <= kpiEnd; c++) markHeader(1, c);                      // KPI表頭
+        for (let c = kpiStart; c < kpiStart + batchW; c++) {                            // 梯次表兩層表頭（僅其自身寬度）
+          markHeader(batchHeadRow, c); markHeader(batchHeadRow + 1, c);
         }
 
         // 合計列淺綠、部別小計列淺粉（KPI表、梯次表、每日店數表同規則）
@@ -1032,8 +1095,9 @@
         for (let i = 1; i < right.length; i++) {
           const label = labelAt(right, i), r = i + 1;
           if (r === batchHeadRow || r === batchHeadRow + 1) continue;
-          if (label === '合計') tintRow(r, kpiStart, kpiEnd, C.淺綠);
-          else if (deptNames[label]) tintRow(r, kpiStart, kpiEnd, C.淺粉);
+          const cEnd = r > batchHeadRow ? kpiStart + batchW - 1 : kpiEnd; // 梯次表區段只塗自身寬度
+          if (label === '合計') tintRow(r, kpiStart, cEnd, C.淺綠);
+          else if (deptNames[label]) tintRow(r, kpiStart, cEnd, C.淺粉);
         }
         if (DAILY_W) {
           for (let i = 1; i < daily.length; i++) {
@@ -1052,7 +1116,7 @@
         }
         if (batch.length) {
           for (let r = batchHeadRow + 2; r <= batchHeadRow + batch.length - 1; r++) {
-            for (let c = kpiStart + 1; c <= kpiEnd; c++) setFmt(r, c, '#,##0');
+            for (let c = kpiStart + 1; c < kpiStart + batchW; c++) setFmt(r, c, '#,##0');
           }
         }
         if (DAILY_W) {
@@ -1072,6 +1136,7 @@
         }
 
         for (let r = 2; r <= n; r++) ws.getRow(r).height = 18; // 第二列以下列高統一
+        applyFontAndCenter(ws, { [head.indexOf('地址') + 1]: true }); // 地址靠左，其餘置中
         return ws;
       };
 
@@ -1129,7 +1194,8 @@
 
         const dataRows = report.rows.map((r, i) => {
           const line = blankRow();
-          line[0] = i + 1; line[1] = r.營業部; line[2] = r.營業課別; line[3] = padStoreCode(r.店號); line[4] = r.店名; line[5] = r.營業擔當; line[6] = r.點檢時間;
+          // 「年份-日期-時間」格式與 SQC Google點檢表單 一致（2026-0805-1350）
+          line[0] = i + 1; line[1] = r.營業部; line[2] = r.營業課別; line[3] = padStoreCode(r.店號); line[4] = r.店名; line[5] = r.營業擔當; line[6] = timeCompact(r.點檢時間);
           items.forEach((it, j) => { line[itemStart + j] = r.itemScores[it.id]; });
           const toilet = (r.觀察 || {}).toilet || {}, toiletReasons = (r.觀察 || {}).toiletReasons || {};
           const hasToilet = toilet['O1'] && toilet['O1'] !== '無';
@@ -1149,7 +1215,11 @@
           return line;
         });
 
-        return { aoa: [row0, row1, row2, row3, ...dataRows], merges };
+        // meta：供樣式套用（欄位位置為0-based，套用時需+1）
+        return {
+          aoa: [row0, row1, row2, row3, ...dataRows], merges,
+          meta: { headRows: 4, itemStart, itemEnd, totalCol, totalCols, passScore: PASS_SCORE },
+        };
       };
 
       // 報表/請款一律依「查詢的起訖日期」取資料，讓畫面看到的＝報表內容＝請款金額
@@ -1172,7 +1242,7 @@
           buildRosterCheckSheet(wb, report, customerFacing);
           addPlainSheet(wb, 'SQC Google點檢表單', buildRawFormSheet(report));
           const weekly = buildWeeklyScoreSheet(report, customerFacing);
-          addPlainSheet(wb, 'SQC週彙總表', weekly.aoa, weekly.merges);
+          styleWeeklySheet(addPlainSheet(wb, 'SQC週彙總表', weekly.aoa, weekly.merges), weekly);
 
           const fromMMDD = (filter.from || '').replace(/-/g, '').slice(4);
           const toMMDD = (filter.to || '').replace(/-/g, '').slice(4);
