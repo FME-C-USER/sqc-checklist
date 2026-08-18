@@ -460,6 +460,8 @@
       // 編輯既有紀錄時，查該欄位是否已有原照片（免重傳）；key 需與 submit() 的 addPhotos/hasExisting 一致
       const existingCountAt = (parts) => (existingPhotos[parts.join('/')] || []).length;
 
+      // 工號比對一律轉字串：Sheet 會把工號存成數字，下拉選單的值是字串，嚴格比對會找不到人
+      const findStaff = (id) => STAFFS.find(s => String(s.id) === String(id));
       const sectionStores = STORE_ROSTER.filter(s => !basic.section || s.section === basic.section);
       const store = STORE_ROSTER.find(s => s.code === basic.storeCode);
       const effStore = store || basic.customInfo; // 名單選的 或 自行新增(比對主檔後)的店
@@ -632,7 +634,9 @@
             }
           }
         }
-        const staff = STAFFS.find(s => s.id === basic.staffId);
+        const staff = findStaff(basic.staffId);
+        // 找不到就擋下：寧可要求重選，也不要默默把紀錄掛到登入者名下（會造成點檢人員誤植）
+        if (!staff) { alert('找不到所選點檢人員的資料，請重新選擇「點檢人員」'); setTab('basic'); return; }
         const storeName = effStore ? effStore.name : '';
         const storeCode = effStore ? effStore.code : '';
         const recId = editingRecordId || ((window.crypto && crypto.randomUUID) ? crypto.randomUUID() : 'r' + Date.now());
@@ -683,7 +687,7 @@
 
         const record = {
           id: recId, month: workMonth, time: basic.time.replace('T', ' '),
-          dept: basic.dept, section: basic.section, empId: basic.staffId, staffName: staff ? staff.name : user,
+          dept: basic.dept, section: basic.section, empId: basic.staffId, staffName: staff.name,
           storeCode, storeName, storeType: canPhoto ? '可拍照' : '不可拍照',
           total, grade: grade.txt, staffCount: sign.count, identity: sign.identity,
           note: [noPhotoReasonText, sign.remark.trim() ? '｜備註：' + sign.remark.trim() : ''].join(''),
@@ -1075,7 +1079,7 @@
                     <select value={basic.section} onChange={e => setBasic({ ...basic, section: e.target.value, storeCode: '', staffId: '' })} className="w-full px-3 py-2 border border-slate-300 rounded-lg">
                       <option value="">— 請選擇 —</option>{(DEPTS.find(d => d.dept === basic.dept)?.sections || allSections).map(s => <option key={s}>{s}</option>)}</select></div>
                   <div><label className="block text-xs text-slate-500 mb-1">點檢人員<span className="text-slate-400">（依課別帶出）</span></label>
-                    <select value={basic.staffId} onChange={e => { const st = STAFFS.find(x => x.id === e.target.value); setBasic({ ...basic, staffId: e.target.value, dept: st?.dept || basic.dept, section: st?.section || basic.section }); }} className="w-full px-3 py-2 border border-slate-300 rounded-lg">
+                    <select value={basic.staffId} onChange={e => { const st = findStaff(e.target.value); setBasic({ ...basic, staffId: e.target.value, dept: st?.dept || basic.dept, section: st?.section || basic.section }); }} className="w-full px-3 py-2 border border-slate-300 rounded-lg">
                       <option value="">— 請選擇 —</option>{STAFFS.filter(s => !basic.section || s.section === basic.section).map(s => <option key={s.id} value={s.id}>{s.name}</option>)}</select></div>
                 </div>
 
@@ -1154,7 +1158,7 @@
               <>
                 {editingRecordId && <div className="bg-blue-50 border border-blue-200 text-blue-700 text-sm rounded-lg px-3 py-2">✏️ 編輯既有紀錄中——原照片沿用，新增照片為選填；送出將覆蓋這筆</div>}
                 <div className="bg-white rounded-xl shadow-sm px-4 py-3 text-sm text-slate-600 flex flex-wrap gap-x-4 gap-y-1">
-                  <span>🏪 {effStore.name}</span><span>👤 {STAFFS.find(s => s.id === basic.staffId)?.name || '—'}</span><span>📅 {basic.time.slice(0, 10)}</span>
+                  <span>🏪 {effStore.name}</span><span>👤 {findStaff(basic.staffId)?.name || '—'}</span><span>📅 {basic.time.slice(0, 10)}</span>
                   <span className={"px-2 rounded " + (canPhoto ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700")}>{canPhoto ? '可拍照' : '不可拍照'}</span>
                 </div>
 

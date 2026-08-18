@@ -65,14 +65,26 @@ function doPost(e) {
     var result = routes[action]();
 
     // 記錄維護/資料異動軌跡
-    var LOGGED = { importMaster: 'Excel匯入', upsertItem: '題目新增/修改', deleteItem: '刪除題目', upsertRow: '新增/修改', deleteRow: '刪除', deleteRecord: '刪除點檢紀錄', updateRecord: '修改點檢紀錄' };
-    if (LOGGED[action]) {
+    // 異動紀錄的「操作人」一律記登入帳號者（who 取自登入 token），
+    // 與紀錄裡的「點檢人員」（填寫時挑選的人）是不同概念，兩者都會留痕以便追查
+    var LOGGED = { importMaster: 'Excel匯入', upsertItem: '題目新增/修改', deleteItem: '刪除題目', upsertRow: '新增/修改', deleteRow: '刪除', submitRecord: '送出點檢紀錄', deleteRecord: '刪除點檢紀錄', updateRecord: '修改點檢紀錄' };
+    if (LOGGED[action] && !(result && result.ok === false)) { // 被擋下的動作(如同店重複)不記錄
       var who = sess ? (sess.name || sess.ad) : '';
       var target = '', note = '';
       if (action === 'importMaster') { target = p.kind + (p.month ? '_' + p.month : ''); note = (p.fileName || '') + '（' + ((result && result.count) || 0) + ' 筆）'; }
       else if (action === 'upsertRow' || action === 'upsertItem') { target = (p.kind || 'checklist') + (p.month ? '_' + p.month : ''); note = ((p.row && (p.row['編號'] || p.row['店號'] || p.row['工號'])) || (p.item && p.item['編號']) || ''); }
       else if (action === 'deleteRow' || action === 'deleteItem') { target = (p.kind || 'checklist') + (p.month ? '_' + p.month : ''); note = '刪除 ' + (p.id || ''); }
-      else if (action === 'deleteRecord' || action === 'updateRecord') { target = '點檢紀錄_' + p.month; note = p.id || ''; }
+      else if (action === 'submitRecord') {
+        var sr = p.record || {};
+        target = '點檢紀錄_' + (sr.month || '');
+        note = (sr.storeCode || '') + ' ' + (sr.storeName || '') + '（點檢人員：' + (sr.staffName || '') + '）';
+      }
+      else if (action === 'updateRecord') {
+        var ur = p.record || {};
+        target = '點檢紀錄_' + p.month;
+        note = (p.id || '') + ' ' + (ur.storeName || '') + '（點檢人員：' + (ur.staffName || '') + '）';
+      }
+      else if (action === 'deleteRecord') { target = '點檢紀錄_' + p.month; note = p.id || ''; }
       logChange(who, LOGGED[action], target, note);
     }
     return json({ ok: true, result: result });
