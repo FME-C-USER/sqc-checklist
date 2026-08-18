@@ -973,7 +973,13 @@
           const wb = new ExcelJS.Workbook();
           const moneyFmt = (ws) => { ws.eachRow(row => row.eachCell(c => { if (typeof c.value === 'number' && c.value >= 1000) c.numFmt = '#,##0'; })); };
           const add = (name, aoa) => { const ws = addPlainSheet(wb, name, aoa); moneyFmt(ws); return ws; };
-          add('請款明細(客戶)', out.客戶);
+          const wsCust = add('請款明細(客戶)', out.客戶);
+          // 明細表的「店號」欄鎖成文字格式，避免 Excel 又把 022320 轉成數字 22,320
+          const noRow = out.客戶.findIndex(r => r[0] === 'NO');
+          if (noRow >= 0) {
+            const codeCol = out.客戶[noRow].indexOf('店號') + 1;
+            for (let r = noRow + 2; r <= out.客戶.length; r++) wsCust.getRow(r).getCell(codeCol).numFmt = '@';
+          }
           add('請款明細(內部)', out.內部);
           Object.keys(out.各課).forEach(n => add(n, out.各課[n]));
 

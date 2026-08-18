@@ -121,5 +121,20 @@ assertEqual(hol.未稅, 245 + 220 + 2 * 470 + 345, '假日情境：未稅=245+22
 const offG = billing.computeGroup([{ 遠程店: '否', 假日店: '否' }], null, { includeDocFee: false, includeOffshore: true, offshore: 1200 });
 assertEqual(offG.未稅, 245 + 1200, '外島交通費應計入未稅');
 
+// ===== 7. 店號需補回6碼前導0且以文字輸出（Sheet 常把 022320 存成數字 22320）=====
+console.log('');
+const codeOut = billing.buildBillingSheets({
+  rows: [
+    { 店號: 22320, 店名: 'A店', 主責部: '一部', 主責課: '北一課', 遠程店: '否', 假日店: '否' },
+    { 店號: '024019', 店名: 'B店', 主責部: '一部', 主責課: '北一課', 遠程店: '否', 假日店: '否' },
+    { 店號: '0173', 店名: 'C店', 主責部: '一部', 主責課: '北一課', 遠程店: '否', 假日店: '否' },
+  ],
+}, null, {}, { from: '2026-08-01', to: '2026-08-31' });
+const nrow = codeOut.客戶.findIndex(r => r[0] === 'NO');
+const ccol = codeOut.客戶[nrow].indexOf('店號');
+const codes = codeOut.客戶.slice(nrow + 1).filter(r => r[ccol]).map(r => r[ccol]);
+assertEqual(codes, ['022320', '024019', '000173'], '店號應補成6碼');
+assertEqual(codes.map(c => typeof c), ['string', 'string', 'string'], '店號應為字串(文字格式)，不可為數字');
+
 console.log(failed === 0 ? '\n✅ 全部通過（與人工版 6 月請款數字一致）' : `\n❌ ${failed} 項失敗`);
 process.exit(failed === 0 ? 0 : 1);
