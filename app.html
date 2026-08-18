@@ -579,7 +579,7 @@
         setTab('work');
       };
 
-      const submit = () => {
+      const doSubmit = () => {
         const isEdit = !!editingRecordId;
         // 題庫是計分依據：尚在載入或載入失敗(題庫為空)時送出，會把明細與分數寫成 0 分覆蓋掉原紀錄，必須先擋下
         if (loading) { alert('題庫仍在載入中，請稍候幾秒再送出'); return; }
@@ -720,6 +720,15 @@
           if (!isEdit) setInspectedCodes(prev => ({ ...prev, [normCode(storeCode)]: true }));
           resetWork(); setTab('records'); loadRecords();
         }).catch(e => alert((isEdit ? '更新' : '送出') + '失敗：' + e.message));
+      };
+
+      // 包一層例外攔截：任何未預期的錯誤都要顯示出來，不可讓按鈕「按了沒反應」而查不出原因
+      const submit = () => {
+        try { doSubmit(); }
+        catch (e) {
+          console.error('[SQC] 送出時發生未預期錯誤', e);
+          alert('送出時發生錯誤，請截圖此訊息：\n' + (e && (e.stack || e.message) || e));
+        }
       };
 
       // ---- 查詢/彙總篩選 ----
