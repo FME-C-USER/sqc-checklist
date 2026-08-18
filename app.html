@@ -994,6 +994,7 @@
         for (let c = m.subNoteStart + 1; c <= m.totalCols; c++) W[c] = 24;         // 缺失子項(機台/垃圾桶區域)
         Object.keys(W).forEach(c => { ws.getColumn(Number(c)).width = W[c]; });
 
+        ws.properties.defaultRowHeight = 18; // 連未明確設定的列也是18
         for (let r = 1; r <= rowsTotal; r++) ws.getRow(r).height = 18; // 全表列高統一18
         applyFontAndCenter(ws);
         return ws;
@@ -1155,6 +1156,7 @@
         for (let c = kpiStart + 1; c <= kpiEnd - 1; c++) ws.getColumn(c).width = 11;
         ws.getColumn(kpiEnd).width = 42; // 不及格店名單較長
 
+        ws.properties.defaultRowHeight = 18;
         for (let r = 1; r <= n; r++) ws.getRow(r).height = 18; // 列高統一
         applyFontAndCenter(ws, { [head.indexOf('地址') + 1]: true, [kpiEnd]: true }); // 地址與不及格店名單靠左
         return ws;
@@ -1191,7 +1193,7 @@
         row0[staffCol] = '點檢人員'; row0[countCol] = '店員在店人數'; row0[typeCol] = '店型態';
         subItems.forEach((it, i) => { row0[subNoteStart + i] = subNoteLabel(it); }); // 缺失子項標題也放首列，之後整欄縱向合併
 
-        const row1 = blankRow();
+        const row1 = blankRow(); row1[0] = '大分類';
         const merges = [{ s: { r: 0, c: obsStart }, e: { r: 0, c: obsEnd } }, { s: { r: 0, c: catStart }, e: { r: 0, c: catEnd } }];
         for (let r = 0; r <= 3; r++) merges.push({ s: { r: r, c: 0 }, e: { r: r, c: FIXED - 1 } }); // 序/大分類/項目/配分 橫跨固定欄
         // 後段欄位(合計/主責部課/點檢人員/在店人數/店型態/缺失子項)標題縱向合併整個表頭，比照人工版
@@ -1206,7 +1208,7 @@
           }
         });
 
-        const row2 = blankRow();
+        const row2 = blankRow(); row2[0] = '項目';
         items.forEach((it, i) => { row2[itemStart + i] = bareNameOf(it.name); });
         row2[obsStart] = '對外廁所(缺失觀察題)';
         oItems.forEach((o, i) => { row2[obsStart + 1 + i] = o.name; });
@@ -1214,7 +1216,7 @@
 
         // 配分獨立一列（比照人工版），欄位名稱另成一列，兩者不再擠在同一列
         const row3 = blankRow();
-        row3[0] = '配　　　　分';
+        row3[0] = '配分';
         items.forEach((it, i) => { row3[itemStart + i] = it.max; });
         catOrder.forEach(cat => { row3[catStart + catOrder.indexOf(cat)] = catMax[cat]; });
 
