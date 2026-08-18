@@ -484,6 +484,7 @@
       const [perfectPhotos, setPerfectPhotos] = useState({});
       const [paperForm, setPaperForm] = useState([]);        // 紙本點檢表（所有店必上傳）
       const [sign, setSign] = useState({ count: '', identity: '', remark: '' }); // 在店店員人數 / 簽名人員身分別 / 備註(特殊情況)
+      const [submitting, setSubmitting] = useState(false);           // 送出/更新紀錄中（顯示進度條、鎖按鈕）
       const [editingRecordId, setEditingRecordId] = useState(null); // 非 null＝編輯既有紀錄
       const [editingMonth, setEditingMonth] = useState(null);       // 該筆紀錄「原本所在」的月份活頁（點檢時間改跨月時仍要找得到原列）
       const [existingPhotos, setExistingPhotos] = useState({});      // 編輯時保留原有照片JSON
@@ -704,6 +705,7 @@
         const crossMonth = isEdit && origMonth !== String(workMonth);
         if (crossMonth && !confirm(`點檢時間已改到 ${monthFolderOf(workMonth)}，這筆紀錄會從 ${monthFolderOf(origMonth)} 搬到 ${monthFolderOf(workMonth)}。\n確定要這樣做嗎？`)) return;
 
+        setSubmitting(true); // 送出到後端期間顯示進度條並鎖住按鈕，避免重複送出
         const api = !isEdit ? SqcApi.submitRecord(record)
           : !crossMonth ? SqcApi.updateRecord(origMonth, recId, record)
             : SqcApi.submitRecord(record).then(res => {
@@ -720,13 +722,16 @@
           alert(`✅ ${isEdit ? '已更新' : '已送出'}\n店鋪：${storeName}　得分：${total}/${TOTAL_MAX}（${grade.txt}）` + (queue.length ? `\n新增照片 ${queue.length} 張背景上傳中` : ''));
           if (!isEdit) setInspectedCodes(prev => ({ ...prev, [normCode(storeCode)]: true }));
           resetWork(); setTab('records'); loadRecords();
-        }).catch(e => alert((isEdit ? '更新' : '送出') + '失敗：' + e.message));
+        }).catch(e => alert((isEdit ? '更新' : '送出') + '失敗：' + e.message))
+          .finally(() => setSubmitting(false));
       };
 
       // 包一層例外攔截：任何未預期的錯誤都要顯示出來，不可讓按鈕「按了沒反應」而查不出原因
       const submit = () => {
+        if (submitting) return; // 正在送出就忽略重複點擊
         try { doSubmit(); }
         catch (e) {
+          setSubmitting(false);
           console.error('[SQC] 送出時發生未預期錯誤', e);
           alert('送出時發生錯誤，請截圖此訊息：\n' + (e && (e.stack || e.message) || e));
         }
@@ -1394,12 +1399,19 @@
           {/* 底部總分（僅點檢作業） */}
           {tab === 'work' && readyToWork && (
             <div className="fixed bottom-0 left-0 right-0 bg-white border-t shadow-2xl z-30">
+              {/* 送出/更新中的進度條（後端寫入需數秒，避免使用者以為沒反應而重複點擊） */}
+              {submitting && (
+                <div className="h-1 w-full bg-slate-200 overflow-hidden">
+                  <div className="h-full w-1/3 bg-emerald-500" style={{ animation: 'sqc-progress 1s ease-in-out infinite' }} />
+                  <style>{`@keyframes sqc-progress { 0%{margin-left:0%} 50%{margin-left:67%} 100%{margin-left:0%} }`}</style>
+                </div>
+              )}
               <div className="max-w-4xl mx-auto px-4 py-3 flex items-center justify-between">
-                <div><div className="text-xs text-slate-400">合計得分（及格 {PASS_SCORE}）</div>
+                <div><div className="text-xs text-slate-400">{submitting ? <span className="text-emerald-600 font-semibold">{editingRecordId ? '更新中，請稍候…' : '送出中，請稍候…'}</span> : `合計得分（及格 ${PASS_SCORE}）`}</div>
                   <div className="flex items-baseline gap-2"><span className="text-3xl font-extrabold text-slate-800">{total}</span><span className="text-slate-400">/ {TOTAL_MAX}</span><span className={"ml-2 font-bold " + grade.c}>{grade.txt}</span>{noDeductDefect && canPhoto && <span className="ml-1 text-xs bg-amber-100 text-amber-700 px-2 py-0.5 rounded">需拍滿分照片</span>}</div></div>
                 <div className="flex gap-2">
-                  {editingRecordId && <button onClick={() => { if (confirm('確定要放棄這次編輯的變更嗎？')) { resetWork(); setTab('records'); } }} className="px-5 py-3 bg-slate-200 hover:bg-slate-300 text-slate-700 font-bold rounded-xl">返回</button>}
-                  <button onClick={submit} className="px-8 py-3 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl shadow-lg">{editingRecordId ? '完成編輯' : '送出評核'}</button>
+                  {editingRecordId && <button onClick={() => { if (confirm('確定要放棄這次編輯的變更嗎？')) { resetWork(); setTab('records'); } }} disabled={submitting} className="px-5 py-3 bg-slate-200 hover:bg-slate-300 disabled:opacity-50 text-slate-700 font-bold rounded-xl">返回</button>}
+                  <button onClick={submit} disabled={submitting} className="px-8 py-3 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-60 disabled:cursor-not-allowed text-white font-bold rounded-xl shadow-lg">{submitting ? '處理中…' : (editingRecordId ? '完成編輯' : '送出評核')}</button>
                 </div>
               </div>
             </div>
