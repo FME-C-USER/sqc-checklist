@@ -350,12 +350,20 @@
       return ka[1] - kb[1];
     };
 
+    // 課別→部別對照：以「點檢人員主檔」的部課對照為主（涵蓋當月沒有點檢紀錄的課別），
+    // 再用實際紀錄補齊；否則零點檢的課別會被歸成「(未分類)」而排到表格最後
+    function sectionDeptMap(report) {
+      const map = {};
+      (report.deptSectionList || []).forEach(d => { if (d.課) map[d.課] = d.部; });
+      (report.rows || []).forEach(r => { if (r.主責課 && !map[r.主責課]) map[r.主責課] = r.主責部 || '(未分類)'; });
+      return map;
+    }
+
     // ===== 課別KPI表：合計 → 各部的各課 → 該部小計（比照人工版含小計列）=====
     function buildKpiBlock(report, periodLabel) {
       const pass = Number(report.passScore) || 85;
       const roster = report.roster || [], rows = report.rows || [];
-      const deptOfSection = {};
-      rows.forEach(r => { if (r.主責課) deptOfSection[r.主責課] = r.主責部 || '(未分類)'; });
+      const deptOfSection = sectionDeptMap(report);
       const sections = [];
       roster.forEach(s => { if (s.課別 && sections.indexOf(s.課別) < 0) sections.push(s.課別); });
       rows.forEach(r => { if (r.主責課 && sections.indexOf(r.主責課) < 0) sections.push(r.主責課); });
@@ -364,7 +372,8 @@
       const planBySec = {}; roster.forEach(s => { planBySec[s.課別] = (planBySec[s.課別] || 0) + 1; });
       const doneBySec = {}; rows.forEach(r => { (doneBySec[r.主責課] = doneBySec[r.主責課] || []).push(r); });
 
-      const stat = (secList) => {
+      // withFails：只有「課別」列要列出不及格店；合計列與部小計列留空，避免同一家店重複出現
+      const stat = (secList, withFails) => {
         const plan = secList.reduce((a, s) => a + (planBySec[s] || 0), 0);
         const recs = secList.reduce((a, s) => a.concat(doneBySec[s] || []), []);
         const scores = recs.map(r => Number(r.合計)).filter(v => !isNaN(v));
@@ -379,18 +388,18 @@
           scores.length ? f2(scores.reduce((a, b) => a + b, 0) / scores.length) : '-',
           scores.length ? f2(Math.max.apply(null, scores)) : '-',
           scores.length ? f2(Math.min.apply(null, scores)) : '-',
-          fails.join('、')];
+          withFails ? fails.join('、') : ''];
       };
 
       // 第一欄標頭＝期間，其下即為列名（合計/各課/各部），與資料列欄數必須一致
       const head = ['期間\n' + periodLabel, '應點檢\n(店數)', '已點檢\n(店數)', '未點檢\n(店數)', '完成率',
         `≧${pass}分\n(店數)`, `<${pass}分\n(店數)`, `<${pass}分\n(佔比)`, '平均分數', '最高分', '最低分', '不及格店'];
-      const aoa = [head, ['合計', ...stat(sections)]];
+      const aoa = [head, ['合計', ...stat(sections, false)]];
       const byDept = {};
       sections.forEach(s => { const d = deptOfSection[s] || '(未分類)'; (byDept[d] = byDept[d] || []).push(s); });
       sortDepts(Object.keys(byDept)).forEach(d => {
-        byDept[d].forEach(s => aoa.push([s, ...stat([s])]));
-        aoa.push([d, ...stat(byDept[d])]);
+        byDept[d].forEach(s => aoa.push([s, ...stat([s], true)])); // 不及格店只列在課別列
+        aoa.push([d, ...stat(byDept[d], false)]);
       });
       return aoa;
     }
@@ -403,9 +412,7 @@
       roster.forEach(s => { const b = batchOf(s.預排梯次); if (b && batches.indexOf(b) < 0) batches.push(b); });
       batches.sort();
       if (!batches.length) return [];
-      // 課別→部別對照（供小計列）
-      const deptOfSection = {};
-      rows.forEach(r => { if (r.主責課) deptOfSection[r.主責課] = r.主責部 || ''; });
+      const deptOfSection = sectionDeptMap(report); // 含零點檢課別，順序才會與KPI表一致
       const sections = [];
       roster.forEach(s => { if (s.課別 && sections.indexOf(s.課別) < 0) sections.push(s.課別); });
       sections.sort(cmpSection);
@@ -983,12 +990,31 @@
           if (cell.value === '' || cell.value == null) return;
           cell.border = border;
           if (headerish) { cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFF200' } }; cell.font = { bold: true }; }
-          cell.alignment = { vertical: 'middle', wrapText: true };
+          // 只有標頭列自動折行；資料列不折行，列高才能統一（比照人工版，過長的不及格店名單以溢出顯示）
+          cell.alignment = { vertical: 'middle', horizontal: headerish ? 'center' : undefined, wrapText: !!headerish };
         };
+        const batchHeadRow = kpiRowCount + 3; // 梯次表的第一層表頭在整張表的第幾列
         for (let r = 1; r <= n; r++) {
           for (let c = dailyStart; c <= dailyEnd; c++) paint(r, c, r === 1 || ws.getRow(r).getCell(dailyStart).value === '日期');
-          for (let c = kpiStart; c <= kpiEnd; c++) paint(r, c, r === 1 || (r > kpiRowCount + 2 && r <= kpiRowCount + 4));
+          for (let c = kpiStart; c <= kpiEnd; c++) paint(r, c, r === 1 || r === batchHeadRow || r === batchHeadRow + 1);
         }
+
+        // 梯次表的「第一梯/第二梯」跨兩欄置中（其下為 預計/實際 兩欄）
+        if (batch.length) {
+          const batchCount = Math.floor((batch[0].length - 1) / 2);
+          for (let j = 0; j < batchCount; j++) {
+            const c1 = kpiStart + 1 + j * 2, c2 = c1 + 1;
+            try { ws.mergeCells(batchHeadRow, c1, batchHeadRow, c2); } catch (e) { /* 已合併則略過 */ }
+            const cell = ws.getRow(batchHeadRow).getCell(c1);
+            cell.alignment = { vertical: 'middle', horizontal: 'center' };
+            cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFF200' } };
+            cell.font = { bold: true };
+            cell.border = border;
+          }
+        }
+
+        // 第二列以下列高統一
+        for (let r = 2; r <= n; r++) ws.getRow(r).height = 16.5;
         return ws;
       };
 
