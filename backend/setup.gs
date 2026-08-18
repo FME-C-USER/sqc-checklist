@@ -57,11 +57,39 @@ function setupMonth(month) {
 function seedSettings() {
   var sh = ss().getSheetByName('設定');
   if (sh.getLastRow() > 1) return;
-  sh.getRange(2, 1, 3, 2).setValues([
+  var rows = [
     ['照片根資料夾ID', DRIVE_ROOT_ID],
     ['當月版本', CURRENT_MONTH],
     ['及格分數', PASS_SCORE],
-  ]);
+    // 請款單價（年度調價時直接改這裡，不需改程式）
+    ['平日點檢費', 245],
+    ['平日遠程加價', 220],
+    ['假日點檢費', 470],
+    ['假日遠程加價', 345],
+    ['文件處理費', 6500],
+    ['稅率', 0.05],
+  ];
+  sh.getRange(2, 1, rows.length, 2).setValues(rows);
+}
+
+/** 補齊請款單價參數（設定活頁已有資料時用這支；已存在的參數不覆蓋）
+ *  用法：於 Apps Script 編輯器手動執行一次 */
+function addPricingSettings() {
+  var sh = ss().getSheetByName('設定');
+  var data = sh.getDataRange().getValues();
+  var have = {};
+  for (var i = 1; i < data.length; i++) have[String(data[i][0] || '').trim()] = true;
+  var defaults = [
+    ['平日點檢費', 245], ['平日遠程加價', 220],
+    ['假日點檢費', 470], ['假日遠程加價', 345],
+    ['文件處理費', 6500], ['稅率', 0.05],
+  ];
+  var added = defaults.filter(function (d) { return !have[d[0]]; });
+  if (!added.length) { Logger.log('請款單價參數已齊全，未新增'); return '已齊全'; }
+  sh.getRange(sh.getLastRow() + 1, 1, added.length, 2).setValues(added);
+  var msg = '已新增：' + added.map(function (a) { return a[0] + '=' + a[1]; }).join('、');
+  Logger.log(msg);
+  return msg;
 }
 
 // ============================================================

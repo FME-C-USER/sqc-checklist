@@ -14,6 +14,7 @@
   <script src="js/api.js"></script>
   <script src="js/db.js"></script>
   <script src="js/uploader.js"></script>
+  <script src="js/billing.js"></script>
   <style>body { font-family: "Noto Sans TC", system-ui, "Microsoft JhengHei", sans-serif; }</style>
 </head>
 <body class="bg-slate-100">
@@ -938,6 +939,61 @@
       const exportManagerReport = () => exportOneReport(false, setBuildingManager, '課長版');
       const exportCustomerReport = () => exportOneReport(true, setBuildingCustomer, '客戶版');
 
+      // ---- 請款金額（獨立檔案，比照人工版4分頁；計費基準＝已點檢的店）----
+      const [buildingBilling, setBuildingBilling] = useState(false);
+      const [billingAsk, setBillingAsk] = useState(null); // { report, sections:[課別], offshore:{課別:金額} }
+
+      // 第一步：取資料並詢問外島交通費（無資料來源，需人工輸入）
+      const startBilling = async () => {
+        if (!CONFIGURED) { alert('請先設定後端連線'); return; }
+        setBuildingBilling(true);
+        const reportMonth = rocMonth(filter.from);
+        try {
+          const report = await SqcApi.buildMonthlyReport(reportMonth, { section: filter.section });
+          if (!report.rows.length) { alert('查詢範圍內沒有已點檢紀錄，無法產生請款單'); return; }
+          const grouped = SqcBilling.groupStores(report.rows.map(r => ({ 主責部: r.主責部, 主責課: r.主責課 })));
+          const sections = [];
+          grouped.deptOrder.forEach(d => grouped.byDept[d].sectionOrder.forEach(c => sections.push({ dept: d, section: c })));
+          setBillingAsk({ report, reportMonth, sections, offshore: {} });
+        } catch (e) {
+          alert('取得請款資料失敗：' + e.message);
+        } finally {
+          setBuildingBilling(false);
+        }
+      };
+
+      // 第二步：實際產檔
+      const finishBilling = async () => {
+        const ask = billingAsk;
+        setBillingAsk(null);
+        setBuildingBilling(true);
+        try {
+          const { report, reportMonth } = ask;
+          const out = SqcBilling.buildBillingSheets(report, report.pricing, ask.offshore, { from: filter.from, to: filter.to });
+          const wb = new ExcelJS.Workbook();
+          const moneyFmt = (ws) => { ws.eachRow(row => row.eachCell(c => { if (typeof c.value === 'number' && c.value >= 1000) c.numFmt = '#,##0'; })); };
+          const add = (name, aoa) => { const ws = addPlainSheet(wb, name, aoa); moneyFmt(ws); return ws; };
+          add('請款明細(客戶)', out.客戶);
+          add('請款明細(內部)', out.內部);
+          Object.keys(out.各課).forEach(n => add(n, out.各課[n]));
+
+          const fromMMDD = (filter.from || '').replace(/-/g, '').slice(4);
+          const toMMDD = (filter.to || '').replace(/-/g, '').slice(4);
+          const fname = `(${reportMonth})SQC點檢彙總表-${fromMMDD}-${toMMDD}-${out.家數}-請款金額.xlsx`;
+          const buf = await wb.xlsx.writeBuffer();
+          const blob = new Blob([buf], { type: 'application/octet-stream' });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a'); a.href = url; a.download = fname;
+          document.body.appendChild(a); a.click(); document.body.removeChild(a);
+          setTimeout(() => URL.revokeObjectURL(url), 1000);
+          alert(`✅ 已產出請款金額\n計費店數：${out.家數} 家\n未稅 ${out.總表.未稅.toLocaleString()}　稅 ${out.總表.稅金.toLocaleString()}　總計 ${out.總表.總計.toLocaleString()}`);
+        } catch (e) {
+          alert('產出請款金額失敗：' + e.message);
+        } finally {
+          setBuildingBilling(false);
+        }
+      };
+
       const allSections = DEPTS.flatMap(d => d.sections);
 
       // ============================================================
@@ -1227,6 +1283,7 @@
                   <div className="ml-auto flex flex-wrap gap-3">
                     {isManager && <button onClick={exportManagerReport} disabled={buildingManager} className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white rounded-lg">{buildingManager ? '產出中…' : '📘 產出課長版'}</button>}
                     {isManager && <button onClick={exportCustomerReport} disabled={buildingCustomer} className="px-4 py-2 bg-violet-600 hover:bg-violet-700 disabled:opacity-50 text-white rounded-lg">{buildingCustomer ? '產出中…' : '📗 產出客戶版'}</button>}
+                    {isManager && <button onClick={startBilling} disabled={buildingBilling} className="px-4 py-2 bg-orange-600 hover:bg-orange-700 disabled:opacity-50 text-white rounded-lg">{buildingBilling ? '產出中…' : '📙 產出請款金額'}</button>}
                     <button onClick={exportUninspected} className="px-4 py-2 bg-amber-500 hover:bg-amber-600 text-white rounded-lg">🏪 尚未點檢名單</button>
                   </div>
                 </div>
@@ -1256,6 +1313,34 @@
             {/* ========== 維護專區 ========== */}
             {tab === 'maintain' && <MaintainPanel configured={CONFIGURED} curMonth={workMonth} onReload={reloadBoot} />}
           </div>
+
+          {/* 外島交通費輸入（產出請款金額前；系統無此資料來源，需人工輸入，沒有就留空） */}
+          {billingAsk && (
+            <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4" onClick={e => { if (e.target === e.currentTarget) setBillingAsk(null); }}>
+              <div className="bg-white rounded-xl shadow-2xl w-full max-w-md max-h-[85vh] flex flex-col">
+                <div className="px-5 py-3 border-b">
+                  <h3 className="font-bold text-slate-700">🚢 外島交通費（選填）</h3>
+                  <p className="text-xs text-slate-500 mt-1">系統沒有這筆資料來源，請依實際狀況輸入金額；沒有就留空。金額會計入該課的請款小計。</p>
+                </div>
+                <div className="p-5 overflow-y-auto space-y-2 text-sm">
+                  {billingAsk.sections.map(s => (
+                    <div key={s.dept + '/' + s.section} className="flex items-center gap-2">
+                      <label className="w-40 text-slate-600 shrink-0">{s.dept} / {s.section}</label>
+                      <input type="number" min="0" step="1" placeholder="0"
+                        value={billingAsk.offshore[s.section] || ''}
+                        onChange={e => setBillingAsk({ ...billingAsk, offshore: { ...billingAsk.offshore, [s.section]: e.target.value } })}
+                        className="flex-1 px-3 py-2 border border-slate-300 rounded-lg" />
+                      <span className="text-slate-400 text-xs">元</span>
+                    </div>
+                  ))}
+                </div>
+                <div className="px-5 py-3 border-t flex justify-end gap-2">
+                  <button onClick={() => setBillingAsk(null)} className="px-4 py-2 bg-slate-200 hover:bg-slate-300 rounded-lg">取消</button>
+                  <button onClick={finishBilling} className="px-5 py-2 bg-orange-600 hover:bg-orange-700 text-white font-bold rounded-lg">產出請款單</button>
+                </div>
+              </div>
+            </div>
+          )}
 
           {/* 底部總分（僅點檢作業） */}
           {tab === 'work' && readyToWork && (

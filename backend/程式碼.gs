@@ -528,6 +528,7 @@ function buildMonthlyReport(month, filter) {
 
   return {
     passScore: pass,
+    pricing: getPricing(), // 請款單價（放「設定」活頁，調價不必改程式）
     checklist: checklist.map(function (it) { return { id: it.id, name: it.name, cat: it.cat, max: it.max, type: it.type }; }),
     obsList: obsList,
     deptSectionList: deptSectionList,
@@ -714,6 +715,22 @@ function readSheet(name) {
   return out;
 }
 function rowObj(head, arr) { var o = {}; for (var j = 0; j < head.length; j++) o[head[j]] = arr[j]; return o; }
+
+// 請款單價：一次讀「設定」活頁，未設定者用內建預設（與 js/billing.js 的預設一致）
+function getPricing() {
+  var rows = readSheet('設定');
+  var map = {};
+  rows.forEach(function (r) { map[String(r['參數'] || '').trim()] = r['值']; });
+  var pick = function (key, dflt) { var v = Number(map[key]); return isNaN(v) || map[key] === '' || map[key] == null ? dflt : v; };
+  return {
+    平日點檢費: pick('平日點檢費', 245),
+    平日遠程加價: pick('平日遠程加價', 220),
+    假日點檢費: pick('假日點檢費', 470),
+    假日遠程加價: pick('假日遠程加價', 345),
+    文件處理費: pick('文件處理費', 6500),
+    稅率: pick('稅率', 0.05),
+  };
+}
 
 function getSetting(key) {
   var rows = readSheet('設定');
