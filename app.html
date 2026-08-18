@@ -720,6 +720,16 @@
 
       // ---- 查詢/彙總篩選 ----
       const [filter, setFilter] = useState({ from: taipeiToday(), to: taipeiToday(), section: '' });
+      // 整月快捷：offset 0=本月、-1=上月（次月請上月款時用「上月」一鍵帶入，避免手選日期出錯）
+      const setMonthRange = (offset) => {
+        const t = taipeiToday();
+        let y = Number(t.slice(0, 4)), m = Number(t.slice(5, 7)) + offset;
+        while (m > 12) { m -= 12; y++; }
+        while (m < 1) { m += 12; y--; }
+        const lastDay = new Date(Date.UTC(y, m, 0)).getUTCDate();
+        const p = (n) => String(n).padStart(2, '0');
+        setFilter(f => ({ ...f, from: `${y}-${p(m)}-01`, to: `${y}-${p(m)}-${p(lastDay)}` }));
+      };
       const filtered = records.filter(r => (!filter.from || r.date >= filter.from) && (!filter.to || r.date <= filter.to) && (!filter.section || r.section === filter.section));
       // 正式模式：進查詢/彙總頁或改條件時，重新向後端查當月
       // 只在切換進「查詢紀錄/彙總」分頁時自動查一次；改變日期/課別後需按「查詢」才會重新查詢
@@ -901,12 +911,18 @@
         return { aoa: [row0, row1, row2, row3, ...dataRows], merges };
       };
 
+      // 報表/請款一律依「查詢的起訖日期」取資料，讓畫面看到的＝報表內容＝請款金額
+      const reportFilter = () => ({ from: filter.from, to: filter.to, section: filter.section });
+      const spansMonths = () => rocMonth(filter.from) !== rocMonth(filter.to);
+
       const exportOneReport = async (customerFacing, setBuilding, label) => {
         if (!CONFIGURED) { alert('請先設定後端連線'); return; }
+        // 應點檢/完成率是以「當月店鋪名單」為分母，跨月的完成率沒有明確定義，故限制在同一月份內
+        if (spansMonths()) { alert(`${label}的完成率是以「當月店鋪名單」計算，日期範圍請勿跨月。\n可用「上月」或「本月」按鈕一鍵帶入整個月份。`); return; }
         setBuilding(true);
         const reportMonth = rocMonth(filter.from); // 依查詢的起始日期決定報表月份，而非「點檢作業」目前的時間
         try {
-          const report = await SqcApi.buildMonthlyReport(reportMonth, { section: filter.section });
+          const report = await SqcApi.buildMonthlyReport(reportMonth, reportFilter());
           // 該月「觀察題」活頁未匯入時後端回空陣列，但點檢當時是用內建預設題目進行的，
           // 報表改用同一份預設定義，否則觀察區的欄位與照片連結會整片空白
           if (!report.obsList || !report.obsList.length) report.obsList = defaultObsList();
@@ -949,7 +965,12 @@
         setBuildingBilling(true);
         const reportMonth = rocMonth(filter.from);
         try {
-          const report = await SqcApi.buildMonthlyReport(reportMonth, { section: filter.section });
+          // 請款只需要逐店紀錄，故支援跨月（分月活頁各取一次再合併）
+          const months = Array.from(new Set([rocMonth(filter.from), rocMonth(filter.to)]));
+          const parts = await Promise.all(months.map(m => SqcApi.buildMonthlyReport(m, reportFilter())));
+          const report = Object.assign({}, parts[0], {
+            rows: parts.reduce((acc, p) => acc.concat(p.rows || []), []),
+          });
           if (!report.rows.length) { alert('查詢範圍內沒有已點檢紀錄，無法產生請款單'); return; }
           const grouped = SqcBilling.groupStores(report.rows.map(r => ({ 主責部: r.主責部, 主責課: r.主責課 })));
           const sections = [];
@@ -1249,6 +1270,10 @@
                   <div><label className="block text-xs text-slate-500 mb-1">起始日期</label><input type="date" value={filter.from} onChange={e => setFilter({ ...filter, from: e.target.value })} className="px-3 py-2 border border-slate-300 rounded-lg" /></div>
                   <div><label className="block text-xs text-slate-500 mb-1">結束日期</label><input type="date" value={filter.to} onChange={e => setFilter({ ...filter, to: e.target.value })} className="px-3 py-2 border border-slate-300 rounded-lg" /></div>
                   <div><label className="block text-xs text-slate-500 mb-1">課別</label><select value={filter.section} onChange={e => setFilter({ ...filter, section: e.target.value })} className="px-3 py-2 border border-slate-300 rounded-lg"><option value="">全部</option>{allSections.map(s => <option key={s}>{s}</option>)}</select></div>
+                  <div className="flex gap-1">
+                    <button onClick={() => setMonthRange(-1)} className="px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs">上月</button>
+                    <button onClick={() => setMonthRange(0)} className="px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs">本月</button>
+                  </div>
                   <button onClick={loadRecords} disabled={queryLoading} className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white rounded-lg">{queryLoading ? '查詢中…' : '🔍 查詢'}</button>
                 </div>
                 {queryLoading && (
@@ -1285,6 +1310,10 @@
                   <div><label className="block text-xs text-slate-500 mb-1">起始日期</label><input type="date" value={filter.from} onChange={e => setFilter({ ...filter, from: e.target.value })} className="px-3 py-2 border border-slate-300 rounded-lg" /></div>
                   <div><label className="block text-xs text-slate-500 mb-1">結束日期</label><input type="date" value={filter.to} onChange={e => setFilter({ ...filter, to: e.target.value })} className="px-3 py-2 border border-slate-300 rounded-lg" /></div>
                   <div><label className="block text-xs text-slate-500 mb-1">課別</label><select value={filter.section} onChange={e => setFilter({ ...filter, section: e.target.value })} className="px-3 py-2 border border-slate-300 rounded-lg"><option value="">全部</option>{allSections.map(s => <option key={s}>{s}</option>)}</select></div>
+                  <div className="flex gap-1">
+                    <button onClick={() => setMonthRange(-1)} className="px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs">上月</button>
+                    <button onClick={() => setMonthRange(0)} className="px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs">本月</button>
+                  </div>
                   <button onClick={loadRecords} disabled={queryLoading} className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white rounded-lg">{queryLoading ? '查詢中…' : '🔍 查詢'}</button>
                   <div className="ml-auto flex flex-wrap gap-3">
                     {isManager && <button onClick={exportManagerReport} disabled={buildingManager} className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white rounded-lg">{buildingManager ? '產出中…' : '📘 產出課長版'}</button>}
