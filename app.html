@@ -302,7 +302,136 @@
         return line;
       }));
     }
-    window.SqcReport = { buildRawFormSheet }; // 供離線驗證報表排版用
+    // ===== 每日店數表（星期/日期/合計/各部，逐週一列一列往下排）=====
+    const WEEK_CN = ['日', '一', '二', '三', '四', '五', '六'];
+    const ymdAdd = (ymd, n) => { const d = new Date(ymd + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); };
+    const ymdDiff = (a, b) => Math.round((new Date(b + 'T00:00:00Z') - new Date(a + 'T00:00:00Z')) / 86400000);
+    const weekdayCN = (ymd) => WEEK_CN[new Date(ymd + 'T00:00:00Z').getUTCDay()];
+    const slashMD = (ymd) => ymd.slice(5, 7) + '/' + ymd.slice(8, 10);
+    const DEPT_RANK = { '一部': 1, '二部': 2, '業務部': 3 };
+    const sortDepts = (list) => list.slice().sort((a, b) => {
+      const ra = DEPT_RANK[a] || 99, rb = DEPT_RANK[b] || 99;
+      return ra !== rb ? ra - rb : (a < b ? -1 : 1);
+    });
+
+    function buildDailyCountBlock(report, from, to) {
+      if (!from) return [];
+      const end = to || from;
+      // 逐日統計（依主責部），日期取自點檢時間
+      const perDay = {}, deptSet = {};
+      (report.rows || []).forEach(r => {
+        const d = String(r.點檢時間 || '').slice(0, 10);
+        const dept = r.主責部 || '(未分類)';
+        deptSet[dept] = true;
+        if (!perDay[d]) perDay[d] = {};
+        perDay[d][dept] = (perDay[d][dept] || 0) + 1;
+        perDay[d].__all = (perDay[d].__all || 0) + 1;
+      });
+      const depts = sortDepts(Object.keys(deptSet));
+      const days = ymdDiff(from, end) + 1;
+      const weeks = Math.ceil(days / 7);            // 補滿整週（人工版也是排到當週結束）
+      const aoa = [['星期', ...Array.from({ length: 7 }, (_, i) => weekdayCN(ymdAdd(from, i)))]];
+      for (let w = 0; w < weeks; w++) {
+        const cols = Array.from({ length: 7 }, (_, i) => ymdAdd(from, w * 7 + i));
+        aoa.push(['日期', ...cols.map(slashMD)]);
+        aoa.push(['合計', ...cols.map(d => (perDay[d] && perDay[d].__all) || 0)]);
+        depts.forEach(dp => aoa.push([dp, ...cols.map(d => (perDay[d] && perDay[d][dp]) || 0)]));
+      }
+      return aoa;
+    }
+
+    // 課別排序：中文數字要按數值排（直接字串排序會變成 北一→北三→北二）
+    // 註：billing.js 也有一份同邏輯，此處自帶以免相依外部檔案載入順序（載入失敗時排序不可默默跑掉）
+    const CN_NUM = { 一: 1, 二: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9, 十: 10 };
+    const cmpSection = (a, b) => {
+      const key = (n) => { const m = String(n).match(/^(.*?)([一二三四五六七八九十])(課|區|部)?$/); return (m && CN_NUM[m[2]]) ? [m[1], CN_NUM[m[2]]] : [String(n), 0]; };
+      const ka = key(a), kb = key(b);
+      if (ka[0] !== kb[0]) return ka[0] < kb[0] ? -1 : 1;
+      return ka[1] - kb[1];
+    };
+
+    // ===== 課別KPI表：合計 → 各部的各課 → 該部小計（比照人工版含小計列）=====
+    function buildKpiBlock(report, periodLabel) {
+      const pass = Number(report.passScore) || 85;
+      const roster = report.roster || [], rows = report.rows || [];
+      const deptOfSection = {};
+      rows.forEach(r => { if (r.主責課) deptOfSection[r.主責課] = r.主責部 || '(未分類)'; });
+      const sections = [];
+      roster.forEach(s => { if (s.課別 && sections.indexOf(s.課別) < 0) sections.push(s.課別); });
+      rows.forEach(r => { if (r.主責課 && sections.indexOf(r.主責課) < 0) sections.push(r.主責課); });
+      sections.sort(cmpSection);
+
+      const planBySec = {}; roster.forEach(s => { planBySec[s.課別] = (planBySec[s.課別] || 0) + 1; });
+      const doneBySec = {}; rows.forEach(r => { (doneBySec[r.主責課] = doneBySec[r.主責課] || []).push(r); });
+
+      const stat = (secList) => {
+        const plan = secList.reduce((a, s) => a + (planBySec[s] || 0), 0);
+        const recs = secList.reduce((a, s) => a.concat(doneBySec[s] || []), []);
+        const scores = recs.map(r => Number(r.合計)).filter(v => !isNaN(v));
+        const okCnt = scores.filter(v => v >= pass).length;
+        const ngCnt = scores.length - okCnt;
+        const fails = recs.filter(r => Number(r.合計) < pass).map(r => r.店名);
+        const f2 = (v) => v.toFixed(2);
+        return [plan, scores.length, plan - scores.length,
+          plan ? f2(scores.length / plan * 100) + '%' : '-',
+          okCnt, ngCnt,
+          scores.length ? f2(ngCnt / scores.length * 100) + '%' : '-',
+          scores.length ? f2(scores.reduce((a, b) => a + b, 0) / scores.length) : '-',
+          scores.length ? f2(Math.max.apply(null, scores)) : '-',
+          scores.length ? f2(Math.min.apply(null, scores)) : '-',
+          fails.join('、')];
+      };
+
+      // 第一欄標頭＝期間，其下即為列名（合計/各課/各部），與資料列欄數必須一致
+      const head = ['期間\n' + periodLabel, '應點檢\n(店數)', '已點檢\n(店數)', '未點檢\n(店數)', '完成率',
+        `≧${pass}分\n(店數)`, `<${pass}分\n(店數)`, `<${pass}分\n(佔比)`, '平均分數', '最高分', '最低分', '不及格店'];
+      const aoa = [head, ['合計', ...stat(sections)]];
+      const byDept = {};
+      sections.forEach(s => { const d = deptOfSection[s] || '(未分類)'; (byDept[d] = byDept[d] || []).push(s); });
+      sortDepts(Object.keys(byDept)).forEach(d => {
+        byDept[d].forEach(s => aoa.push([s, ...stat([s])]));
+        aoa.push([d, ...stat(byDept[d])]);
+      });
+      return aoa;
+    }
+
+    // ===== 梯次表（各課/部的預計點檢 vs 實際點檢；預計來自店鋪名單的預排梯次）=====
+    function buildBatchBlock(report, periodLabel) {
+      const roster = report.roster || [], rows = report.rows || [];
+      const batchOf = (v) => String(v || '').trim();
+      const batches = [];
+      roster.forEach(s => { const b = batchOf(s.預排梯次); if (b && batches.indexOf(b) < 0) batches.push(b); });
+      batches.sort();
+      if (!batches.length) return [];
+      // 課別→部別對照（供小計列）
+      const deptOfSection = {};
+      rows.forEach(r => { if (r.主責課) deptOfSection[r.主責課] = r.主責部 || ''; });
+      const sections = [];
+      roster.forEach(s => { if (s.課別 && sections.indexOf(s.課別) < 0) sections.push(s.課別); });
+      sections.sort(cmpSection);
+      const plan = {}, actual = {};
+      const bump = (obj, key, b) => { if (!obj[key]) obj[key] = {}; obj[key][b] = (obj[key][b] || 0) + 1; };
+      roster.forEach(s => { const b = batchOf(s.預排梯次); if (b) bump(plan, s.課別 || '(未分類)', b); });
+      rows.forEach(r => { const b = batchOf(r.預排梯次); if (b) bump(actual, r.主責課 || '(未分類)', b); });
+
+      const head1 = ['期間'], head2 = [periodLabel];
+      batches.forEach(b => { head1.push(b, ''); head2.push('預計點檢店數', '實際點檢店數'); });
+      const lineOf = (label, p, a) => [label, ...batches.reduce((acc, b) => acc.concat([(p && p[b]) || 0, (a && a[b]) || 0]), [])];
+      const sumOf = (keys, src) => keys.reduce((acc, k) => { batches.forEach(b => { acc[b] = (acc[b] || 0) + ((src[k] && src[k][b]) || 0); }); return acc; }, {});
+
+      const aoa = [head1, head2];
+      aoa.push(lineOf('合計', sumOf(sections, plan), sumOf(sections, actual)));
+      // 依部別分組列出各課，每個部後面接該部小計
+      const byDept = {};
+      sections.forEach(s => { const d = deptOfSection[s] || '(未分類)'; (byDept[d] = byDept[d] || []).push(s); });
+      sortDepts(Object.keys(byDept)).forEach(d => {
+        byDept[d].forEach(s => aoa.push(lineOf(s, plan[s], actual[s])));
+        aoa.push(lineOf(d, sumOf(byDept[d], plan), sumOf(byDept[d], actual)));
+      });
+      return aoa;
+    }
+
+    window.SqcReport = { buildRawFormSheet, buildDailyCountBlock, buildBatchBlock, buildKpiBlock }; // 供離線驗證報表排版用
 
     // ============================================================
     // 點檢項目列
@@ -809,9 +938,8 @@
         ]));
       };
 
-      // 查核店鋪名單：左半＝名單逐店的實際點檢狀態；右半＝課別KPI彙總(黃底標頭+全框線)
-      // 註：人工版右側原本是逐週手動插入的日曆式進度表，會依每月點檢梯次數量而異，屬於人工排版產物、
-      // 無法穩定重現；這裡改用等價、乾淨的一張「課別×期間KPI」表取代，資訊涵蓋範圍相同
+      // 查核店鋪名單（比照人工版三段式版面）：
+      //   左＝名單逐店的實際點檢狀態｜中＝每日店數表（逐週）｜右＝上：課別KPI彙總、下：梯次表
       const buildRosterCheckSheet = (wb, report, customerFacing) => {
         const ws = wb.addWorksheet('查核店鋪名單');
         const byCode = {}; report.rows.forEach(r => { byCode[normCode(r.店號)] = r; });
@@ -826,29 +954,40 @@
             ? [...common, s.預排梯次 || '', ...tail]
             : [...common, rec ? rec.主責課 : '', rec ? rec.點檢人員 : '', rec ? s.預排梯次 : '', rec ? rec.主責課 : '', s.預排梯次 || '', ...tail];
         });
-        const kpiHead = ['課別', '期間', '應點檢(店數)', '已點檢(店數)', '未點檢(店數)', '完成率',
-          `≧${report.passScore}分(店數)`, `<${report.passScore}分(店數)`, `<${report.passScore}分(佔比)`, '平均分數', '最高分', '最低分', '不及格店'];
-        const period = `${filter.from || ''}~${filter.to || ''}`;
-        const kpiRows = report.kpi.map(k => [k.課別, period, k.應點檢, k.已點檢, k.未點檢, k.完成率, k.合格家數, k.不合格家數,
-          (k.已點檢 ? Math.round(k.不合格家數 / k.已點檢 * 100) : 0) + '%', k.平均分, k.最高分, k.最低分, k.不及格店]);
-        const blankLeft = new Array(head.length).fill('');
-        const blankRight = new Array(kpiHead.length).fill('');
-        const maxRows = Math.max(rosterRows.length, kpiRows.length);
+        const periodLabel = `${slashMD(filter.from || '')}-${slashMD(filter.to || '')}`;
 
-        ws.addRow([...head, '', ...kpiHead]);
-        for (let i = 0; i < maxRows; i++) ws.addRow([...(rosterRows[i] || blankLeft), '', ...(kpiRows[i] || blankRight)]);
+        // 中段：每日店數表；右段：KPI（上）＋梯次表（下），中間空一列分隔
+        const daily = buildDailyCountBlock(report, filter.from, filter.to);
+        const batch = buildBatchBlock(report, '期間\n' + periodLabel);
+        const right = buildKpiBlock(report, periodLabel);
+        const kpiRowCount = right.length;
+        if (batch.length) { right.push([], []); batch.forEach(r => right.push(r)); }
 
+        const LEFT_W = head.length, DAILY_W = daily.length ? 8 : 0;
+        const rightW = right.reduce((m, r) => Math.max(m, r.length), 0);
+        const pad = (arr, w) => { const o = []; for (let i = 0; i < w; i++) o.push(arr && arr[i] != null ? arr[i] : ''); return o; };
+        const n = Math.max(rosterRows.length + 1, daily.length, right.length);
+
+        ws.addRow([...head, '', ...pad(daily[0], DAILY_W), '', ...pad(right[0], rightW)]);
+        for (let i = 1; i < n; i++) {
+          ws.addRow([...pad(rosterRows[i - 1], LEFT_W), '', ...pad(daily[i], DAILY_W), '', ...pad(right[i], rightW)]);
+        }
+
+        // 樣式：右段與中段標頭黃底粗體、資料區全框線（比照人工版）
         const thin = { style: 'thin', color: { argb: 'FF000000' } };
         const border = { top: thin, left: thin, bottom: thin, right: thin };
-        const kpiStartCol = head.length + 2, kpiEndCol = kpiStartCol + kpiHead.length - 1;
-        for (let c = kpiStartCol; c <= kpiEndCol; c++) {
-          const cell = ws.getRow(1).getCell(c);
-          cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFF200' } };
-          cell.font = { bold: true };
+        const dailyStart = LEFT_W + 2, dailyEnd = dailyStart + DAILY_W - 1;
+        const kpiStart = dailyEnd + (DAILY_W ? 2 : 1), kpiEnd = kpiStart + rightW - 1;
+        const paint = (r, c, headerish) => {
+          const cell = ws.getRow(r).getCell(c);
+          if (cell.value === '' || cell.value == null) return;
           cell.border = border;
-        }
-        for (let r = 2; r <= 1 + maxRows; r++) {
-          for (let c = kpiStartCol; c <= kpiEndCol; c++) ws.getRow(r).getCell(c).border = border;
+          if (headerish) { cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFF200' } }; cell.font = { bold: true }; }
+          cell.alignment = { vertical: 'middle', wrapText: true };
+        };
+        for (let r = 1; r <= n; r++) {
+          for (let c = dailyStart; c <= dailyEnd; c++) paint(r, c, r === 1 || ws.getRow(r).getCell(dailyStart).value === '日期');
+          for (let c = kpiStart; c <= kpiEnd; c++) paint(r, c, r === 1 || (r > kpiRowCount + 2 && r <= kpiRowCount + 4));
         }
         return ws;
       };

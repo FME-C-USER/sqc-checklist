@@ -258,6 +258,7 @@
 
   var api = {
     DEFAULT_PRICING: DEFAULT_PRICING,
+    compareSection: compareSection, // 課別排序（中文數字按數值）供報表共用
     storeTypeOf: storeTypeOf,
     computeGroup: computeGroup,
     groupStores: groupStores,
