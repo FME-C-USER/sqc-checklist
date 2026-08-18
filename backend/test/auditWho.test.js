@@ -51,28 +51,45 @@ assertEqual(rec.staffName, '張三', '點檢紀錄的點檢人員＝填寫時選
 assertEqual(String(rec.empId), '10509005', '員編應為所選人員的工號');
 assertEqual(rec.section, '台中課', '課別應為所選人員的課別');
 
-// 2) 異動紀錄裡的操作人＝登入帳號者
-const log = ctx.getChangeLog(50).rows;
-const submitLog = log.find(r => r.action === '送出點檢紀錄');
-assertEqual(!!submitLog, true, '異動紀錄應留下「送出點檢紀錄」');
-assertEqual(submitLog.user, '林秀真', '異動紀錄的操作人＝登入帳號者（林秀真）');
-assertEqual(submitLog.target, '點檢紀錄_11508', '異動紀錄的對象應為該月活頁');
-assertEqual(submitLog.note.indexOf('張三') >= 0, true, '異動紀錄的說明應同時看得到點檢人員是誰');
-assertEqual(submitLog.note.indexOf('大雅矽品店') >= 0, true, '異動紀錄的說明應含店名');
+// 2) 異動紀錄只記「刪除/修改」：新增送出不應留下紀錄
+assertEqual(ctx.getChangeLog(50).rows.length, 0, '送出(新增)不應寫入異動紀錄');
 
-// 3) 修改紀錄同樣要留痕
+// 3) 修改紀錄要留痕，且操作人＝登入帳號者
 post('updateRecord', { month: '11508', id: 'R1', record: { id: 'R1', month: '11508', time: '2026-08-18 12:00', dept: '二部', section: '台中課', empId: '10509005', staffName: '張三', storeCode: '021616', storeName: '大雅矽品店', storeType: '不可拍照', total: 90, grade: '合格', staffCount: '1', identity: '店長', note: '', detail: {}, observation: {}, photos: {}, paperPhotos: [] } });
 const updLog = ctx.getChangeLog(50).rows.find(r => r.action === '修改點檢紀錄');
 assertEqual(!!updLog, true, '異動紀錄應留下「修改點檢紀錄」');
-assertEqual(updLog.user, '林秀真', '修改紀錄的操作人亦為登入帳號者');
+assertEqual(updLog.user, '林秀真', '修改紀錄的操作人＝登入帳號者');
+assertEqual(updLog.target, '點檢紀錄_11508', '異動紀錄的對象應為該月活頁');
+assertEqual(updLog.note.indexOf('張三') >= 0, true, '說明應看得到點檢人員是誰（與操作人區分）');
+assertEqual(updLog.note.indexOf('大雅矽品店') >= 0, true, '說明應含店名');
 
-// 4) 被擋下的動作(同店重複)不應寫入異動紀錄
+// 4) 刪除紀錄要留痕
+post('deleteRecord', { month: '11508', id: 'R1' });
+const delLog = ctx.getChangeLog(50).rows.find(r => r.action === '刪除點檢紀錄');
+assertEqual(!!delLog, true, '異動紀錄應留下「刪除點檢紀錄」');
+assertEqual(delLog.user, '林秀真', '刪除紀錄的操作人＝登入帳號者');
+
+// 5) 維護專區：新增不記錄、修改才記錄
+ctx.ensureKindSheet('roster', '11508');
+post('upsertRow', { kind: 'roster', month: '11508', row: { 店號: '000009', 店名: '新店', 課別: '北三課', 店鋪型態: '一般店', 遠程店: '否', 假日店: '否', 預排梯次: '' } });
+assertEqual(ctx.getChangeLog(50).rows.filter(r => r.action === '修改').length, 0, '維護專區「新增」不應寫入異動紀錄');
+post('upsertRow', { kind: 'roster', month: '11508', row: { 店號: '000009', 店名: '新店改名', 課別: '北三課', 店鋪型態: '一般店', 遠程店: '否', 假日店: '否', 預排梯次: '' } });
+assertEqual(ctx.getChangeLog(50).rows.filter(r => r.action === '修改').length, 1, '維護專區「修改」應寫入異動紀錄');
+
+// 6) 匯入不再記錄（依需求只留刪除/修改）
+post('importMaster', { kind: 'roster', month: '11508', fileName: 'x.xlsx', rows: [{ 店號: '000010', 店名: 'A', 課別: '北三課', 店鋪型態: '一般店', 遠程店: '否', 假日店: '否', 預排梯次: '' }] });
+assertEqual(ctx.getChangeLog(50).rows.filter(r => String(r.action).indexOf('匯入') >= 0).length, 0, 'Excel匯入不應寫入異動紀錄');
+
+// 7) 被擋下的動作(同店重複)不應寫入異動紀錄
+const before = ctx.getChangeLog(50).rows.length;
+post('submitRecord', {
+  record: { id: 'R3', month: '11508', time: '2026-08-19 10:00', dept: '二部', section: '台中課', empId: '10509005', staffName: '張三', storeCode: '000010', storeName: 'A', storeType: '可拍照', total: 88, grade: '合格', staffCount: '1', identity: '店長', note: '', detail: {}, observation: {}, photos: {}, paperPhotos: [] },
+});
 const dup = post('submitRecord', {
-  record: { id: 'R2', month: '11508', time: '2026-08-19 10:00', dept: '二部', section: '台中課', empId: '10509005', staffName: '張三', storeCode: '021616', storeName: '大雅矽品店', storeType: '不可拍照', total: 88, grade: '合格', staffCount: '1', identity: '店長', note: '', detail: {}, observation: {}, photos: {}, paperPhotos: [] },
+  record: { id: 'R4', month: '11508', time: '2026-08-20 10:00', dept: '二部', section: '台中課', empId: '10509005', staffName: '張三', storeCode: '000010', storeName: 'A', storeType: '可拍照', total: 88, grade: '合格', staffCount: '1', identity: '店長', note: '', detail: {}, observation: {}, photos: {}, paperPhotos: [] },
 });
 assertEqual(dup.result.code, 'DUPLICATE', '同店重複應被擋下');
-const submitCount = ctx.getChangeLog(50).rows.filter(r => r.action === '送出點檢紀錄').length;
-assertEqual(submitCount, 1, '被擋下的送出不應留下異動紀錄（仍只有1筆）');
+assertEqual(ctx.getChangeLog(50).rows.length, before, '送出與被擋下的送出都不應新增異動紀錄');
 
 console.log(failed === 0 ? '\n✅ 全部通過' : `\n❌ ${failed} 項失敗`);
 process.exit(failed === 0 ? 0 : 1);
