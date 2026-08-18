@@ -214,6 +214,95 @@
     }
 
     // ============================================================
+    // 報表排版工具（純函式，不依賴畫面狀態；置於元件外方便單獨驗證）
+    // ============================================================
+    const itemNumberOf = (name) => (String(name).split('.')[0] || '');
+    const bareNameOf = (name) => { const s = String(name); const i = s.indexOf('.'); return i >= 0 ? s.slice(i + 1) : s; };
+    const timeCompact = (t) => { // "2026-07-15 10:00" → "2026-0715-1000"（比照人工版原始表單時間格式）
+      const s = String(t || ''); if (s.length < 16) return s;
+      return `${s.slice(0, 4)}-${s.slice(5, 7)}${s.slice(8, 10)}-${s.slice(11, 13)}${s.slice(14, 16)}`;
+    };
+    const mmdd = (t) => { const s = String(t || ''); return s.length >= 10 ? `${s.slice(5, 7)}/${s.slice(8, 10)}` : ''; };
+    const joinLinks = (arr) => (arr || []).join(', ');
+    // 依「照片資料夾名稱」比對取連結，不依賴觀察題活頁的題目名稱與上傳當時完全一致
+    const groupLinks = (groups, pred) => Object.keys(groups || {}).filter(pred).reduce((acc, k) => acc.concat(groups[k] || []), []);
+    const toiletDefectLinks = (r) => groupLinks(r.photoGroups, k => k.indexOf('廁所觀察/') === 0);
+    // 重點觀察題照片：先用題名精準比對，再退回用「重點觀察題N」前綴（題名被改過時仍找得到）
+    const keyObsLinks = (r, obsItem, idx) => {
+      const groups = r.photoGroups || {};
+      if (groups[obsItem.name] && groups[obsItem.name].length) return groups[obsItem.name];
+      const n = (String(obsItem.name).match(/重點觀察題\s*(\d+)/) || [])[1] || String(idx + 1);
+      return groupLinks(groups, k => k.indexOf('重點觀察題' + n) === 0);
+    };
+    // 店號補回前導0並確保以文字寫入(避免Excel開啟時把"017246"顯示成17246)
+    const padStoreCode = (c) => { const s = String(c == null ? '' : c).trim(); return /^\d+$/.test(s) && s.length < 6 ? ('000000' + s).slice(-6) : s; };
+
+    // 觀察區欄名：標準那幾題沿用人工版的原始字樣（保持與人工版對齊），
+    // 新增的題目則依活頁題名自動產生欄位 → 觀察題數量不再有上限
+    const KO_LEGACY_HEAD = {
+      KO1: '重點觀察題1. 【 店外全景照】照片上傳',
+      KO2: '重點觀察題2. 【 櫃台全景照】 照片上傳',
+      KO3: '重點觀察題3.【  FF區全景照】照片上傳',
+    };
+    const O_LEGACY_HEAD = {
+      O1: '【對外廁所觀察記錄 】店舖有無對外廁所',
+      O2: '【對外廁所觀察記錄 】店舖有無開放對外廁所',
+      O3: '【對外廁所觀察記錄 】店外招牌有無廁所標示',
+      O4: '【對外廁所觀察記錄 】店內有無廁所標示',
+      O5: '【對外廁所觀察記錄 】是否有提供以下備品(衛生紙、洗手乳、芳香劑)',
+    };
+    const koHeadOf = (k) => KO_LEGACY_HEAD[k.id] || (k.name + '照片上傳');
+    const oHeadOf = (o) => O_LEGACY_HEAD[o.id] || ('【對外廁所觀察記錄 】' + o.name);
+
+    // SQC Google點檢表單：逐店逐題原始資料，含每題缺失照片雲端連結（比照原本Google表單回覆試算表格式）
+    function buildRawFormSheet(report) {
+      const items = report.checklist;
+      const obsList = report.obsList || [];
+      const koItems = obsList.filter(o => o.type === '拍照');
+      const oItems = obsList.filter(o => o.type === '有無');
+      const oFirst = oItems.slice(0, 1), oRest = oItems.slice(1); // 人工版把O1排在觀察題/缺失照片之前，其餘排在之後
+      const zonesA = PERFECT_ZONES.slice(0, 4), zonesB = PERFECT_ZONES.slice(4);
+
+      const head = ['營業部', '營業課別', '營業擔當', '時間戳記', '分數', '店號', '店名', '日期-時間', '點檢人員', '在店店員人數', '簽名店鋪人員身分別'];
+      items.forEach(it => {
+        head.push(it.name);
+        if (it.type === 'subdeduct') head.push(`${it.name}-缺失子項`);
+        head.push(`${it.name}-缺失照片上傳`);
+      });
+      head.push(
+        ...oFirst.map(oHeadOf),
+        '對外廁所(觀察題) ', '缺失照片上傳',
+        ...oRest.map(oHeadOf),
+        ...koItems.map(koHeadOf),
+        '100分照片上傳-1', '100分照片上傳-2', '備註(例：廠區店無法拍照)', 'SQC點檢表完成照片', '修正原因', '店型態');
+
+      return [head].concat(report.rows.map(r => {
+        const line = [r.營業部, r.營業課別, r.營業擔當, r.建立時間, `${r.合計} / 100`, padStoreCode(r.店號), r.店名, timeCompact(r.點檢時間), r.點檢人員, r.在店人數, r.身分別];
+        items.forEach(it => {
+          line.push(r.itemScores[it.id]);
+          if (it.type === 'subdeduct') line.push(r.itemExtra[it.id] || '');
+          line.push(joinLinks((r.photoGroups || {})[`${it.name}/缺失`]));
+        });
+        const toilet = (r.觀察 || {}).toilet || {}, toiletReasons = (r.觀察 || {}).toiletReasons || {};
+        const hasToilet = toilet['O1'] && toilet['O1'] !== '無';
+        // 缺失項目直接取紀錄裡勾選的內容，不經由題目名稱比對（活頁未匯入時仍正確）
+        const ngReasons = Object.keys(toiletReasons).reduce((acc, k) => acc.concat(toiletReasons[k] || []), []);
+        const oVal = (o) => ((o.showIf === 'always' || hasToilet) ? (toilet[o.id] || '') : '');
+        line.push(
+          ...oFirst.map(o => toilet[o.id] || ''),
+          hasToilet ? (ngReasons.length ? ngReasons.join('、') : '無以上缺失') : '',
+          joinLinks(toiletDefectLinks(r)),
+          ...oRest.map(oVal),
+          ...koItems.map((k, i) => joinLinks(keyObsLinks(r, k, i))),
+          joinLinks(zonesA.reduce((acc, z) => acc.concat((r.photoGroups || {})[`滿分照片/${z}`] || []), [])),
+          joinLinks(zonesB.reduce((acc, z) => acc.concat((r.photoGroups || {})[`滿分照片/${z}`] || []), [])),
+          r.備註, joinLinks((r.photoGroups || {})['SQC點檢表完成照片']), '', r.店型態);
+        return line;
+      }));
+    }
+    window.SqcReport = { buildRawFormSheet }; // 供離線驗證報表排版用
+
+    // ============================================================
     // 點檢項目列
     // ============================================================
     function ItemRow({ item, state, setState, canPhoto, monthFolder, existingCount = 0 }) {
@@ -669,22 +758,6 @@
       const [buildingManager, setBuildingManager] = useState(false);
       const [buildingCustomer, setBuildingCustomer] = useState(false);
 
-      const itemNumberOf = (name) => (String(name).split('.')[0] || '');
-      const bareNameOf = (name) => { const s = String(name); const i = s.indexOf('.'); return i >= 0 ? s.slice(i + 1) : s; };
-      const timeCompact = (t) => { // "2026-07-15 10:00" → "2026-0715-1000"（比照人工版原始表單時間格式）
-        const s = String(t || ''); if (s.length < 16) return s;
-        return `${s.slice(0, 4)}-${s.slice(5, 7)}${s.slice(8, 10)}-${s.slice(11, 13)}${s.slice(14, 16)}`;
-      };
-      const mmdd = (t) => { const s = String(t || ''); return s.length >= 10 ? `${s.slice(5, 7)}/${s.slice(8, 10)}` : ''; };
-      const joinLinks = (arr) => (arr || []).join(', ');
-      // 依「照片資料夾名稱」直接比對取連結，不依賴觀察題活頁的題目名稱是否與當初上傳時一致
-      // （活頁未匯入時 App 會用內建預設題名上傳，用名稱精準比對會全部落空）
-      const groupLinks = (groups, pred) => Object.keys(groups || {}).filter(pred).reduce((acc, k) => acc.concat(groups[k] || []), []);
-      const keyObsLinks = (r, n) => groupLinks(r.photoGroups, k => k.indexOf('重點觀察題' + n) === 0);
-      const toiletDefectLinks = (r) => groupLinks(r.photoGroups, k => k.indexOf('廁所觀察/') === 0);
-      // 店號補回前導0並確保以文字寫入(避免Excel開啟時把"017246"顯示成17246)
-      const padStoreCode = (c) => { const s = String(c == null ? '' : c).trim(); return /^\d+$/.test(s) && s.length < 6 ? ('000000' + s).slice(-6) : s; };
-
       // 依 aoa(二維陣列)+merges 建立一般(無樣式)分頁
       const addPlainSheet = (wb, name, aoa, merges) => {
         const ws = wb.addWorksheet(name);
@@ -748,52 +821,6 @@
           for (let c = kpiStartCol; c <= kpiEndCol; c++) ws.getRow(r).getCell(c).border = border;
         }
         return ws;
-      };
-
-      // SQC Google點檢表單：逐店逐題原始資料，含每題缺失照片雲端連結（比照原本Google表單回覆試算表格式）
-      const buildRawFormSheet = (report) => {
-        const items = report.checklist;
-        const zonesA = PERFECT_ZONES.slice(0, 4), zonesB = PERFECT_ZONES.slice(4);
-        const head = ['營業部', '營業課別', '營業擔當', '時間戳記', '分數', '店號', '店名', '日期-時間', '點檢人員', '在店店員人數', '簽名店鋪人員身分別'];
-        items.forEach(it => {
-          head.push(it.name);
-          if (it.type === 'subdeduct') head.push(`${it.name}-缺失子項`);
-          head.push(`${it.name}-缺失照片上傳`);
-        });
-        head.push(
-          '【對外廁所觀察記錄 】店舖有無對外廁所', '對外廁所(觀察題) ', '缺失照片上傳',
-          '【對外廁所觀察記錄 】店舖有無開放對外廁所', '【對外廁所觀察記錄 】店外招牌有無廁所標示',
-          '【對外廁所觀察記錄 】店內有無廁所標示', '【對外廁所觀察記錄 】是否有提供以下備品(衛生紙、洗手乳、芳香劑)',
-          '重點觀察題1. 【 店外全景照】照片上傳', '重點觀察題2. 【 櫃台全景照】 照片上傳', '重點觀察題3.【  FF區全景照】照片上傳',
-          '100分照片上傳-1', '100分照片上傳-2', '備註(例：廠區店無法拍照)', 'SQC點檢表完成照片', '修正原因', '店型態');
-
-        return [head].concat(report.rows.map(r => {
-          const line = [r.營業部, r.營業課別, r.營業擔當, r.建立時間, `${r.合計} / 100`, padStoreCode(r.店號), r.店名, timeCompact(r.點檢時間), r.點檢人員, r.在店人數, r.身分別];
-          items.forEach(it => {
-            line.push(r.itemScores[it.id]);
-            if (it.type === 'subdeduct') line.push(r.itemExtra[it.id] || '');
-            line.push(joinLinks((r.photoGroups || {})[`${it.name}/缺失`]));
-          });
-          const toilet = (r.觀察 || {}).toilet || {}, toiletReasons = (r.觀察 || {}).toiletReasons || {};
-          const hasToilet = toilet['O1'] && toilet['O1'] !== '無';
-          // 缺失項目直接取紀錄裡勾選的內容，不經由題目名稱比對（活頁未匯入時仍正確）
-          const ngReasons = Object.keys(toiletReasons).reduce((acc, k) => acc.concat(toiletReasons[k] || []), []);
-          line.push(
-            toilet['O1'] || '',
-            hasToilet ? (ngReasons.length ? ngReasons.join('、') : '無以上缺失') : '',
-            joinLinks(toiletDefectLinks(r)),
-            hasToilet ? (toilet['O2'] || '') : '',
-            hasToilet ? (toilet['O3'] || '') : '',
-            hasToilet ? (toilet['O4'] || '') : '',
-            hasToilet ? (toilet['O5'] || '') : '',
-            joinLinks(keyObsLinks(r, 1)),
-            joinLinks(keyObsLinks(r, 2)),
-            joinLinks(keyObsLinks(r, 3)),
-            joinLinks(zonesA.flatMap(z => (r.photoGroups || {})[`滿分照片/${z}`] || [])),
-            joinLinks(zonesB.flatMap(z => (r.photoGroups || {})[`滿分照片/${z}`] || [])),
-            r.備註, joinLinks((r.photoGroups || {})['SQC點檢表完成照片']), '', r.店型態);
-          return line;
-        }));
       };
 
       // SQC週彙總表：逐店逐題分數彙整（大分類/項目/配分三層表頭），比照人工版排版；缺失子項只留13/17題
@@ -1173,7 +1200,7 @@
                 )}
                 <div className="bg-white rounded-xl shadow-sm overflow-hidden">
                   <table className="w-full text-sm">
-                    <thead><tr className="text-left text-slate-500 border-b bg-slate-50"><th className="py-2 px-3">日期</th><th>店鋪</th><th>課別</th><th>稽核員</th><th>得分</th><th>結果</th><th className="px-3">操作</th></tr></thead>
+                    <thead><tr className="text-left text-slate-500 border-b bg-slate-50"><th className="py-2 px-3">日期</th><th>店鋪</th><th>課別</th><th>點檢人員</th><th>得分</th><th>結果</th><th className="px-3">操作</th></tr></thead>
                     <tbody>
                       {filtered.map(r => (
                         <tr key={r.id} className="border-b border-slate-100">
@@ -1219,7 +1246,7 @@
                 </div>
                 <div className="bg-white rounded-xl shadow-sm overflow-hidden">
                   <table className="w-full text-sm">
-                    <thead><tr className="text-left text-slate-500 border-b bg-slate-50"><th className="py-2 px-3">日期</th><th>店鋪</th><th>課別</th><th>稽核員</th><th>得分</th><th>結果</th></tr></thead>
+                    <thead><tr className="text-left text-slate-500 border-b bg-slate-50"><th className="py-2 px-3">日期</th><th>店鋪</th><th>課別</th><th>點檢人員</th><th>得分</th><th>結果</th></tr></thead>
                     <tbody>{filtered.map(r => <tr key={r.id} className="border-b border-slate-100"><td className="py-2 px-3 text-slate-500">{r.date}</td><td className="font-medium text-slate-800">{r.store}</td><td className="text-slate-500">{r.section}</td><td className="text-slate-500">{r.staff}</td><td className="font-bold">{r.total}</td><td><span className={"text-xs px-2 py-0.5 rounded " + gradeOf(r.total).bg}>{r.grade}</span></td></tr>)}</tbody>
                   </table>
                 </div>
