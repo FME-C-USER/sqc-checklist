@@ -768,9 +768,6 @@
       };
     }
 
-    // 報表/請款一律依「查詢的起訖日期」取資料，讓畫面看到的＝報表內容＝請款金額
-    const reportFilter = () => ({ from: filter.from, to: filter.to, section: filter.section });
-    const spansMonths = () => rocMonth(filter.from) !== rocMonth(filter.to);
 
 
     window.SqcReport = { buildRawFormSheet, buildDailyCountBlock, buildBatchBlock, buildKpiBlock,
@@ -1259,6 +1256,11 @@
       // 註：顏色/格線樣式(查核店鋪名單) SheetJS免費版無法寫入，改用ExcelJS產出整份報表
       const [buildingManager, setBuildingManager] = useState(false);
       const [buildingCustomer, setBuildingCustomer] = useState(false);
+
+      // 報表/請款一律依「查詢的起訖日期」取資料，讓畫面看到的＝報表內容＝請款金額
+      // （依賴畫面上的 filter，必須留在元件內）
+      const reportFilter = () => ({ from: filter.from, to: filter.to, section: filter.section });
+      const spansMonths = () => rocMonth(filter.from) !== rocMonth(filter.to);
 
       const exportOneReport = async (customerFacing, setBuilding, label) => {
         if (!CONFIGURED) { alert('請先設定後端連線'); return; }
