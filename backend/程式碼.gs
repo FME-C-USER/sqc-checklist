@@ -118,7 +118,10 @@ function login(userId, password) {
   var errMap = { '100': '帳號或密碼錯誤', '200': 'AD 認證錯誤', '998': '系統暫時無法使用，請稍後再試', '999': '系統發生錯誤，請聯絡管理員' };
   if (code !== '000') return { ok: false, message: errMap[code] || errMap['999'] };
 
-  // 以 AD 比對名冊取角色：比對到＝帶出角色/姓名；比對不到＝一般點檢員（進系統後自行選取姓名）
+  // 以 AD 比對「點檢人員」名冊取身分。
+  // 名冊多數人的 AD 欄是空的，故比對不到時仍放行（只要日翊帳密正確就能登入、能點檢），
+  // 只是取不到工號/部課/角色 → 角色以「點檢員」計，登入後於基本資料自行選取點檢人員。
+  // 權限差異只在：管理者才看得到「維護專區」與報表/請款產出；查詢紀錄所有人皆可查全部。
   var staff = findStaffByAd(userId) || { empId: '', name: '', dept: '', section: '', role: '點檢員', ad: userId };
   staff.token = issueToken(staff, userId);
   return { ok: true, user: staff };

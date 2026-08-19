@@ -25,7 +25,7 @@
 
   <script type="text/jsx" id="appCode">
     const { useState, useMemo, useEffect, useRef } = React;
-    const APP_VERSION = '20260819-1115'; // 每次部署更新，用來確認瀏覽器跑的是哪一版
+    const APP_VERSION = '20260819-1150'; // 每次部署更新，用來確認瀏覽器跑的是哪一版
 
     // 全域錯誤攔截：任何未預期錯誤（含 async 事件處理器的未捕捉 rejection）都要顯示出來，
     // 否則按鈕會「按了沒反應」而完全查不到原因
@@ -998,7 +998,10 @@
       const busyText = retryInfo ? `連線不穩，自動重試中（第 ${retryInfo.attempt}/${retryInfo.maxAttempts} 次）…` : '';
       const loadRecords = () => {
         if (!CONFIGURED) return;
-        const f = { from: filter.from, to: filter.to, section: filter.section, empId: isManager ? undefined : currentUser.empId };
+        // 查詢紀錄：所有登入者皆可查全部（不依登入者工號過濾）。
+        // 因為名冊多數人未填 AD、登入後取不到工號，用工號過濾會失效或誤擋；
+        // 權限差異僅在「維護專區」與報表/請款產出限管理者。
+        const f = { from: filter.from, to: filter.to, section: filter.section };
         const months = queryMonthsOf(filter.from, filter.to);
         setQueryLoading(true);
         Promise.all(months.map(m => SqcApi.queryRecords(m, f).catch(() => ({ records: [] }))))
