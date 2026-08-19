@@ -25,7 +25,7 @@
 
   <script type="text/jsx" id="appCode">
     const { useState, useMemo, useEffect, useRef } = React;
-    const APP_VERSION = '20260819-1230'; // 每次部署更新，用來確認瀏覽器跑的是哪一版
+    const APP_VERSION = '20260819-1245'; // 每次部署更新，用來確認瀏覽器跑的是哪一版
 
     // 全域錯誤攔截：任何未預期錯誤（含 async 事件處理器的未捕捉 rejection）都要顯示出來，
     // 否則按鈕會「按了沒反應」而完全查不到原因
@@ -434,7 +434,7 @@
       };
 
       // 第一欄標頭＝期間，其下即為列名（合計/各課/各部），與資料列欄數必須一致
-      const head = ['期間\n' + periodLabel, '應點檢\n(店數)', '已點檢\n(店數)', '未點檢\n(店數)', '完成率',
+      const head = ['期間' + periodLabel, '應點檢\n(店數)', '已點檢\n(店數)', '未點檢\n(店數)', '完成率',
         `≧${pass}分\n(店數)`, `<${pass}分\n(店數)`, `<${pass}分\n(佔比)`, '平均分數', '最高分', '最低分', '不及格店'];
       const aoa = [head, ['合計', ...stat(sections, false)]];
       const byDept = {};
@@ -570,7 +570,9 @@
           // 「實際點檢課/人員/梯次」才是有點檢才填
           : [...common, rec ? rec.主責課 : '', rec ? rec.點檢人員 : '', rec ? s.預排梯次 : '', s.課別 || '', s.預排梯次 || '', ...tail];
       });
-      const periodLabel = `${slashMD(filter.from || '')}-${slashMD(filter.to || '')}`;
+      // 期間文字：0801-0819（不含斜線）
+      const mmddPlain = (ymd) => String(ymd || '').slice(5, 7) + String(ymd || '').slice(8, 10);
+      const periodLabel = `${mmddPlain(filter.from)}-${mmddPlain(filter.to)}`;
 
       // 中段：每日店數表；右段：KPI（上）＋梯次表（下），中間空一列分隔
       // 客戶版只要左邊的名單本體（A~K欄），不含每日店數表、KPI與梯次表（皆為內部管理用）
