@@ -315,7 +315,8 @@
       ws.eachRow({ includeEmpty: true }, (row) => {
         row.eachCell({ includeEmpty: true }, (cell, c) => {
           const prev = cell.font || {};
-          cell.font = Object.assign({}, prev, { name: REPORT_FONT });
+          // 字體大小要明確指定：只給名稱時 Excel 會套用自己的預設值，某些環境會連帶重算列高
+          cell.font = Object.assign({}, prev, { name: REPORT_FONT, size: prev.size || 12 });
           const prevAlign = cell.alignment || {};
           cell.alignment = Object.assign({}, prevAlign, {
             vertical: 'middle',
@@ -462,7 +463,318 @@
       return aoa;
     }
 
-    window.SqcReport = { buildRawFormSheet, buildDailyCountBlock, buildBatchBlock, buildKpiBlock }; // 供離線驗證報表排版用
+    // SQC週彙總表樣式：完整格線、微軟正黑體、資料置中、
+    //   合計不及格→紅底白字、各項得分0分→粉紅底紅字、B~G欄有資料→淺綠底
+    function styleWeeklySheet(ws, weekly) {
+      const C = REPORT_COLORS, border = thinBorder();
+      const m = weekly.meta, rowsTotal = weekly.aoa.length;
+      const fillOf = (argb) => ({ type: 'pattern', pattern: 'solid', fgColor: { argb } });
+
+      for (let r = 1; r <= rowsTotal; r++) {
+        for (let c = 1; c <= m.totalCols; c++) ws.getRow(r).getCell(c).border = border; // 完整格線
+      }
+      // 表頭四列淺黃底粗體
+      for (let r = 1; r <= m.headRows; r++) {
+        for (let c = 1; c <= m.totalCols; c++) {
+          const cell = ws.getRow(r).getCell(c);
+          cell.fill = fillOf(C.黃); cell.font = { bold: true };
+        }
+      }
+      for (let r = m.headRows + 1; r <= rowsTotal; r++) {
+        // B~G欄（營業部/營業課別/店號/店名/營業擔當/年份-日期-時間）有資料就淺綠底
+        for (let c = 2; c <= 7; c++) {
+          const cell = ws.getRow(r).getCell(c);
+          if (cell.value !== '' && cell.value != null) cell.fill = fillOf(C.淺綠);
+        }
+        // 各項得分 0 分 → 粉紅底紅字
+        for (let c = m.itemStart + 1; c <= m.itemEnd + 1; c++) {
+          const cell = ws.getRow(r).getCell(c);
+          if (cell.value === 0) { cell.fill = fillOf(C.粉); cell.font = { bold: true, color: { argb: C.紅字 } }; }
+        }
+        // 合計未達及格分數 → 紅底白字
+        const tot = ws.getRow(r).getCell(m.totalCol + 1);
+        if (typeof tot.value === 'number' && tot.value < m.passScore) {
+          tot.fill = fillOf(C.紅); tot.font = { bold: true, color: { argb: C.白 } };
+        }
+      }
+
+      // 欄寬：避免店名/擔當/機台等文字被截斷（原本未設定，內容一律被切掉）
+      const W = { 1: 5, 2: 10, 3: 11, 4: 9, 5: 17, 6: 10, 7: 17 }; // NO/營業部/營業課別/店號/店名/營業擔當/年份-日期-時間
+      for (let c = m.itemStart + 1; c <= m.itemEnd + 1; c++) W[c] = 6;          // 各題得分
+      W[m.obsStart + 1] = 22;                                                   // 對外廁所(缺失觀察題)
+      for (let c = m.obsStart + 2; c <= m.obsEnd + 1; c++) W[c] = 15;            // 各廁所有無題
+      for (let c = m.catStart + 1; c <= m.catEnd + 1; c++) W[c] = 9;             // 分類小計
+      W[m.totalCol + 1] = 7;                                                    // 合計
+      for (let c = m.totalCol + 2; c <= m.subNoteStart; c++) W[c] = 11;          // 主責部/課、點檢人員、在店人數、店型態
+      for (let c = m.subNoteStart + 1; c <= m.totalCols; c++) W[c] = 24;         // 缺失子項(機台/垃圾桶區域)
+      Object.keys(W).forEach(c => { ws.getColumn(Number(c)).width = W[c]; });
+
+      ws.properties.defaultRowHeight = 18; // 連未明確設定的列也是18
+      for (let r = 1; r <= rowsTotal; r++) ws.getRow(r).height = 18; // 全表列高統一18
+      applyFontAndCenter(ws);
+      return ws;
+    }
+
+    // 依 aoa(二維陣列)+merges 建立一般(無樣式)分頁
+    function addPlainSheet(wb, name, aoa, merges) {
+      const ws = wb.addWorksheet(name);
+      aoa.forEach(row => ws.addRow(row));
+      (merges || []).forEach(m => ws.mergeCells(m.s.r + 1, m.s.c + 1, m.e.r + 1, m.e.c + 1));
+      return ws;
+    }
+
+    // 不及格店：本次查詢範圍內未達及格分數的店
+    function buildFailStoreSheet(report) {
+      const fails = report.rows.filter(r => r.合計 < report.passScore);
+      const head = ['序號', '分數', '店號', '店名', '日期-時間', '主責課', '點檢人員', '部別', '課別', '擔當'];
+      return [head].concat(fails.map((r, i) => [
+        i + 1, `${r.合計} / 100`, padStoreCode(r.店號), r.店名, timeCompact(r.點檢時間), r.主責課, r.點檢人員, r.營業部, r.營業課別, r.營業擔當,
+      ]));
+    }
+
+    // 查核店鋪名單（比照人工版三段式版面）：
+    //   左＝名單逐店的實際點檢狀態｜中＝每日店數表（逐週）｜右＝上：課別KPI彙總、下：梯次表
+    function buildRosterCheckSheet(wb, report, customerFacing, filter) {
+      const ws = wb.addWorksheet('查核店鋪名單');
+      const byCode = {}; report.rows.forEach(r => { byCode[normCode(r.店號)] = r; });
+      const head = customerFacing
+        ? ['序', '既存店號', '店舖名稱', '部別', '課別', '擔當', '地址', '隨盤點', '預排梯次', '日期', '是(否)點檢']
+        : ['序', '既存店號', '店舖名稱', '部別', '課別', '擔當', '地址', '隨盤點', '實際點檢課', '實際點檢人員', '實際點檢梯次', '主責課', '預排梯次', '日期', '是(否)點檢'];
+      const rosterRows = report.roster.map((s, i) => {
+        const rec = byCode[normCode(s.店號)];
+        const common = [i + 1, padStoreCode(s.店號), s.店名, s.營業部, s.課別, s.營業擔當, s.地址, s.店鋪型態 === '隨盤點點檢店' ? 'V' : ''];
+        const tail = rec ? [mmdd(rec.點檢時間), '已點檢'] : ['', '未點檢'];
+        return customerFacing
+          ? [...common, s.預排梯次 || '', ...tail]
+          : [...common, rec ? rec.主責課 : '', rec ? rec.點檢人員 : '', rec ? s.預排梯次 : '', rec ? rec.主責課 : '', s.預排梯次 || '', ...tail];
+      });
+      const periodLabel = `${slashMD(filter.from || '')}-${slashMD(filter.to || '')}`;
+
+      // 中段：每日店數表；右段：KPI（上）＋梯次表（下），中間空一列分隔
+      const daily = buildDailyCountBlock(report, filter.from, filter.to);
+      const batch = buildBatchBlock(report, periodLabel); // 第二列首欄放期間區間文字（第一列已有「期間」標題）
+      const right = buildKpiBlock(report, periodLabel);
+      const kpiRowCount = right.length;
+      if (batch.length) { right.push([], []); batch.forEach(r => right.push(r)); }
+
+      const LEFT_W = head.length, DAILY_W = daily.length ? 8 : 0;
+      const rightW = right.reduce((m, r) => Math.max(m, r.length), 0);
+      const pad = (arr, w) => { const o = []; for (let i = 0; i < w; i++) o.push(arr && arr[i] != null ? arr[i] : ''); return o; };
+      const n = Math.max(rosterRows.length + 1, daily.length, right.length);
+
+      ws.addRow([...head, '', ...pad(daily[0], DAILY_W), '', ...pad(right[0], rightW)]);
+      for (let i = 1; i < n; i++) {
+        ws.addRow([...pad(rosterRows[i - 1], LEFT_W), '', ...pad(daily[i], DAILY_W), '', ...pad(right[i], rightW)]);
+      }
+
+      // ===== 樣式 =====
+      const border = thinBorder();
+      const C = REPORT_COLORS;
+      const batchW = batch.length ? batch[0].length : 0; // 梯次表比KPI表窄，樣式不可畫到KPI表的寬度
+      const fillOf = (argb) => ({ type: 'pattern', pattern: 'solid', fgColor: { argb } });
+      const dailyStart = LEFT_W + 2, dailyEnd = dailyStart + DAILY_W - 1;
+      const kpiStart = dailyEnd + (DAILY_W ? 2 : 1), kpiEnd = kpiStart + rightW - 1;
+      const batchHeadRow = kpiRowCount + 3; // 梯次表第一層表頭所在列
+
+      // 部別名稱（用來判斷小計列上色）：以點檢人員主檔為主，紀錄補齊
+      const deptNames = {};
+      (report.deptSectionList || []).forEach(d => { if (d.部) deptNames[d.部] = true; });
+      report.rows.forEach(r => { if (r.主責部) deptNames[r.主責部] = true; });
+
+      // 整塊套框線（不論有無資料都要有格線）
+      const frame = (r1, r2, c1, c2) => {
+        for (let r = r1; r <= r2; r++) for (let c = c1; c <= c2; c++) ws.getRow(r).getCell(c).border = border;
+      };
+      frame(1, 1 + rosterRows.length, 1, LEFT_W);                       // 左：名單明細
+      if (DAILY_W) frame(1, daily.length, dailyStart, dailyEnd);        // 中：每日店數表
+      frame(1, kpiRowCount, kpiStart, kpiEnd);                         // 右上：KPI
+      if (batch.length) frame(batchHeadRow, batchHeadRow + batch.length - 1, kpiStart, kpiStart + batchW - 1);
+
+      // 左側標題列：深綠底白字
+      for (let c = 1; c <= LEFT_W; c++) {
+        const cell = ws.getRow(1).getCell(c);
+        cell.fill = fillOf(C.深綠);
+        cell.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+        cell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
+      }
+
+      // 標頭列（黃底粗體置中）：中段星期列/各週日期列、右上KPI表頭、梯次表兩層表頭
+      const headerRows = { 1: true, [batchHeadRow]: true, [batchHeadRow + 1]: true };
+      const markHeader = (r, c) => {
+        const cell = ws.getRow(r).getCell(c);
+        cell.fill = fillOf(C.黃); cell.font = { bold: true };
+        cell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
+      };
+      for (let c = dailyStart; c <= dailyEnd; c++) {
+        for (let r = 1; r <= daily.length; r++) {
+          if (r === 1 || ws.getRow(r).getCell(dailyStart).value === '日期') markHeader(r, c);
+        }
+      }
+      for (let c = kpiStart; c <= kpiEnd; c++) markHeader(1, c);                      // KPI表頭
+      for (let c = kpiStart; c < kpiStart + batchW; c++) {                            // 梯次表兩層表頭（僅其自身寬度）
+        markHeader(batchHeadRow, c); markHeader(batchHeadRow + 1, c);
+      }
+
+      // 合計列淺綠、部別小計列淺粉（KPI表、梯次表、每日店數表同規則）
+      const tintRow = (r, c1, c2, argb) => {
+        for (let c = c1; c <= c2; c++) ws.getRow(r).getCell(c).fill = fillOf(argb);
+      };
+      const labelAt = (arr, i) => (arr[i] && arr[i][0] != null ? String(arr[i][0]) : '');
+      for (let i = 1; i < right.length; i++) {
+        const label = labelAt(right, i), r = i + 1;
+        if (r === batchHeadRow || r === batchHeadRow + 1) continue;
+        const cEnd = r > batchHeadRow ? kpiStart + batchW - 1 : kpiEnd; // 梯次表區段只塗自身寬度
+        if (label === '合計') tintRow(r, kpiStart, cEnd, C.淺綠);
+        else if (deptNames[label]) tintRow(r, kpiStart, cEnd, C.淺粉);
+      }
+      if (DAILY_W) {
+        for (let i = 1; i < daily.length; i++) {
+          const label = labelAt(daily, i), r = i + 1;
+          if (label === '合計') tintRow(r, dailyStart, dailyEnd, C.淺綠);
+          else if (deptNames[label]) tintRow(r, dailyStart, dailyEnd, C.淺粉);
+        }
+      }
+
+      // 數字格式：整數千分位、百分比、分數兩位小數
+      const setFmt = (r, c, fmt) => { const cell = ws.getRow(r).getCell(c); if (typeof cell.value === 'number') cell.numFmt = fmt; };
+      for (let r = 2; r <= kpiRowCount; r++) {
+        [1, 2, 3, 5, 6].forEach(o => setFmt(r, kpiStart + o, '#,##0'));   // 應點檢/已點檢/未點檢/≧/<
+        [4, 7].forEach(o => setFmt(r, kpiStart + o, '0.00%'));            // 完成率/不合格佔比
+        [8, 9, 10].forEach(o => setFmt(r, kpiStart + o, '0.00'));         // 平均/最高/最低分
+      }
+      if (batch.length) {
+        for (let r = batchHeadRow + 2; r <= batchHeadRow + batch.length - 1; r++) {
+          for (let c = kpiStart + 1; c < kpiStart + batchW; c++) setFmt(r, c, '#,##0');
+        }
+      }
+      if (DAILY_W) {
+        for (let r = 2; r <= daily.length; r++) for (let c = dailyStart; c <= dailyEnd; c++) setFmt(r, c, '#,##0');
+      }
+
+      // 梯次表的「第一梯/第二梯」跨兩欄置中（其下為 預計/實際 兩欄）
+      if (batch.length) {
+        const batchCount = Math.floor((batch[0].length - 1) / 2);
+        for (let j = 0; j < batchCount; j++) {
+          const c1 = kpiStart + 1 + j * 2, c2 = c1 + 1;
+          try { ws.mergeCells(batchHeadRow, c1, batchHeadRow, c2); } catch (e) { /* 已合併則略過 */ }
+          const cell = ws.getRow(batchHeadRow).getCell(c1);
+          cell.alignment = { vertical: 'middle', horizontal: 'center' };
+          cell.fill = fillOf(C.黃); cell.font = { bold: true }; cell.border = border;
+        }
+      }
+
+      // 欄寬：避免店名/地址/課別等被截斷
+      const wideOf = (name) => ({ '序': 5, '既存店號': 10, '店舖名稱': 17, '部別': 10, '課別': 10, '擔當': 10, '地址': 34, '隨盤點': 8 }[name] || 12);
+      head.forEach((h, i) => { ws.getColumn(i + 1).width = wideOf(h); });
+      if (DAILY_W) for (let c = dailyStart; c <= dailyEnd; c++) ws.getColumn(c).width = 9;
+      ws.getColumn(kpiStart).width = 13;
+      for (let c = kpiStart + 1; c <= kpiEnd - 1; c++) ws.getColumn(c).width = 11;
+      ws.getColumn(kpiEnd).width = 42; // 不及格店名單較長
+
+      ws.properties.defaultRowHeight = 18;
+      for (let r = 1; r <= n; r++) ws.getRow(r).height = 18; // 列高統一
+      applyFontAndCenter(ws, { [head.indexOf('地址') + 1]: true, [kpiEnd]: true }); // 地址與不及格店名單靠左
+      return ws;
+    }
+
+    // SQC週彙總表：逐店逐題分數彙整（大分類/項目/配分三層表頭），比照人工版排版；缺失子項只留13/17題
+    function buildWeeklyScoreSheet(report, customerFacing) {
+      const items = report.checklist;
+      const catOrder = report.catOrder;
+      const catMax = {}; catOrder.forEach(c => { catMax[c] = items.filter(it => it.cat === c).reduce((s, it) => s + it.max, 0); });
+      const tItems = report.obsList.filter(o => o.type === '符合');
+      const oItems = report.obsList.filter(o => o.type === '有無');
+      const subItems = items.filter(it => ['13', '17'].includes(itemNumberOf(it.name)));
+      const subNoteLabel = (it) => (itemNumberOf(it.name) === '13' ? 'FF區空架機台' : '被扣分的【垃圾桶】區域');
+
+      const FIXED = 7; // NO,營業部,營業課別,店號,店名,營業擔當,年份-日期-時間
+      const itemStart = FIXED, itemEnd = itemStart + items.length - 1;
+      const obsStart = itemEnd + 1, obsEnd = obsStart + (1 + oItems.length) - 1; // 對外廁所(缺失觀察題)合併1欄 + 各O題
+      const catStart = obsEnd + 1, catEnd = catStart + catOrder.length - 1;
+      const totalCol = catEnd + 1;
+      let col = totalCol + 1;
+      const deptCols = customerFacing ? [] : [col, col + 1]; if (!customerFacing) col += 2;
+      const staffCol = col++, countCol = col++, typeCol = col++;
+      const subNoteStart = col; col += subItems.length;
+      const totalCols = col;
+      const blankRow = () => new Array(totalCols).fill('');
+
+      const row0 = blankRow(); row0[0] = '序';
+      items.forEach((it, i) => { row0[itemStart + i] = itemNumberOf(it.name); });
+      row0[obsStart] = '觀察題';
+      row0[catStart] = '各項得分數'; // 單行化：配合統一列高18，避免兩行文字被切掉
+      row0[totalCol] = '合計';
+      if (!customerFacing) { row0[deptCols[0]] = '主責部別'; row0[deptCols[1]] = '主責課別'; }
+      row0[staffCol] = '點檢人員'; row0[countCol] = '店員在店人數'; row0[typeCol] = '店型態';
+      subItems.forEach((it, i) => { row0[subNoteStart + i] = subNoteLabel(it); }); // 缺失子項標題也放首列，之後整欄縱向合併
+
+      const row1 = blankRow(); row1[0] = '大分類';
+      const merges = [{ s: { r: 0, c: obsStart }, e: { r: 0, c: obsEnd } }, { s: { r: 0, c: catStart }, e: { r: 0, c: catEnd } }];
+      for (let r = 0; r <= 3; r++) merges.push({ s: { r: r, c: 0 }, e: { r: r, c: FIXED - 1 } }); // 序/大分類/項目/配分 橫跨固定欄
+      // 後段欄位(合計/主責部課/點檢人員/在店人數/店型態/缺失子項)標題縱向合併整個表頭，比照人工版
+      const tailCols = [totalCol].concat(customerFacing ? [] : deptCols).concat([staffCol, countCol, typeCol])
+        .concat(subItems.map((_, i) => subNoteStart + i));
+      tailCols.forEach(c => merges.push({ s: { r: 0, c: c }, e: { r: 4, c: c } }));
+      catOrder.forEach(cat => {
+        const idxs = items.map((it, i) => (it.cat === cat ? itemStart + i : -1)).filter(i => i >= 0);
+        if (idxs.length) {
+          row1[idxs[0]] = `${cat}共${catMax[cat]}分`;
+          if (idxs.length > 1) merges.push({ s: { r: 1, c: idxs[0] }, e: { r: 1, c: idxs[idxs.length - 1] } });
+        }
+      });
+
+      const row2 = blankRow(); row2[0] = '項目';
+      items.forEach((it, i) => { row2[itemStart + i] = bareNameOf(it.name); });
+      row2[obsStart] = '對外廁所(缺失觀察題)';
+      oItems.forEach((o, i) => { row2[obsStart + 1 + i] = o.name; });
+      catOrder.forEach(cat => { row2[catStart + catOrder.indexOf(cat)] = `${cat}共${catMax[cat]}分`; });
+
+      // 配分獨立一列（比照人工版），欄位名稱另成一列，兩者不再擠在同一列
+      const row3 = blankRow();
+      row3[0] = '配分';
+      items.forEach((it, i) => { row3[itemStart + i] = it.max; });
+      catOrder.forEach(cat => { row3[catStart + catOrder.indexOf(cat)] = catMax[cat]; });
+
+      const row4 = blankRow();
+      row4[0] = 'NO'; row4[1] = '營業部'; row4[2] = '營業課別'; row4[3] = '店號'; row4[4] = '店名'; row4[5] = '營業擔當'; row4[6] = '年份-日期-時間';
+
+      const dataRows = report.rows.map((r, i) => {
+        const line = blankRow();
+        // 「年份-日期-時間」格式與 SQC Google點檢表單 一致（2026-0805-1350）
+        line[0] = i + 1; line[1] = r.營業部; line[2] = r.營業課別; line[3] = padStoreCode(r.店號); line[4] = r.店名; line[5] = r.營業擔當; line[6] = timeCompact(r.點檢時間);
+        items.forEach((it, j) => { line[itemStart + j] = r.itemScores[it.id]; });
+        const toilet = (r.觀察 || {}).toilet || {}, toiletReasons = (r.觀察 || {}).toiletReasons || {};
+        const hasToilet = toilet['O1'] && toilet['O1'] !== '無';
+        if (hasToilet) {
+          const ngT = tItems.filter(t => toilet[t.id] === '不符合');
+          line[obsStart] = ngT.length ? ngT.flatMap(t => toiletReasons[t.id] || []).join('、') : '無以上缺失';
+          oItems.forEach((o, j) => { line[obsStart + 1 + j] = toilet[o.id] || ''; });
+        } else {
+          line[obsStart] = '';
+          if (oItems[0]) line[obsStart + 1] = toilet['O1'] || '';
+        }
+        catOrder.forEach(cat => { line[catStart + catOrder.indexOf(cat)] = r.分類小計[cat]; });
+        line[totalCol] = r.合計;
+        if (!customerFacing) { line[deptCols[0]] = r.主責部; line[deptCols[1]] = r.主責課; }
+        line[staffCol] = r.點檢人員; line[countCol] = r.在店人數; line[typeCol] = r.店型態;
+        subItems.forEach((it, j) => { line[subNoteStart + j] = r.itemExtra[it.id] || ''; });
+        return line;
+      });
+
+      // meta：供樣式套用（欄位位置為0-based，套用時需+1）
+      return {
+        aoa: [row0, row1, row2, row3, row4, ...dataRows], merges,
+        meta: { headRows: 5, itemStart, itemEnd, totalCol, totalCols, passScore: PASS_SCORE, FIXED, obsStart, obsEnd, catStart, catEnd, subNoteStart },
+      };
+    }
+
+    // 報表/請款一律依「查詢的起訖日期」取資料，讓畫面看到的＝報表內容＝請款金額
+    const reportFilter = () => ({ from: filter.from, to: filter.to, section: filter.section });
+    const spansMonths = () => rocMonth(filter.from) !== rocMonth(filter.to);
+
+
+    window.SqcReport = { buildRawFormSheet, buildDailyCountBlock, buildBatchBlock, buildKpiBlock,
+      buildFailStoreSheet, addPlainSheet, styleWeeklySheet, buildRosterCheckSheet, buildWeeklyScoreSheet }; // 供離線驗證報表排版用
 
     // ============================================================
     // 點檢項目列
@@ -948,315 +1260,6 @@
       const [buildingManager, setBuildingManager] = useState(false);
       const [buildingCustomer, setBuildingCustomer] = useState(false);
 
-      // SQC週彙總表樣式：完整格線、微軟正黑體、資料置中、
-      //   合計不及格→紅底白字、各項得分0分→粉紅底紅字、B~G欄有資料→淺綠底
-      const styleWeeklySheet = (ws, weekly) => {
-        const C = REPORT_COLORS, border = thinBorder();
-        const m = weekly.meta, rowsTotal = weekly.aoa.length;
-        const fillOf = (argb) => ({ type: 'pattern', pattern: 'solid', fgColor: { argb } });
-
-        for (let r = 1; r <= rowsTotal; r++) {
-          for (let c = 1; c <= m.totalCols; c++) ws.getRow(r).getCell(c).border = border; // 完整格線
-        }
-        // 表頭四列淺黃底粗體
-        for (let r = 1; r <= m.headRows; r++) {
-          for (let c = 1; c <= m.totalCols; c++) {
-            const cell = ws.getRow(r).getCell(c);
-            cell.fill = fillOf(C.黃); cell.font = { bold: true };
-          }
-        }
-        for (let r = m.headRows + 1; r <= rowsTotal; r++) {
-          // B~G欄（營業部/營業課別/店號/店名/營業擔當/年份-日期-時間）有資料就淺綠底
-          for (let c = 2; c <= 7; c++) {
-            const cell = ws.getRow(r).getCell(c);
-            if (cell.value !== '' && cell.value != null) cell.fill = fillOf(C.淺綠);
-          }
-          // 各項得分 0 分 → 粉紅底紅字
-          for (let c = m.itemStart + 1; c <= m.itemEnd + 1; c++) {
-            const cell = ws.getRow(r).getCell(c);
-            if (cell.value === 0) { cell.fill = fillOf(C.粉); cell.font = { bold: true, color: { argb: C.紅字 } }; }
-          }
-          // 合計未達及格分數 → 紅底白字
-          const tot = ws.getRow(r).getCell(m.totalCol + 1);
-          if (typeof tot.value === 'number' && tot.value < m.passScore) {
-            tot.fill = fillOf(C.紅); tot.font = { bold: true, color: { argb: C.白 } };
-          }
-        }
-
-        // 欄寬：避免店名/擔當/機台等文字被截斷（原本未設定，內容一律被切掉）
-        const W = { 1: 5, 2: 10, 3: 11, 4: 9, 5: 17, 6: 10, 7: 17 }; // NO/營業部/營業課別/店號/店名/營業擔當/年份-日期-時間
-        for (let c = m.itemStart + 1; c <= m.itemEnd + 1; c++) W[c] = 6;          // 各題得分
-        W[m.obsStart + 1] = 22;                                                   // 對外廁所(缺失觀察題)
-        for (let c = m.obsStart + 2; c <= m.obsEnd + 1; c++) W[c] = 15;            // 各廁所有無題
-        for (let c = m.catStart + 1; c <= m.catEnd + 1; c++) W[c] = 9;             // 分類小計
-        W[m.totalCol + 1] = 7;                                                    // 合計
-        for (let c = m.totalCol + 2; c <= m.subNoteStart; c++) W[c] = 11;          // 主責部/課、點檢人員、在店人數、店型態
-        for (let c = m.subNoteStart + 1; c <= m.totalCols; c++) W[c] = 24;         // 缺失子項(機台/垃圾桶區域)
-        Object.keys(W).forEach(c => { ws.getColumn(Number(c)).width = W[c]; });
-
-        ws.properties.defaultRowHeight = 18; // 連未明確設定的列也是18
-        for (let r = 1; r <= rowsTotal; r++) ws.getRow(r).height = 18; // 全表列高統一18
-        applyFontAndCenter(ws);
-        return ws;
-      };
-
-      // 依 aoa(二維陣列)+merges 建立一般(無樣式)分頁
-      const addPlainSheet = (wb, name, aoa, merges) => {
-        const ws = wb.addWorksheet(name);
-        aoa.forEach(row => ws.addRow(row));
-        (merges || []).forEach(m => ws.mergeCells(m.s.r + 1, m.s.c + 1, m.e.r + 1, m.e.c + 1));
-        return ws;
-      };
-
-      // 不及格店：本次查詢範圍內未達及格分數的店
-      const buildFailStoreSheet = (report) => {
-        const fails = report.rows.filter(r => r.合計 < report.passScore);
-        const head = ['序號', '分數', '店號', '店名', '日期-時間', '主責課', '點檢人員', '部別', '課別', '擔當'];
-        return [head].concat(fails.map((r, i) => [
-          i + 1, `${r.合計} / 100`, padStoreCode(r.店號), r.店名, timeCompact(r.點檢時間), r.主責課, r.點檢人員, r.營業部, r.營業課別, r.營業擔當,
-        ]));
-      };
-
-      // 查核店鋪名單（比照人工版三段式版面）：
-      //   左＝名單逐店的實際點檢狀態｜中＝每日店數表（逐週）｜右＝上：課別KPI彙總、下：梯次表
-      const buildRosterCheckSheet = (wb, report, customerFacing) => {
-        const ws = wb.addWorksheet('查核店鋪名單');
-        const byCode = {}; report.rows.forEach(r => { byCode[normCode(r.店號)] = r; });
-        const head = customerFacing
-          ? ['序', '既存店號', '店舖名稱', '部別', '課別', '擔當', '地址', '隨盤點', '預排梯次', '日期', '是(否)點檢']
-          : ['序', '既存店號', '店舖名稱', '部別', '課別', '擔當', '地址', '隨盤點', '實際點檢課', '實際點檢人員', '實際點檢梯次', '主責課', '預排梯次', '日期', '是(否)點檢'];
-        const rosterRows = report.roster.map((s, i) => {
-          const rec = byCode[normCode(s.店號)];
-          const common = [i + 1, padStoreCode(s.店號), s.店名, s.營業部, s.課別, s.營業擔當, s.地址, s.店鋪型態 === '隨盤點點檢店' ? 'V' : ''];
-          const tail = rec ? [mmdd(rec.點檢時間), '已點檢'] : ['', '未點檢'];
-          return customerFacing
-            ? [...common, s.預排梯次 || '', ...tail]
-            : [...common, rec ? rec.主責課 : '', rec ? rec.點檢人員 : '', rec ? s.預排梯次 : '', rec ? rec.主責課 : '', s.預排梯次 || '', ...tail];
-        });
-        const periodLabel = `${slashMD(filter.from || '')}-${slashMD(filter.to || '')}`;
-
-        // 中段：每日店數表；右段：KPI（上）＋梯次表（下），中間空一列分隔
-        const daily = buildDailyCountBlock(report, filter.from, filter.to);
-        const batch = buildBatchBlock(report, periodLabel); // 第二列首欄放期間區間文字（第一列已有「期間」標題）
-        const right = buildKpiBlock(report, periodLabel);
-        const kpiRowCount = right.length;
-        if (batch.length) { right.push([], []); batch.forEach(r => right.push(r)); }
-
-        const LEFT_W = head.length, DAILY_W = daily.length ? 8 : 0;
-        const rightW = right.reduce((m, r) => Math.max(m, r.length), 0);
-        const pad = (arr, w) => { const o = []; for (let i = 0; i < w; i++) o.push(arr && arr[i] != null ? arr[i] : ''); return o; };
-        const n = Math.max(rosterRows.length + 1, daily.length, right.length);
-
-        ws.addRow([...head, '', ...pad(daily[0], DAILY_W), '', ...pad(right[0], rightW)]);
-        for (let i = 1; i < n; i++) {
-          ws.addRow([...pad(rosterRows[i - 1], LEFT_W), '', ...pad(daily[i], DAILY_W), '', ...pad(right[i], rightW)]);
-        }
-
-        // ===== 樣式 =====
-        const border = thinBorder();
-        const C = REPORT_COLORS;
-        const batchW = batch.length ? batch[0].length : 0; // 梯次表比KPI表窄，樣式不可畫到KPI表的寬度
-        const fillOf = (argb) => ({ type: 'pattern', pattern: 'solid', fgColor: { argb } });
-        const dailyStart = LEFT_W + 2, dailyEnd = dailyStart + DAILY_W - 1;
-        const kpiStart = dailyEnd + (DAILY_W ? 2 : 1), kpiEnd = kpiStart + rightW - 1;
-        const batchHeadRow = kpiRowCount + 3; // 梯次表第一層表頭所在列
-
-        // 部別名稱（用來判斷小計列上色）：以點檢人員主檔為主，紀錄補齊
-        const deptNames = {};
-        (report.deptSectionList || []).forEach(d => { if (d.部) deptNames[d.部] = true; });
-        report.rows.forEach(r => { if (r.主責部) deptNames[r.主責部] = true; });
-
-        // 整塊套框線（不論有無資料都要有格線）
-        const frame = (r1, r2, c1, c2) => {
-          for (let r = r1; r <= r2; r++) for (let c = c1; c <= c2; c++) ws.getRow(r).getCell(c).border = border;
-        };
-        frame(1, 1 + rosterRows.length, 1, LEFT_W);                       // 左：名單明細
-        if (DAILY_W) frame(1, daily.length, dailyStart, dailyEnd);        // 中：每日店數表
-        frame(1, kpiRowCount, kpiStart, kpiEnd);                         // 右上：KPI
-        if (batch.length) frame(batchHeadRow, batchHeadRow + batch.length - 1, kpiStart, kpiStart + batchW - 1);
-
-        // 左側標題列：深綠底白字
-        for (let c = 1; c <= LEFT_W; c++) {
-          const cell = ws.getRow(1).getCell(c);
-          cell.fill = fillOf(C.深綠);
-          cell.font = { bold: true, color: { argb: 'FFFFFFFF' } };
-          cell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
-        }
-
-        // 標頭列（黃底粗體置中）：中段星期列/各週日期列、右上KPI表頭、梯次表兩層表頭
-        const headerRows = { 1: true, [batchHeadRow]: true, [batchHeadRow + 1]: true };
-        const markHeader = (r, c) => {
-          const cell = ws.getRow(r).getCell(c);
-          cell.fill = fillOf(C.黃); cell.font = { bold: true };
-          cell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
-        };
-        for (let c = dailyStart; c <= dailyEnd; c++) {
-          for (let r = 1; r <= daily.length; r++) {
-            if (r === 1 || ws.getRow(r).getCell(dailyStart).value === '日期') markHeader(r, c);
-          }
-        }
-        for (let c = kpiStart; c <= kpiEnd; c++) markHeader(1, c);                      // KPI表頭
-        for (let c = kpiStart; c < kpiStart + batchW; c++) {                            // 梯次表兩層表頭（僅其自身寬度）
-          markHeader(batchHeadRow, c); markHeader(batchHeadRow + 1, c);
-        }
-
-        // 合計列淺綠、部別小計列淺粉（KPI表、梯次表、每日店數表同規則）
-        const tintRow = (r, c1, c2, argb) => {
-          for (let c = c1; c <= c2; c++) ws.getRow(r).getCell(c).fill = fillOf(argb);
-        };
-        const labelAt = (arr, i) => (arr[i] && arr[i][0] != null ? String(arr[i][0]) : '');
-        for (let i = 1; i < right.length; i++) {
-          const label = labelAt(right, i), r = i + 1;
-          if (r === batchHeadRow || r === batchHeadRow + 1) continue;
-          const cEnd = r > batchHeadRow ? kpiStart + batchW - 1 : kpiEnd; // 梯次表區段只塗自身寬度
-          if (label === '合計') tintRow(r, kpiStart, cEnd, C.淺綠);
-          else if (deptNames[label]) tintRow(r, kpiStart, cEnd, C.淺粉);
-        }
-        if (DAILY_W) {
-          for (let i = 1; i < daily.length; i++) {
-            const label = labelAt(daily, i), r = i + 1;
-            if (label === '合計') tintRow(r, dailyStart, dailyEnd, C.淺綠);
-            else if (deptNames[label]) tintRow(r, dailyStart, dailyEnd, C.淺粉);
-          }
-        }
-
-        // 數字格式：整數千分位、百分比、分數兩位小數
-        const setFmt = (r, c, fmt) => { const cell = ws.getRow(r).getCell(c); if (typeof cell.value === 'number') cell.numFmt = fmt; };
-        for (let r = 2; r <= kpiRowCount; r++) {
-          [1, 2, 3, 5, 6].forEach(o => setFmt(r, kpiStart + o, '#,##0'));   // 應點檢/已點檢/未點檢/≧/<
-          [4, 7].forEach(o => setFmt(r, kpiStart + o, '0.00%'));            // 完成率/不合格佔比
-          [8, 9, 10].forEach(o => setFmt(r, kpiStart + o, '0.00'));         // 平均/最高/最低分
-        }
-        if (batch.length) {
-          for (let r = batchHeadRow + 2; r <= batchHeadRow + batch.length - 1; r++) {
-            for (let c = kpiStart + 1; c < kpiStart + batchW; c++) setFmt(r, c, '#,##0');
-          }
-        }
-        if (DAILY_W) {
-          for (let r = 2; r <= daily.length; r++) for (let c = dailyStart; c <= dailyEnd; c++) setFmt(r, c, '#,##0');
-        }
-
-        // 梯次表的「第一梯/第二梯」跨兩欄置中（其下為 預計/實際 兩欄）
-        if (batch.length) {
-          const batchCount = Math.floor((batch[0].length - 1) / 2);
-          for (let j = 0; j < batchCount; j++) {
-            const c1 = kpiStart + 1 + j * 2, c2 = c1 + 1;
-            try { ws.mergeCells(batchHeadRow, c1, batchHeadRow, c2); } catch (e) { /* 已合併則略過 */ }
-            const cell = ws.getRow(batchHeadRow).getCell(c1);
-            cell.alignment = { vertical: 'middle', horizontal: 'center' };
-            cell.fill = fillOf(C.黃); cell.font = { bold: true }; cell.border = border;
-          }
-        }
-
-        // 欄寬：避免店名/地址/課別等被截斷
-        const wideOf = (name) => ({ '序': 5, '既存店號': 10, '店舖名稱': 17, '部別': 10, '課別': 10, '擔當': 10, '地址': 34, '隨盤點': 8 }[name] || 12);
-        head.forEach((h, i) => { ws.getColumn(i + 1).width = wideOf(h); });
-        if (DAILY_W) for (let c = dailyStart; c <= dailyEnd; c++) ws.getColumn(c).width = 9;
-        ws.getColumn(kpiStart).width = 13;
-        for (let c = kpiStart + 1; c <= kpiEnd - 1; c++) ws.getColumn(c).width = 11;
-        ws.getColumn(kpiEnd).width = 42; // 不及格店名單較長
-
-        ws.properties.defaultRowHeight = 18;
-        for (let r = 1; r <= n; r++) ws.getRow(r).height = 18; // 列高統一
-        applyFontAndCenter(ws, { [head.indexOf('地址') + 1]: true, [kpiEnd]: true }); // 地址與不及格店名單靠左
-        return ws;
-      };
-
-      // SQC週彙總表：逐店逐題分數彙整（大分類/項目/配分三層表頭），比照人工版排版；缺失子項只留13/17題
-      const buildWeeklyScoreSheet = (report, customerFacing) => {
-        const items = report.checklist;
-        const catOrder = report.catOrder;
-        const catMax = {}; catOrder.forEach(c => { catMax[c] = items.filter(it => it.cat === c).reduce((s, it) => s + it.max, 0); });
-        const tItems = report.obsList.filter(o => o.type === '符合');
-        const oItems = report.obsList.filter(o => o.type === '有無');
-        const subItems = items.filter(it => ['13', '17'].includes(itemNumberOf(it.name)));
-        const subNoteLabel = (it) => (itemNumberOf(it.name) === '13' ? 'FF區空架機台' : '被扣分的【垃圾桶】區域');
-
-        const FIXED = 7; // NO,營業部,營業課別,店號,店名,營業擔當,年份-日期-時間
-        const itemStart = FIXED, itemEnd = itemStart + items.length - 1;
-        const obsStart = itemEnd + 1, obsEnd = obsStart + (1 + oItems.length) - 1; // 對外廁所(缺失觀察題)合併1欄 + 各O題
-        const catStart = obsEnd + 1, catEnd = catStart + catOrder.length - 1;
-        const totalCol = catEnd + 1;
-        let col = totalCol + 1;
-        const deptCols = customerFacing ? [] : [col, col + 1]; if (!customerFacing) col += 2;
-        const staffCol = col++, countCol = col++, typeCol = col++;
-        const subNoteStart = col; col += subItems.length;
-        const totalCols = col;
-        const blankRow = () => new Array(totalCols).fill('');
-
-        const row0 = blankRow(); row0[0] = '序';
-        items.forEach((it, i) => { row0[itemStart + i] = itemNumberOf(it.name); });
-        row0[obsStart] = '觀察題';
-        row0[catStart] = '各項得分數'; // 單行化：配合統一列高18，避免兩行文字被切掉
-        row0[totalCol] = '合計';
-        if (!customerFacing) { row0[deptCols[0]] = '主責部別'; row0[deptCols[1]] = '主責課別'; }
-        row0[staffCol] = '點檢人員'; row0[countCol] = '店員在店人數'; row0[typeCol] = '店型態';
-        subItems.forEach((it, i) => { row0[subNoteStart + i] = subNoteLabel(it); }); // 缺失子項標題也放首列，之後整欄縱向合併
-
-        const row1 = blankRow(); row1[0] = '大分類';
-        const merges = [{ s: { r: 0, c: obsStart }, e: { r: 0, c: obsEnd } }, { s: { r: 0, c: catStart }, e: { r: 0, c: catEnd } }];
-        for (let r = 0; r <= 3; r++) merges.push({ s: { r: r, c: 0 }, e: { r: r, c: FIXED - 1 } }); // 序/大分類/項目/配分 橫跨固定欄
-        // 後段欄位(合計/主責部課/點檢人員/在店人數/店型態/缺失子項)標題縱向合併整個表頭，比照人工版
-        const tailCols = [totalCol].concat(customerFacing ? [] : deptCols).concat([staffCol, countCol, typeCol])
-          .concat(subItems.map((_, i) => subNoteStart + i));
-        tailCols.forEach(c => merges.push({ s: { r: 0, c: c }, e: { r: 4, c: c } }));
-        catOrder.forEach(cat => {
-          const idxs = items.map((it, i) => (it.cat === cat ? itemStart + i : -1)).filter(i => i >= 0);
-          if (idxs.length) {
-            row1[idxs[0]] = `${cat}共${catMax[cat]}分`;
-            if (idxs.length > 1) merges.push({ s: { r: 1, c: idxs[0] }, e: { r: 1, c: idxs[idxs.length - 1] } });
-          }
-        });
-
-        const row2 = blankRow(); row2[0] = '項目';
-        items.forEach((it, i) => { row2[itemStart + i] = bareNameOf(it.name); });
-        row2[obsStart] = '對外廁所(缺失觀察題)';
-        oItems.forEach((o, i) => { row2[obsStart + 1 + i] = o.name; });
-        catOrder.forEach(cat => { row2[catStart + catOrder.indexOf(cat)] = `${cat}共${catMax[cat]}分`; });
-
-        // 配分獨立一列（比照人工版），欄位名稱另成一列，兩者不再擠在同一列
-        const row3 = blankRow();
-        row3[0] = '配分';
-        items.forEach((it, i) => { row3[itemStart + i] = it.max; });
-        catOrder.forEach(cat => { row3[catStart + catOrder.indexOf(cat)] = catMax[cat]; });
-
-        const row4 = blankRow();
-        row4[0] = 'NO'; row4[1] = '營業部'; row4[2] = '營業課別'; row4[3] = '店號'; row4[4] = '店名'; row4[5] = '營業擔當'; row4[6] = '年份-日期-時間';
-
-        const dataRows = report.rows.map((r, i) => {
-          const line = blankRow();
-          // 「年份-日期-時間」格式與 SQC Google點檢表單 一致（2026-0805-1350）
-          line[0] = i + 1; line[1] = r.營業部; line[2] = r.營業課別; line[3] = padStoreCode(r.店號); line[4] = r.店名; line[5] = r.營業擔當; line[6] = timeCompact(r.點檢時間);
-          items.forEach((it, j) => { line[itemStart + j] = r.itemScores[it.id]; });
-          const toilet = (r.觀察 || {}).toilet || {}, toiletReasons = (r.觀察 || {}).toiletReasons || {};
-          const hasToilet = toilet['O1'] && toilet['O1'] !== '無';
-          if (hasToilet) {
-            const ngT = tItems.filter(t => toilet[t.id] === '不符合');
-            line[obsStart] = ngT.length ? ngT.flatMap(t => toiletReasons[t.id] || []).join('、') : '無以上缺失';
-            oItems.forEach((o, j) => { line[obsStart + 1 + j] = toilet[o.id] || ''; });
-          } else {
-            line[obsStart] = '';
-            if (oItems[0]) line[obsStart + 1] = toilet['O1'] || '';
-          }
-          catOrder.forEach(cat => { line[catStart + catOrder.indexOf(cat)] = r.分類小計[cat]; });
-          line[totalCol] = r.合計;
-          if (!customerFacing) { line[deptCols[0]] = r.主責部; line[deptCols[1]] = r.主責課; }
-          line[staffCol] = r.點檢人員; line[countCol] = r.在店人數; line[typeCol] = r.店型態;
-          subItems.forEach((it, j) => { line[subNoteStart + j] = r.itemExtra[it.id] || ''; });
-          return line;
-        });
-
-        // meta：供樣式套用（欄位位置為0-based，套用時需+1）
-        return {
-          aoa: [row0, row1, row2, row3, row4, ...dataRows], merges,
-          meta: { headRows: 5, itemStart, itemEnd, totalCol, totalCols, passScore: PASS_SCORE, FIXED, obsStart, obsEnd, catStart, catEnd, subNoteStart },
-        };
-      };
-
-      // 報表/請款一律依「查詢的起訖日期」取資料，讓畫面看到的＝報表內容＝請款金額
-      const reportFilter = () => ({ from: filter.from, to: filter.to, section: filter.section });
-      const spansMonths = () => rocMonth(filter.from) !== rocMonth(filter.to);
-
       const exportOneReport = async (customerFacing, setBuilding, label) => {
         if (!CONFIGURED) { alert('請先設定後端連線'); return; }
         // 應點檢/完成率是以「當月店鋪名單」為分母，跨月的完成率沒有明確定義，故限制在同一月份內
@@ -1270,7 +1273,7 @@
           if (!report.obsList || !report.obsList.length) report.obsList = defaultObsList();
           const wb = new ExcelJS.Workbook();
           if (!customerFacing) addPlainSheet(wb, '不及格店', buildFailStoreSheet(report));
-          buildRosterCheckSheet(wb, report, customerFacing);
+          buildRosterCheckSheet(wb, report, customerFacing, filter);
           addPlainSheet(wb, 'SQC Google點檢表單', buildRawFormSheet(report));
           const weekly = buildWeeklyScoreSheet(report, customerFacing);
           styleWeeklySheet(addPlainSheet(wb, 'SQC週彙總表', weekly.aoa, weekly.merges), weekly);
