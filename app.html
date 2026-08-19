@@ -25,7 +25,7 @@
 
   <script type="text/jsx" id="appCode">
     const { useState, useMemo, useEffect, useRef } = React;
-    const APP_VERSION = '20260819-1245'; // 每次部署更新，用來確認瀏覽器跑的是哪一版
+    const APP_VERSION = '20260819-1610'; // 每次部署更新，用來確認瀏覽器跑的是哪一版
 
     // 全域錯誤攔截：任何未預期錯誤（含 async 事件處理器的未捕捉 rejection）都要顯示出來，
     // 否則按鈕會「按了沒反應」而完全查不到原因
@@ -805,8 +805,45 @@
 
 
 
+    /**
+     * 請款金額活頁簿：依 buildBillingSheets 回報的 frames 畫滿格線（含範圍內沒有資料的儲存格）。
+     * 抽成獨立函式是為了能在真實瀏覽器裡驗證產出的 xlsx，而不是只在 Node 驗算資料。
+     */
+    const buildBillingWorkbook = (out) => {
+      const wb = new ExcelJS.Workbook();
+      const border = thinBorder();
+      const moneyFmt = (ws) => { ws.eachRow(row => row.eachCell(c => { if (typeof c.value === 'number' && c.value >= 1000) c.numFmt = '#,##0'; })); };
+      const applyFrames = (ws, frames) => {
+        (frames || []).forEach(f => {
+          for (let r = f.r1 + 1; r <= f.r2 + 1; r++) {               // frames 為0-based，Excel為1-based
+            for (let c = f.c1 + 1; c <= f.c2 + 1; c++) ws.getRow(r).getCell(c).border = border;
+          }
+        });
+      };
+      const add = (name, sheet) => {
+        const ws = addPlainSheet(wb, name, sheet.aoa);
+        moneyFmt(ws);
+        applyFrames(ws, sheet.frames);
+        ws.properties.dyDescent = 0.25;                              // 避免 Excel 開檔重算列高
+        ws.eachRow({ includeEmpty: true }, row => { row.height = 18; });
+        applyFontAndCenter(ws);
+        return ws;
+      };
+      const wsCust = add('請款明細(客戶)', out.客戶);
+      // 明細表的「店號」欄鎖成文字格式，避免 Excel 又把 022320 轉成數字 22,320
+      const noRow = out.客戶.aoa.findIndex(r => r[0] === 'NO');
+      if (noRow >= 0) {
+        const codeCol = out.客戶.aoa[noRow].indexOf('店號') + 1;
+        for (let r = noRow + 2; r <= out.客戶.aoa.length; r++) wsCust.getRow(r).getCell(codeCol).numFmt = '@';
+      }
+      add('請款明細(內部)', out.內部);
+      Object.keys(out.各課).forEach(n => add(n, out.各課[n]));
+      return wb;
+    };
+
     window.SqcReport = { buildRawFormSheet, buildDailyCountBlock, buildBatchBlock, buildKpiBlock,
-      buildFailStoreSheet, addPlainSheet, styleWeeklySheet, buildRosterCheckSheet, buildWeeklyScoreSheet }; // 供離線驗證報表排版用
+      buildFailStoreSheet, addPlainSheet, styleWeeklySheet, buildRosterCheckSheet, buildWeeklyScoreSheet,
+      buildBillingWorkbook, thinBorder, applyFontAndCenter }; // 供離線驗證報表排版用
 
     // ============================================================
     // 點檢項目列
@@ -916,6 +953,7 @@
       const [bootErr, setBootErr] = useState('');
       const [bootWarn, setBootWarn] = useState(''); // 用快取撐著時的提示（非阻斷式）
       const [bootAt, setBootAt] = useState(null);   // 目前這份開場資料是何時取得的（供現場判斷名單夠不夠新）
+      const [gasVer, setGasVer] = useState('');     // 後端版本；貼上 程式碼.gs 卻沒重新部署時，這裡不會變
       const fmtStamp = (ts) => {
         if (!ts) return '';
         const d = new Date(ts);
@@ -936,6 +974,7 @@
         applyBoot(b, mo);
         writeBootCache(mo, b);
         setBootErr(''); setBootWarn(''); setBootAt(Date.now());
+        setGasVer(b.gasVersion || '(舊版後端)');
         return b;
       }); };
       const loadInspected = (m) => {
@@ -948,7 +987,7 @@
       useEffect(() => {
         if (!CONFIGURED) return;
         const cached = readBootCache(workMonth);
-        if (cached && cached.b) { applyBoot(cached.b, workMonth); setBootAt(cached.at || null); setLoading(false); } // 先用快取讓畫面立即可用
+        if (cached && cached.b) { applyBoot(cached.b, workMonth); setBootAt(cached.at || null); setGasVer(cached.b.gasVersion || '(舊版後端)'); setLoading(false); } // 先用快取讓畫面立即可用
         else { setBootAt(null); setLoading(true); }
         reloadBoot(workMonth)
           .catch(e => {
@@ -1377,18 +1416,7 @@
         try {
           const { report, reportMonth } = ask;
           const out = SqcBilling.buildBillingSheets(report, report.pricing, ask.offshore, { from: filter.from, to: filter.to });
-          const wb = new ExcelJS.Workbook();
-          const moneyFmt = (ws) => { ws.eachRow(row => row.eachCell(c => { if (typeof c.value === 'number' && c.value >= 1000) c.numFmt = '#,##0'; })); };
-          const add = (name, aoa) => { const ws = addPlainSheet(wb, name, aoa); moneyFmt(ws); return ws; };
-          const wsCust = add('請款明細(客戶)', out.客戶);
-          // 明細表的「店號」欄鎖成文字格式，避免 Excel 又把 022320 轉成數字 22,320
-          const noRow = out.客戶.findIndex(r => r[0] === 'NO');
-          if (noRow >= 0) {
-            const codeCol = out.客戶[noRow].indexOf('店號') + 1;
-            for (let r = noRow + 2; r <= out.客戶.length; r++) wsCust.getRow(r).getCell(codeCol).numFmt = '@';
-          }
-          add('請款明細(內部)', out.內部);
-          Object.keys(out.各課).forEach(n => add(n, out.各課[n]));
+          const wb = buildBillingWorkbook(out);
 
           const fromMMDD = (filter.from || '').replace(/-/g, '').slice(4);
           const toMMDD = (filter.to || '').replace(/-/g, '').slice(4);
@@ -1456,7 +1484,12 @@
               <div className="text-xs text-slate-400 flex items-center gap-2 px-1">
                 <span>資料更新時間：{fmtStamp(bootAt)}</span>
                 <span className="text-slate-300">|</span>
-                <span title="程式版本，回報問題時請一併提供">版本 {APP_VERSION}</span>
+                <span title="前端版本，回報問題時請一併提供">前端 {APP_VERSION}</span>
+                <span className="text-slate-300">|</span>
+                <span title="後端版本；若與前端不同版，表示 程式碼.gs 還沒貼上或貼了但沒重新部署"
+                  className={gasVer && gasVer !== APP_VERSION ? 'text-amber-600 font-semibold' : ''}>
+                  後端 {gasVer || '—'}
+                </span>
                 <button onClick={() => { setLoading(true); reloadBoot(workMonth).catch(e => setBootWarn('連線不穩，目前顯示上次載入的資料（' + (e.message || '載入失敗') + '）')).finally(() => setLoading(false)); }} className="underline hover:text-slate-600">重新載入</button>
               </div>
             )}

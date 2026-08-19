@@ -144,28 +144,36 @@
 
     // ---- 分頁1：請款明細(客戶) ----
     var all = computeGroup(stores, p, { includeDocFee: true, includeOffshore: totalOffshore > 0, offshore: totalOffshore });
-    var 客戶 = [];
+    var 客戶 = [], 客戶Frames = [];
     客戶.push([head + ': ' + lab.月 + '月合計檢測 ' + stores.length + '店。']);
+    var f1 = 客戶.length;
     blockRows(null, all, p.稅率).forEach(function (r) { 客戶.push(r); });
+    客戶Frames.push({ r1: f1, c1: 0, r2: 客戶.length - 1, c2: 5 }); // 請款總表：項目~備註
     客戶.push([]); 客戶.push([]);
     客戶.push([lab.月 + '月請SQC點檢店明細表']);
+    var f2 = 客戶.length;
     客戶.push(['NO', '營業部', '營業課別', '店號', '店名', '營業擔當', '店型態', '假日', '遠程', '部別', '課別']);
     stores.forEach(function (s, i) {
       客戶.push([i + 1, s.營業部, s.營業課別, s.店號文字, s.店名, s.營業擔當, s.店型態,
         isYes(s.假日店) ? 'V' : '', isYes(s.遠程店) ? 'V' : '', s.主責部, s.主責課]);
     });
+    客戶Frames.push({ r1: f2, c1: 0, r2: 客戶.length - 1, c2: 10 }); // 逐店明細：NO~課別
 
     // ---- 分頁2：請款明細(內部)：全部合計 + 各部 ----
-    var 內部 = [];
+    var 內部 = [], 內部Frames = [];
     內部.push([head + ': ' + lab.月 + '月合計檢測 ' + stores.length + '店。']);
+    var fi = 內部.length;
     blockRows(null, all, p.稅率).forEach(function (r) { 內部.push(r); });
+    內部Frames.push({ r1: fi, c1: 0, r2: 內部.length - 1, c2: 5 });
     grouped.deptOrder.forEach(function (d) {
       var g = computeGroup(grouped.byDept[d].all, p, {
         includeDocFee: d === DOC_FEE_DEPT,
         includeOffshore: false,
       });
       內部.push([]); 內部.push([]); 內部.push([]);
+      var fd = 內部.length + 1; // +1：跳過區塊標題列（標題不加框）
       blockRows(head + ':盤點中心' + d, g, p.稅率).forEach(function (r) { 內部.push(r); });
+      內部Frames.push({ r1: fd, c1: 0, r2: 內部.length - 1, c2: 5 });
     });
 
     // ---- 分頁3+：各部的各課明細 ----
@@ -173,14 +181,16 @@
     var mainDepts = grouped.deptOrder.filter(function (d) { return d !== DOC_FEE_DEPT; });
     mainDepts.forEach(function (d, di) {
       var gd = grouped.byDept[d];
-      var left = [];
+      var left = [], frames = [];
       left.push([head + ':盤點中心' + d]);
       gd.sectionOrder.forEach(function (c, ci) {
         var offAmt = Number(off[c]) || 0;
         var g = computeGroup(gd.sections[c], p, { includeDocFee: false, includeOffshore: true, offshore: offAmt });
         if (ci > 0) { left.push([]); left.push([]); }
-        left.push([c]);
+        left.push([c]);                 // 課別標題列（不加框）
+        var fs = left.length;
         blockRows(null, g, p.稅率).forEach(function (r) { left.push(r); });
+        frames.push({ r1: fs, c1: 0, r2: left.length - 1, c2: 5 });
       });
 
       // 右側彙總矩陣
@@ -222,10 +232,25 @@
         right2.push(['合計', s2.家數, s2.未稅 + docNet, s2.稅金 + docTax, s2.總計 + docNet + docTax]);
       }
 
-      各課['請款明細(' + d + '各課)'] = mergeSideBySide(left, right, right2);
+      // 右段欄位起點：左表6欄 + 空1欄 = 第7欄(0-based)
+      var R1 = 6 + 1;
+      frames.push({ r1: 1, c1: R1, r2: 3, c2: R1 + 3 });                       // 合計/稅金/總計 小塊
+      frames.push({ r1: 5, c1: R1, r2: right.length - 1, c2: R1 + 4 });        // 課別×金額 彙總矩陣
+      if (right2.length) {
+        var rightW = right.reduce(function (m, r) { return Math.max(m, r.length); }, 0);
+        var R2 = R1 + rightW + 1;                                              // 再空1欄後接業務部矩陣
+        frames.push({ r1: 1, c1: R2, r2: 3, c2: R2 + 3 });
+        frames.push({ r1: 5, c1: R2, r2: right2.length - 1, c2: R2 + 4 });
+      }
+      各課['請款明細(' + d + '各課)'] = { aoa: mergeSideBySide(left, right, right2), frames: frames };
     });
 
-    return { 客戶: 客戶, 內部: 內部, 各課: 各課, 家數: stores.length, 總表: all, pricing: p };
+    return {
+      客戶: { aoa: 客戶, frames: 客戶Frames },
+      內部: { aoa: 內部, frames: 內部Frames },
+      各課: 各課,
+      家數: stores.length, 總表: all, pricing: p,
+    };
   }
 
   function totalOffshoreOf(gd, off) {

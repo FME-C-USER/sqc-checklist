@@ -7,6 +7,11 @@
  * 設定與活頁結構見 setup.gs / 資料結構_GoogleSheet.md
  */
 
+// 後端版本：每次修改本檔就更新，並於前端「資料更新時間」旁顯示。
+// 用途：貼上程式碼後若忘記「部署 → 管理部署作業 → 新版本」，畫面上的後端版本就不會變，
+//       可立即分辨是「沒貼上」「貼了但沒部署」還是「已生效」。
+var GAS_VERSION = '20260819-1610';
+
 var SPREADSHEET_ID = '1GRZZsZRgakMGENspOxmlx96NfckC8UYOe0ipuNNEoh0';
 var DRIVE_ROOT_ID  = '122nQjldImn5Zh5AUguxZF0YzobThgdc9';
 var AUTH_API       = 'https://eip.fme.com.tw/FMEIP/AasApi/CheckUserId';
@@ -16,7 +21,7 @@ var AUTH_API       = 'https://eip.fme.com.tw/FMEIP/AasApi/CheckUserId';
 // 前端送 POST，Content-Type: text/plain（避開 CORS 預檢），body = {action, payload}
 // ============================================================
 function doGet() {
-  return json({ ok: true, service: 'SQC API', time: nowStr() });
+  return json({ ok: true, service: 'SQC API', version: GAS_VERSION, time: nowStr() });
 }
 
 function doPost(e) {
@@ -163,6 +168,7 @@ function getBootstrap(month, section) {
   ensureMonth(month); // 開啟某月即自動建齊該月所有活頁
   return {
     month: month,
+    gasVersion: GAS_VERSION,   // 供前端顯示，用來確認後端是否已部署到最新版
     passScore: Number(getSetting('及格分數') || 85),
     checklist: getChecklist(month),
     observations: getObservations(month),

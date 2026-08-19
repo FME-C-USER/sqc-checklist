@@ -103,7 +103,7 @@ assertEqual(billing.storeTypeOf('是', '否'), '平日遠程店', '店型態：�
 assertEqual(billing.storeTypeOf('否', '是'), '假日店', '店型態：假日→假日店');
 assertEqual(billing.storeTypeOf('是', '是'), '假日遠程店', '店型態：遠程+假日→假日遠程店');
 const typeCount = {};
-out.客戶.slice(14).forEach(r => { if (r[3]) typeCount[r[6]] = (typeCount[r[6]] || 0) + 1; });
+out.客戶.aoa.slice(14).forEach(r => { if (r[3]) typeCount[r[6]] = (typeCount[r[6]] || 0) + 1; });
 assertEqual(typeCount, { '一般店': 1456, '平日遠程店': 107 }, '客戶明細的店型態分佈應與人工版一致');
 
 // ===== 5. 假日店計價（人工版6月無假日店，用合成資料驗證單價套用）=====
@@ -130,11 +130,36 @@ const codeOut = billing.buildBillingSheets({
     { 店號: '0173', 店名: 'C店', 主責部: '一部', 主責課: '北一課', 遠程店: '否', 假日店: '否' },
   ],
 }, null, {}, { from: '2026-08-01', to: '2026-08-31' });
-const nrow = codeOut.客戶.findIndex(r => r[0] === 'NO');
-const ccol = codeOut.客戶[nrow].indexOf('店號');
-const codes = codeOut.客戶.slice(nrow + 1).filter(r => r[ccol]).map(r => r[ccol]);
+const nrow = codeOut.客戶.aoa.findIndex(r => r[0] === 'NO');
+const ccol = codeOut.客戶.aoa[nrow].indexOf('店號');
+const codes = codeOut.客戶.aoa.slice(nrow + 1).filter(r => r[ccol]).map(r => r[ccol]);
 assertEqual(codes, ['022320', '024019', '000173'], '店號應補成6碼');
 assertEqual(codes.map(c => typeof c), ['string', 'string', 'string'], '店號應為字串(文字格式)，不可為數字');
+
+// ===== 8. 表格框線範圍：需精準框住每個表格（含範圍內空白格），不可塗到區塊間的分隔欄 =====
+console.log('');
+const frOut = billing.buildBillingSheets({
+  rows: [
+    { 店號: '022320', 店名: 'A店', 主責部: '一部', 主責課: '北一課', 遠程店: '否', 假日店: '否' },
+    { 店號: '025145', 店名: 'C店', 主責部: '二部', 主責課: '台中課', 遠程店: '否', 假日店: '否' },
+    { 店號: '020453', 店名: 'D店', 主責部: '業務部', 主責課: '業務課', 遠程店: '否', 假日店: '否' },
+  ],
+}, null, {}, { from: '2026-08-01', to: '2026-08-19' });
+const firstCellOf = (sheet, f) => String((sheet.aoa[f.r1] || [])[f.c1] || '').trim();
+// 每個框線範圍的左上角都必須是表格的表頭，不能框到區塊標題列或空白列
+frOut.客戶.frames.forEach((f, i) => {
+  const v = firstCellOf(frOut.客戶, f);
+  assertEqual(v === '項目' || v === 'NO', true, `客戶分頁框線${i + 1}左上角應為表頭(實際:"${v}")`);
+});
+frOut.內部.frames.forEach((f, i) => {
+  assertEqual(firstCellOf(frOut.內部, f), '項目', `內部分頁框線${i + 1}左上角應為「項目」表頭`);
+});
+assertEqual(frOut.客戶.frames.length, 2, '客戶分頁應有2個表格範圍(總表+逐店明細)');
+assertEqual(frOut.客戶.frames[1].c2, 10, '逐店明細應框到第11欄(課別)');
+const perSec = frOut.各課['請款明細(一部各課)'];
+assertEqual(perSec.frames.filter(f => f.c1 === 0).every(f => f.c2 === 5), true, '各課分頁左表應框到第6欄');
+assertEqual(perSec.frames.filter(f => f.c1 >= 7).length >= 2, true, '各課分頁右側應有合計小塊與彙總矩陣的框線');
+assertEqual(perSec.frames.some(f => f.c1 <= 6 && f.c2 >= 6), false, '左右表之間的分隔欄不可被框線塗到');
 
 console.log(failed === 0 ? '\n✅ 全部通過（與人工版 6 月請款數字一致）' : `\n❌ ${failed} 項失敗`);
 process.exit(failed === 0 ? 0 : 1);

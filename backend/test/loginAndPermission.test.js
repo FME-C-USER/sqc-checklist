@@ -87,5 +87,13 @@ const repMgr = post('buildMonthlyReport', { month: '11508', filter: {} }, mgr.us
 assertEqual(repMgr.ok, true, '管理者應可取得報表資料');
 assertEqual(repMgr.result.pricing.平日點檢費, 245, '管理者應取得請款單價');
 
+// ===== 8. 後端版本要回傳給前端（用來判斷 程式碼.gs 是否已貼上並重新部署）=====
+const bootRes = post('getBootstrap', { month: '11508', section: '' }, anonToken);
+assertEqual(bootRes.ok, true, 'getBootstrap 應可取得');
+assertEqual(typeof bootRes.result.gasVersion === 'string' && bootRes.result.gasVersion.length >= 8, true,
+  'getBootstrap 應回傳 gasVersion，前端才能顯示「後端版本」');
+assertEqual(JSON.parse(ctx.doGet().__text).version, bootRes.result.gasVersion,
+  'doGet 直接開網址時也應顯示同一個後端版本');
+
 console.log(failed === 0 ? '\n✅ 全部通過' : `\n❌ ${failed} 項失敗`);
 process.exit(failed === 0 ? 0 : 1);
