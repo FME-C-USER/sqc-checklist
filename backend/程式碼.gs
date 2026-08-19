@@ -801,7 +801,9 @@ function rowToRecord(r) {
     month: r['題庫版本'], total: r['合計得分'], grade: r['等第'], staffCount: r['在店店員人數'],
     identity: r['簽名身分別'], detail: safeJson(r['明細JSON']), observation: safeJson(r['觀察JSON']),
     photos: safeJson(r['照片JSON']), paperPhotos: String(r['紙本照片'] || '').split(',').filter(Boolean),
-    folderUrl: r['照片資料夾'], createdAt: r['建立時間'], updatedAt: r['更新時間'],
+    // 建立/更新時間必須轉成台北時間字串：Sheet 會把它存成 Date 型別，
+    // 直接回傳會被序列化成 UTC 的 ISO 格式（2026-08-10T07:34:00.000Z），報表的時間戳記就會差8小時
+    folderUrl: r['照片資料夾'], createdAt: toDateTimeStr(r['建立時間']), updatedAt: toDateTimeStr(r['更新時間']),
   };
 }
 function safeJson(s) { try { return JSON.parse(s || '{}'); } catch (e) { return {}; } }

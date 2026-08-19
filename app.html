@@ -25,7 +25,7 @@
 
   <script type="text/jsx" id="appCode">
     const { useState, useMemo, useEffect, useRef } = React;
-    const APP_VERSION = '20260819-1205'; // 每次部署更新，用來確認瀏覽器跑的是哪一版
+    const APP_VERSION = '20260819-1230'; // 每次部署更新，用來確認瀏覽器跑的是哪一版
 
     // 全域錯誤攔截：任何未預期錯誤（含 async 事件處理器的未捕捉 rejection）都要顯示出來，
     // 否則按鈕會「按了沒反應」而完全查不到原因
@@ -573,9 +573,10 @@
       const periodLabel = `${slashMD(filter.from || '')}-${slashMD(filter.to || '')}`;
 
       // 中段：每日店數表；右段：KPI（上）＋梯次表（下），中間空一列分隔
-      const daily = buildDailyCountBlock(report, filter.from, filter.to);
-      const batch = buildBatchBlock(report, periodLabel); // 第二列首欄放期間區間文字（第一列已有「期間」標題）
-      const right = buildKpiBlock(report, periodLabel);
+      // 客戶版只要左邊的名單本體（A~K欄），不含每日店數表、KPI與梯次表（皆為內部管理用）
+      const daily = customerFacing ? [] : buildDailyCountBlock(report, filter.from, filter.to);
+      const batch = customerFacing ? [] : buildBatchBlock(report, periodLabel); // 第二列首欄放期間區間文字（第一列已有「期間」標題）
+      const right = customerFacing ? [] : buildKpiBlock(report, periodLabel);
       const kpiRowCount = right.length;
       if (batch.length) { right.push([], []); batch.forEach(r => right.push(r)); }
 
@@ -584,10 +585,15 @@
       const pad = (arr, w) => { const o = []; for (let i = 0; i < w; i++) o.push(arr && arr[i] != null ? arr[i] : ''); return o; };
       const n = Math.max(rosterRows.length + 1, daily.length, right.length);
 
-      ws.addRow([...head, '', ...pad(daily[0], DAILY_W), '', ...pad(right[0], rightW)]);
-      for (let i = 1; i < n; i++) {
-        ws.addRow([...pad(rosterRows[i - 1], LEFT_W), '', ...pad(daily[i], DAILY_W), '', ...pad(right[i], rightW)]);
-      }
+      // 沒有中/右區塊時（客戶版）不可補分隔空欄，否則會多出空白欄位
+      const rowOf = (leftArr, i) => {
+        const out = pad(leftArr, LEFT_W);
+        if (DAILY_W) out.push('', ...pad(daily[i], DAILY_W));
+        if (rightW) out.push('', ...pad(right[i], rightW));
+        return out;
+      };
+      ws.addRow(rowOf(head, 0));
+      for (let i = 1; i < n; i++) ws.addRow(rowOf(rosterRows[i - 1], i));
 
       // ===== 樣式 =====
       const border = thinBorder();
@@ -689,14 +695,18 @@
       const wideOf = (name) => ({ '序': 5, '既存店號': 10, '店舖名稱': 17, '部別': 10, '課別': 10, '擔當': 10, '地址': 34, '隨盤點': 8 }[name] || 12);
       head.forEach((h, i) => { ws.getColumn(i + 1).width = wideOf(h); });
       if (DAILY_W) for (let c = dailyStart; c <= dailyEnd; c++) ws.getColumn(c).width = 9;
-      ws.getColumn(kpiStart).width = 13;
-      for (let c = kpiStart + 1; c <= kpiEnd - 1; c++) ws.getColumn(c).width = 11;
-      ws.getColumn(kpiEnd).width = 42; // 不及格店名單較長
+      if (rightW) { // 客戶版沒有右段，不可建立多餘欄位
+        ws.getColumn(kpiStart).width = 13;
+        for (let c = kpiStart + 1; c <= kpiEnd - 1; c++) ws.getColumn(c).width = 11;
+        ws.getColumn(kpiEnd).width = 42; // 不及格店名單較長
+      }
 
       ws.properties.dyDescent = 0.25; // 同上：避免 Excel 開檔重算列高
       ws.properties.defaultRowHeight = 18;
       for (let r = 1; r <= n; r++) ws.getRow(r).height = 18; // 列高統一
-      applyFontAndCenter(ws, { [head.indexOf('地址') + 1]: true, [kpiEnd]: true }); // 地址與不及格店名單靠左
+      const leftAlignCols = { [head.indexOf('地址') + 1]: true };
+      if (rightW) leftAlignCols[kpiEnd] = true; // 不及格店名單較長，靠左
+      applyFontAndCenter(ws, leftAlignCols);
       return ws;
     }
 
@@ -955,6 +965,11 @@
 
       // 工號比對一律轉字串：Sheet 會把工號存成數字，下拉選單的值是字串，嚴格比對會找不到人
       const findStaff = (id) => STAFFS.find(s => String(s.id) === String(id));
+      // 觀察區題目的顯示條件（畫面與必填檢核共用同一份判斷，避免兩邊規則走鐘）
+      //   always＝一律顯示｜has＝有對外廁所才顯示｜hasOrClosed＝有或廁所封閉才顯示
+      const obsVisible = (show) => show === 'always' ? true
+        : show === 'has' ? toilet['O1'] === '有'
+          : (toilet['O1'] === '有' || toilet['O1'] === '廁所封閉');
       const sectionStores = STORE_ROSTER.filter(s => !basic.section || s.section === basic.section);
       const store = STORE_ROSTER.find(s => s.code === basic.storeCode);
       const effStore = store || basic.customInfo; // 名單選的 或 自行新增(比對主檔後)的店
@@ -1098,14 +1113,13 @@
         // 紙本點檢表：所有店（含編輯）皆須有紙本，新傳或沿用原有皆可
         if (!paperForm.length && !hasExisting([monthFolder, 'SQC點檢表完成照片'])) { alert('所有店皆須上傳「紙本點檢表」才能送出'); return; }
 
-        // 對外廁所：選「有」時，以下觀察題與符合/不符合皆為必填（不受可否拍照影響）
+        // 觀察區：畫面上看得到的題目全部必填（含「店舖有無對外廁所」本身）
+        for (const o of checklist.toiletObservations) {
+          if (obsVisible(o.show) && !toilet[o.id]) { alert(`觀察區必填：請選擇「${o.name}」`); return; }
+        }
         if (toilet['O1'] === '有') {
-          for (const o of checklist.toiletObservations) {
-            if (o.id === 'O1') continue;
-            if (!toilet[o.id]) { alert(`請填寫「${o.name}」`); return; }
-          }
           for (const t of checklist.toiletInspect) {
-            if (!toilet[t.id]) { alert(`請填寫廁所觀察「${t.name}」`); return; }
+            if (!toilet[t.id]) { alert(`觀察區必填：請選擇廁所觀察「${t.name}」`); return; }
             if (toilet[t.id] === '不符合' && t.opts && t.opts.length && !(toiletReasons[t.id] || []).length) {
               alert(`廁所觀察「${t.name}」為不符合，請選擇不合格項目`); return;
             }
@@ -1578,12 +1592,10 @@
                       <div className="text-sm font-semibold text-slate-600 mb-2">對外廁所觀察記錄</div>
                       <div className="grid md:grid-cols-2 gap-2">
                         {checklist.toiletObservations.map(o => {
-                          const o1 = toilet['O1'];
-                          const visible = o.show === 'always' ? true : o.show === 'has' ? o1 === '有' : (o1 === '有' || o1 === '廁所封閉');
-                          if (!visible) return null;
+                          if (!obsVisible(o.show)) return null;
                           return (
                             <div key={o.id} className="text-sm flex items-center justify-between gap-2">
-                              <span className="text-slate-700">{o.name}</span>
+                              <span className="text-slate-700">{o.name}<span className="text-red-500 ml-1">*</span></span>
                               <div className="flex gap-1 shrink-0">{o.opts.map(v => <button key={v} onClick={() => setToilet({ ...toilet, [o.id]: v })} className={"px-3 py-1 text-xs rounded border " + (toilet[o.id] === v ? "bg-indigo-500 text-white border-indigo-500" : "bg-white text-slate-500 border-slate-300")}>{v}</button>)}</div>
                             </div>
                           );
