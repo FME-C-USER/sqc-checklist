@@ -27,7 +27,9 @@ function doPost(e) {
 
     // ===== 授權閘門：除 login 外皆需有效 token；管理動作再驗管理者 =====
     var OPEN = { login: 1 };
-    var ADMIN_ONLY = { importMaster: 1, upsertItem: 1, deleteItem: 1, upsertRow: 1, deleteRow: 1, getMaster: 1, getChangeLog: 1, buildMonthlyReport: 1 };
+    // buildMonthlyReport 不列管理者專屬：課長版/客戶版所有登入者皆可產出。
+    // 請款金額雖同樣取這份資料，但單價僅回傳給管理者(見 buildMonthlyReport)，且按鈕限管理者顯示。
+    var ADMIN_ONLY = { importMaster: 1, upsertItem: 1, deleteItem: 1, upsertRow: 1, deleteRow: 1, getMaster: 1, getChangeLog: 1 };
     var sess = null;
     if (!OPEN[action]) {
       sess = getSession(req.token);
@@ -46,7 +48,7 @@ function doPost(e) {
       updateRecord: function () { return updateRecord(p.month, p.id, p.record); },
       deleteRecord: function () { return deleteRecord(p.month, p.id); },
       getSummary: function () { return getSummary(p.month, p.filter); },
-      buildMonthlyReport: function () { return buildMonthlyReport(p.month, p.filter); },
+      buildMonthlyReport: function () { return buildMonthlyReport(p.month, p.filter, sess && sess.role === '管理者'); },
       importMaster: function () { return importMaster(p.kind, p.month, p.rows, p.fileName); },
       upsertItem: function () { return upsertItem(p.month, p.item); },
       deleteItem: function () { return deleteItem(p.month, p.id); },
@@ -429,7 +431,7 @@ function getSummary(month, filter) {
 //   把 點檢紀錄_月 的 JSON 明細攤平成「每題一欄」的主表列，
 //   加上部/課/擔當查找與依課別的 KPI 彙總，交給前端組成 xlsx。
 // ============================================================
-function buildMonthlyReport(month, filter) {
+function buildMonthlyReport(month, filter, isManager) {
   var checklist = getChecklist(month);
   var records = queryRecords(month, filter);
   var roster = readSheet('店鋪名單_' + month);
@@ -539,7 +541,7 @@ function buildMonthlyReport(month, filter) {
 
   return {
     passScore: pass,
-    pricing: getPricing(), // 請款單價（放「設定」活頁，調價不必改程式）
+    pricing: isManager ? getPricing() : null, // 請款單價只給管理者（請款金額限管理者產出）
     checklist: checklist.map(function (it) { return { id: it.id, name: it.name, cat: it.cat, max: it.max, type: it.type }; }),
     obsList: obsList,
     deptSectionList: deptSectionList,

@@ -78,5 +78,14 @@ assertEqual(denied.error.indexOf('管理者') >= 0, true, '應提示需管理者
 const allowed = post('getMaster', { kind: 'roster', month: '11508' }, mgr.user.token);
 assertEqual(allowed.ok, true, '管理者呼叫維護專區的API應允許');
 
+// ===== 7. 課長版/客戶版：所有登入者皆可產出；請款單價只給管理者 =====
+const repAnon = post('buildMonthlyReport', { month: '11508', filter: {} }, anonToken);
+assertEqual(repAnon.ok, true, '非管理者應可取得報表資料（課長版/客戶版）');
+assertEqual(repAnon.result.rows.length, 2, '非管理者取得的報表資料應完整');
+assertEqual(repAnon.result.pricing, null, '非管理者不應取得請款單價（請款金額限管理者）');
+const repMgr = post('buildMonthlyReport', { month: '11508', filter: {} }, mgr.user.token);
+assertEqual(repMgr.ok, true, '管理者應可取得報表資料');
+assertEqual(repMgr.result.pricing.平日點檢費, 245, '管理者應取得請款單價');
+
 console.log(failed === 0 ? '\n✅ 全部通過' : `\n❌ ${failed} 項失敗`);
 process.exit(failed === 0 ? 0 : 1);

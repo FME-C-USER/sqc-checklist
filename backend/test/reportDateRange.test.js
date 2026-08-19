@@ -36,21 +36,21 @@ ctx.submitRecord(rec('R2', '12', '000002', 'B店'));
 ctx.submitRecord(rec('R3', '25', '000003', 'C店'));
 
 // ===== 整月：3家 =====
-const full = ctx.buildMonthlyReport('11508', { from: '2026-08-01', to: '2026-08-31' });
+const full = ctx.buildMonthlyReport('11508', { from: '2026-08-01', to: '2026-08-31' }, true);
 assertEqual(full.rows.length, 3, '整月(8/1-8/31)應取到3家');
 const bFull = billing.buildBillingSheets(full, full.pricing, {}, { from: '2026-08-01', to: '2026-08-31' });
 assertEqual(bFull.家數, 3, '整月請款店數應為3');
 assertEqual(bFull.總表.未稅, 3 * 245 + 6500, '整月未稅=3*245+文件處理費6500');
 
 // ===== 上半月：只有2家（這是修正前會失效的關鍵案例）=====
-const half = ctx.buildMonthlyReport('11508', { from: '2026-08-01', to: '2026-08-15' });
+const half = ctx.buildMonthlyReport('11508', { from: '2026-08-01', to: '2026-08-15' }, true);
 assertEqual(half.rows.length, 2, '上半月(8/1-8/15)應只取到2家，不可抓整月');
 const bHalf = billing.buildBillingSheets(half, half.pricing, {}, { from: '2026-08-01', to: '2026-08-15' });
 assertEqual(bHalf.家數, 2, '上半月請款店數應為2');
 assertEqual(bHalf.總表.未稅, 2 * 245 + 6500, '上半月未稅應隨之減少');
 
 // ===== 單日 =====
-const oneDay = ctx.buildMonthlyReport('11508', { from: '2026-08-12', to: '2026-08-12' });
+const oneDay = ctx.buildMonthlyReport('11508', { from: '2026-08-12', to: '2026-08-12' }, true);
 assertEqual(oneDay.rows.length, 1, '單日(8/12)應只取到1家');
 assertEqual(oneDay.rows[0].店名, 'B店', '單日取到的應為當天那家店');
 
@@ -59,10 +59,11 @@ assertEqual(half.kpi[0].應點檢, 3, '應點檢以當月名單為分母，不�
 assertEqual(half.kpi[0].已點檢, 2, '已點檢應依日期範圍計算');
 
 // ===== 單價來自「設定」活頁；未設定時用內建預設 =====
-assertEqual(full.pricing.平日點檢費, 245, '未設定時單價用內建預設245');
+assertEqual(full.pricing.平日點檢費, 245, '未設定時單價用內建預設245（單價僅回傳給管理者）');
+assertEqual(ctx.buildMonthlyReport('11508', {}, false).pricing, null, '非管理者不應取得單價');
 const shSet = ctx.ssBook().getSheetByName('設定');
 shSet.appendRow(['平日點檢費', 260]);
-const priced = ctx.buildMonthlyReport('11508', { from: '2026-08-01', to: '2026-08-31' });
+const priced = ctx.buildMonthlyReport('11508', { from: '2026-08-01', to: '2026-08-31' }, true);
 assertEqual(priced.pricing.平日點檢費, 260, '設定活頁調價後應改用新單價');
 const bPriced = billing.buildBillingSheets(priced, priced.pricing, {}, { from: '2026-08-01', to: '2026-08-31' });
 assertEqual(bPriced.總表.未稅, 3 * 260 + 6500, '調價後金額應跟著變（證明調價不需改程式）');
