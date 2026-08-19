@@ -25,6 +25,23 @@
 
   <script type="text/jsx" id="appCode">
     const { useState, useMemo, useEffect, useRef } = React;
+    const APP_VERSION = '20260819-1040'; // 每次部署更新，用來確認瀏覽器跑的是哪一版
+
+    // 全域錯誤攔截：任何未預期錯誤（含 async 事件處理器的未捕捉 rejection）都要顯示出來，
+    // 否則按鈕會「按了沒反應」而完全查不到原因
+    (function () {
+      const seen = {};
+      const show = (msg, src) => {
+        if (!msg) return;
+        const key = String(msg).slice(0, 200);
+        if (seen[key]) return; // 同一個錯誤只提示一次，避免連續彈窗
+        seen[key] = 1;
+        console.error('[SQC 未預期錯誤]', src, msg);
+        alert('系統發生未預期錯誤，請截圖此訊息回報：\n\n' + String(msg).slice(0, 800));
+      };
+      window.addEventListener('error', (e) => show((e.error && (e.error.stack || e.error.message)) || e.message, 'error'));
+      window.addEventListener('unhandledrejection', (e) => show((e.reason && (e.reason.stack || e.reason.message)) || String(e.reason), 'promise'));
+    })();
 
     // ============================================================
     // 共用：照片壓縮工具（上傳壓縮 + 縮圖預覽）
@@ -1413,6 +1430,8 @@
             {bootAt && !loading && (
               <div className="text-xs text-slate-400 flex items-center gap-2 px-1">
                 <span>資料更新時間：{fmtStamp(bootAt)}</span>
+                <span className="text-slate-300">|</span>
+                <span title="程式版本，回報問題時請一併提供">版本 {APP_VERSION}</span>
                 <button onClick={() => { setLoading(true); reloadBoot(workMonth).catch(e => setBootWarn('連線不穩，目前顯示上次載入的資料（' + (e.message || '載入失敗') + '）')).finally(() => setLoading(false)); }} className="underline hover:text-slate-600">重新載入</button>
               </div>
             )}
