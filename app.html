@@ -25,7 +25,7 @@
 
   <script type="text/jsx" id="appCode">
     const { useState, useMemo, useEffect, useRef } = React;
-    const APP_VERSION = '20260819-1040'; // 每次部署更新，用來確認瀏覽器跑的是哪一版
+    const APP_VERSION = '20260819-1115'; // 每次部署更新，用來確認瀏覽器跑的是哪一版
 
     // 全域錯誤攔截：任何未預期錯誤（含 async 事件處理器的未捕捉 rejection）都要顯示出來，
     // 否則按鈕會「按了沒反應」而完全查不到原因
@@ -526,6 +526,9 @@
       for (let c = m.subNoteStart + 1; c <= m.totalCols; c++) W[c] = 24;         // 缺失子項(機台/垃圾桶區域)
       Object.keys(W).forEach(c => { ws.getColumn(Number(c)).width = W[c]; });
 
+      // dyDescent 必須是合理小數(0~1)。ExcelJS 預設寫 55，Excel 會判定格式異常而在
+      // 「開檔時重算整張表的列高」，這正是列高一直變成 12 的根本原因
+      ws.properties.dyDescent = 0.25;
       ws.properties.defaultRowHeight = 18; // 連未明確設定的列也是18
       for (let r = 1; r <= rowsTotal; r++) ws.getRow(r).height = 18; // 全表列高統一18
       applyFontAndCenter(ws);
@@ -563,7 +566,9 @@
         const tail = rec ? [mmdd(rec.點檢時間), '已點檢'] : ['', '未點檢'];
         return customerFacing
           ? [...common, s.預排梯次 || '', ...tail]
-          : [...common, rec ? rec.主責課 : '', rec ? rec.點檢人員 : '', rec ? s.預排梯次 : '', rec ? rec.主責課 : '', s.預排梯次 || '', ...tail];
+          // 「主責課」一律取店鋪名單的課別（該店本月的盤點責任歸屬，未點檢也該有值）；
+          // 「實際點檢課/人員/梯次」才是有點檢才填
+          : [...common, rec ? rec.主責課 : '', rec ? rec.點檢人員 : '', rec ? s.預排梯次 : '', s.課別 || '', s.預排梯次 || '', ...tail];
       });
       const periodLabel = `${slashMD(filter.from || '')}-${slashMD(filter.to || '')}`;
 
@@ -688,6 +693,7 @@
       for (let c = kpiStart + 1; c <= kpiEnd - 1; c++) ws.getColumn(c).width = 11;
       ws.getColumn(kpiEnd).width = 42; // 不及格店名單較長
 
+      ws.properties.dyDescent = 0.25; // 同上：避免 Excel 開檔重算列高
       ws.properties.defaultRowHeight = 18;
       for (let r = 1; r <= n; r++) ws.getRow(r).height = 18; // 列高統一
       applyFontAndCenter(ws, { [head.indexOf('地址') + 1]: true, [kpiEnd]: true }); // 地址與不及格店名單靠左
