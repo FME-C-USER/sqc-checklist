@@ -179,3 +179,80 @@ function ensureSheet(name, headers) {
   }
   return sh;
 }
+
+// ============================================================
+// 一次性維護：清理 Drive 上「同資料夾同檔名」的重複照片
+//   背景：2026-08-20 照片直傳因缺少 Origin 標頭而被瀏覽器 CORS 擋掉，但 Drive 其實
+//         已寫入成功（回應 200），前端讀不到回應就每 15~60 秒重試一次 →
+//         同一張照片在同一個資料夾裡被寫入很多份。
+//   保留規則：每組同名檔案只保留「建立時間最早」的一份，其餘移到垃圾桶（可還原）。
+//
+//   用法（在 Apps Script 編輯器選函式後按執行，結果看「執行記錄」）：
+//     1. reportDuplicatePhotos('115年08月')            ← 先只掃描列出，不會刪任何東西
+//     2. 確認清單無誤後再執行
+//        removeDuplicatePhotos('115年08月', true)      ← 實際移入垃圾桶
+//   月份資料夾名稱請填照片實際存放的那一層（例如 115年08月）；
+//   留空會掃整個照片根資料夾，檔案多時可能執行逾時，不建議。
+// ============================================================
+
+function reportDuplicatePhotos(monthFolderName) {
+  return dupPhotos_(monthFolderName, false);
+}
+
+function removeDuplicatePhotos(monthFolderName, doDelete) {
+  if (doDelete !== true) {
+    Logger.log('保護機制：要實際刪除請明確傳入 true → removeDuplicatePhotos(\'115年08月\', true)');
+    return dupPhotos_(monthFolderName, false);
+  }
+  return dupPhotos_(monthFolderName, true);
+}
+
+function dupPhotos_(monthFolderName, doDelete) {
+  var start = DriveApp.getFolderById(DRIVE_ROOT_ID);
+  if (monthFolderName) {
+    var it = start.getFoldersByName(String(monthFolderName));
+    if (!it.hasNext()) {
+      Logger.log('找不到資料夾：' + monthFolderName);
+      return { scanned: 0, duplicates: 0, deleted: 0, detail: [], error: '找不到資料夾：' + monthFolderName };
+    }
+    start = it.next();
+  }
+
+  var groups = {}, scanned = 0;
+  walkFolderFiles_(start, start.getName(), function (file, pathStr) {
+    scanned++;
+    var key = pathStr + '/' + file.getName();     // 同路徑同檔名才算重複
+    if (!groups[key]) groups[key] = [];
+    groups[key].push(file);
+  });
+
+  var detail = [], dupCount = 0, deleted = 0;
+  Object.keys(groups).sort().forEach(function (k) {
+    var arr = groups[k];
+    if (arr.length < 2) return;
+    arr.sort(function (a, b) { return a.getDateCreated() - b.getDateCreated(); }); // 最早的排前面
+    dupCount += arr.length - 1;
+    detail.push(k + ' → ' + arr.length + ' 份，保留最早1份、處理 ' + (arr.length - 1) + ' 份');
+    if (doDelete) {
+      for (var i = 1; i < arr.length; i++) { arr[i].setTrashed(true); deleted++; }
+    }
+  });
+
+  Logger.log((doDelete ? '【已移入垃圾桶】' : '【僅掃描，未刪除任何檔案】')
+    + ' 範圍：' + start.getName()
+    + '｜掃描檔案 ' + scanned + ' 個｜重複 ' + dupCount + ' 份'
+    + (doDelete ? '｜已處理 ' + deleted + ' 份' : '')
+    + (detail.length ? '\n' + detail.join('\n') : '\n（沒有發現重複檔案）'));
+  return { scanned: scanned, duplicates: dupCount, deleted: deleted, detail: detail };
+}
+
+/** 遞迴走訪資料夾內所有檔案；pathStr 為「資料夾/子資料夾」相對路徑 */
+function walkFolderFiles_(folder, pathStr, onFile) {
+  var files = folder.getFiles();
+  while (files.hasNext()) onFile(files.next(), pathStr);
+  var subs = folder.getFolders();
+  while (subs.hasNext()) {
+    var sub = subs.next();
+    walkFolderFiles_(sub, pathStr + '/' + sub.getName(), onFile);
+  }
+}
