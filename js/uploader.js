@@ -1,46 +1,38 @@
 // ============================================================
 // SQC 背景上傳器 — 把 IndexedDB photoQueue 的照片「直傳 Drive」
-//   - 用 GAS getDriveToken() 取 OAuth 權杖（快取 ~45 分）
-//   - multipart 上傳到 Drive API（繞過 GAS，速度快、免執行時間上限）
+//   - 由後端 createUploadSessions() 取得「可續傳上傳」網址（一個網址只能寫一個檔）
+//   - 直接 PUT 到該網址（繞過 GAS，速度快、免執行時間上限），瀏覽器端不持有任何權杖
 //   - 平行 3 張、失敗指數退避、監聽 online 自動補傳
+//
+// 為什麼不再用 getDriveToken()（2026-08 資安檢測 High 項目）：
+//   那支 API 會把腳本的 OAuth 權杖交給瀏覽器，權限涵蓋擁有者「整個雲端硬碟與所有試算表」，
+//   任何登入者在開發者工具就能取得。改用工作階段網址後，前端能做的只有
+//   「把位元組寫進後端指定的那一個檔案」。
 // ============================================================
 (function () {
   const CONCURRENCY = 3;
-  const DRIVE_UPLOAD = 'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id';
-  let _token = null, _tokenAt = 0;
   let _running = false;
-  const _folderCache = {};       // pathKey -> folderId
   const _listeners = new Set();
 
   const emit = () => _listeners.forEach((fn) => { try { fn(); } catch (e) {} });
   const onChange = (fn) => { _listeners.add(fn); return () => _listeners.delete(fn); };
 
-  async function token() {
-    if (_token && Date.now() - _tokenAt < 45 * 60 * 1000) return _token;
-    const r = await window.SqcApi.getDriveToken();
-    _token = r.token; _tokenAt = Date.now();
-    return _token;
+  // 一次為整批照片取上傳網址（一次往返，不是每張一次）
+  async function sessionsFor(list) {
+    const r = await window.SqcApi.createUploadSessions(
+      list.map((p) => ({ pathParts: p.pathParts || [], name: p.name })));
+    return (r && r.sessions) || [];
   }
 
-  async function folderId(pathParts) {
-    const key = pathParts.join('/');
-    if (_folderCache[key]) return _folderCache[key];
-    const r = await window.SqcApi.getUploadFolderId(pathParts);
-    _folderCache[key] = r.folderId;
-    return r.folderId;
-  }
-
-  async function uploadOne(photo) {
-    const fid = await folderId(photo.pathParts);
-    const meta = { name: photo.name, parents: [fid] };
-    const boundary = 'sqc' + Math.random().toString(16).slice(2);
-    const head = `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(meta)}\r\n--${boundary}\r\nContent-Type: image/jpeg\r\n\r\n`;
-    const tail = `\r\n--${boundary}--`;
-    const body = new Blob([head, photo.blob, tail], { type: `multipart/related; boundary=${boundary}` });
-    const res = await fetch(DRIVE_UPLOAD, {
-      method: 'POST',
-      headers: { Authorization: 'Bearer ' + (await token()), 'Content-Type': `multipart/related; boundary=${boundary}` },
-      body,
+  async function uploadOne(photo, session) {
+    if (!session || !session.ok || !session.url) {
+      throw new Error((session && session.error) || '未取得上傳網址');
+    }
+    // 工作階段網址本身即帶授權，不可再加 Authorization 標頭
+    const res = await fetch(session.url, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'image/jpeg' },
+      body: photo.blob,
     });
     if (!res.ok) throw new Error('Drive 上傳失敗 ' + res.status);
     const data = await res.json();
@@ -55,9 +47,22 @@
       let pend = await window.SqcDB.pendingPhotos();
       while (pend.length && navigator.onLine) {
         const batch = pend.slice(0, CONCURRENCY);
-        await Promise.all(batch.map(async (p) => {
+        // 取不到上傳網址(後端未部署/連線不穩)：整批記次退避，跳出本輪等 setInterval 再試，
+        // 照片仍留在 IndexedDB 佇列中，不會遺失
+        let sessions;
+        try {
+          sessions = await sessionsFor(batch);
+        } catch (e) {
+          await Promise.all(batch.map((p) => {
+            const tries = (p.tries || 0) + 1;
+            return window.SqcDB.updatePhoto({ ...p, tries, error: String(e.message || e), nextAt: Date.now() + Math.min(60000, 2000 * tries) });
+          }));
+          emit();
+          break;
+        }
+        await Promise.all(batch.map(async (p, i) => {
           try {
-            const fileId = await uploadOne(p);
+            const fileId = await uploadOne(p, sessions[i]);
             await window.SqcDB.updatePhoto({ ...p, status: 'done', fileId, error: '' });
           } catch (e) {
             const tries = (p.tries || 0) + 1;

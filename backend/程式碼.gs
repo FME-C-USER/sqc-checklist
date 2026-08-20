@@ -1,8 +1,8 @@
 /**
  * SQC 評核系統 — GAS 後端 API
  * ------------------------------------------------------------
- * 前端以 google.script.run 呼叫下列函式。照片由前端「直傳 Drive」
- * （用 getDriveToken() 取得的權杖），本檔只負責資料夾建立與資料表存取。
+ * 前端以 fetch 呼叫下列函式。照片由前端「直傳 Drive」，但上傳網址由後端
+ * createUploadSessions() 建立（權杖不離開後端），本檔負責資料夾建立與資料表存取。
  *
  * 設定與活頁結構見 setup.gs / 資料結構_GoogleSheet.md
  */
@@ -10,7 +10,7 @@
 // 後端版本：每次修改本檔就更新，並於前端「資料更新時間」旁顯示。
 // 用途：貼上程式碼後若忘記「部署 → 管理部署作業 → 新版本」，畫面上的後端版本就不會變，
 //       可立即分辨是「沒貼上」「貼了但沒部署」還是「已生效」。
-var GAS_VERSION = '20260819-1610';
+var GAS_VERSION = '20260820-0950';
 
 var SPREADSHEET_ID = '1GRZZsZRgakMGENspOxmlx96NfckC8UYOe0ipuNNEoh0';
 var DRIVE_ROOT_ID  = '122nQjldImn5Zh5AUguxZF0YzobThgdc9';
@@ -45,8 +45,7 @@ function doPost(e) {
     var routes = {
       login: function () { return login(p.userId, p.password); },
       getBootstrap: function () { return getBootstrap(p.month, p.section); },
-      getDriveToken: function () { return { token: getDriveToken() }; },
-      getUploadFolderId: function () { return { folderId: getUploadFolderId(p.pathParts) }; },
+      createUploadSessions: function () { return { sessions: createUploadSessions(p.items) }; },
       submitRecord: function () { return submitRecord(p.record); },
       attachPhotoLinks: function () { return attachPhotoLinks(p.month, p.recordId, p.links); },
       queryRecords: function () { return { records: queryRecords(p.month, p.filter) }; },
@@ -261,8 +260,44 @@ function getStores(month, section) {
 // ============================================================
 // Drive：發權杖 + 建立/快取資料夾（供前端直傳）
 // ============================================================
-function getDriveToken() {
-  return ScriptApp.getOAuthToken();
+/**
+ * 為每張照片建立 Drive「可續傳上傳(resumable)」工作階段，只把單檔上傳網址交給瀏覽器。
+ *
+ * 為什麼不能直接把權杖給前端（2026-08 資安檢測 High 項目）：
+ *   ScriptApp.getOAuthToken() 的權限範圍是本腳本申請的全部範圍（drive + spreadsheets），
+ *   等於腳本擁有者「整個雲端硬碟與所有試算表」的存取權。任何登入者只要在瀏覽器
+ *   開發者工具取得該權杖，就能繞過本系統存取與 SQC 無關的檔案。
+ * 工作階段網址的權限則只限「寫入它所對應的那一個檔案」，且上傳完即失效，範圍最小。
+ *
+ * items: [{ pathParts: [...], name: '檔名.jpg' }]
+ * 回傳與 items 等長的陣列：{ ok: true, url } 或 { ok: false, error }
+ */
+var UPLOAD_SESSION_MAX = 20; // 一次最多開幾個，避免 UrlFetchApp 逾時
+
+function createUploadSessions(items) {
+  items = (items || []).slice(0, UPLOAD_SESSION_MAX);
+  if (!items.length) return [];
+  var token = ScriptApp.getOAuthToken(); // 只在伺服器端使用，不回傳給前端
+  var reqs = items.map(function (it) {
+    var folderId = getUploadFolderId(it.pathParts || []);
+    return {
+      url: 'https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&fields=id',
+      method: 'post',
+      contentType: 'application/json; charset=UTF-8',
+      headers: { Authorization: 'Bearer ' + token, 'X-Upload-Content-Type': 'image/jpeg' },
+      payload: JSON.stringify({ name: String(it.name || 'photo.jpg'), parents: [folderId] }),
+      muteHttpExceptions: true,
+    };
+  });
+  var res = UrlFetchApp.fetchAll(reqs);
+  return res.map(function (r) {
+    var code = r.getResponseCode();
+    if (code >= 300) return { ok: false, error: 'Drive 建立上傳工作階段失敗（' + code + '）' };
+    var h = r.getAllHeaders() || {};
+    var loc = h['Location'] || h['location'] || '';
+    if (loc && typeof loc !== 'string' && loc.length) loc = loc[0]; // 重複標頭會回陣列
+    return loc ? { ok: true, url: String(loc) } : { ok: false, error: 'Drive 未回傳上傳網址' };
+  });
 }
 
 /** 依 [月份, 題目, 區域...] 取得目標資料夾 ID（自動建立、Script Properties 快取）

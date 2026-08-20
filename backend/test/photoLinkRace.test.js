@@ -15,21 +15,29 @@ function assertEqual(actual, expected, label) {
 }
 
 /** 載入 uploader.js，注入假的 SqcApi/SqcDB；recordExists 控制後端是否已有該筆紀錄 */
-function loadUploader({ recordExists }) {
+function loadUploader({ recordExists, sessionFails }) {
+  sessionFails = sessionFails || (() => false);
   const photos = new Map();
   const calls = [];
+  const uploads = [];
   const sandbox = {
     console, setTimeout, clearTimeout, setInterval: () => 0, clearInterval: () => {},
     navigator: { onLine: true },
     Blob: class { constructor(parts) { this.parts = parts; } },
-    fetch: async () => ({ ok: true, json: async () => ({ id: 'FILE_' + (calls.length + 1) }) }),
+    fetch: async (url, init) => {
+      uploads.push({ url, init });   // 供驗證：瀏覽器端不可帶 Authorization 標頭
+      return { ok: true, json: async () => ({ id: 'FILE_' + uploads.length }) };
+    },
     document: { addEventListener: () => {}, visibilityState: 'visible' },
   };
   sandbox.window = sandbox;
   sandbox.addEventListener = () => {};
   sandbox.SqcApi = {
-    getDriveToken: async () => ({ token: 'tok' }),
-    getUploadFolderId: async () => ({ folderId: 'folder1' }),
+    // 後端只回單檔上傳網址，不再回傳 OAuth 權杖
+    createUploadSessions: async (items) => {
+      if (sessionFails()) throw new Error('未知動作：createUploadSessions');   // 模擬後端尚未部署新版
+      return { sessions: items.map((it, i) => ({ ok: true, url: 'https://upload.example/session/' + i + '?name=' + it.name })) };
+    },
     attachPhotoLinks: async (month, recordId, links) => {
       calls.push({ month, recordId, links });
       // 模擬後端：紀錄還不存在時回 ok:false（envelope 層是成功的，所以不會 throw）
@@ -46,7 +54,7 @@ function loadUploader({ recordExists }) {
   vm.createContext(sandbox);
   const src = fs.readFileSync(path.join(__dirname, '..', '..', 'js', 'uploader.js'), 'utf8');
   vm.runInContext(src, sandbox, { filename: 'uploader.js' });
-  return { uploader: sandbox.SqcUploader, photos, calls };
+  return { uploader: sandbox.SqcUploader, photos, calls, uploads };
 }
 
 // enqueue() 內部會自行觸發一次未 await 的 pump()，且 pump 有 _running 互斥鎖，
@@ -56,7 +64,7 @@ const settle = () => new Promise((r) => setTimeout(r, 300));
 (async () => {
   // ===== 情境1：照片比紀錄更早完成（後端回「找不到紀錄」）=====
   let exists = false;
-  const { uploader, photos, calls } = loadUploader({ recordExists: () => exists });
+  const { uploader, photos, calls, uploads } = loadUploader({ recordExists: () => exists });
   await uploader.enqueue({ blob: 'b', name: 'a.jpg', pathParts: ['115年08月', '1.店外海報', '缺失'], recordId: 'R1', month: '11508' });
   await settle();
 
@@ -65,6 +73,14 @@ const settle = () => new Promise((r) => setTimeout(r, 300));
   assertEqual(all[0].status, 'done', '紀錄還不存在時，照片應維持 done（不可標記 linked，否則連結永久遺失）');
   assertEqual(all[0].fileId, 'FILE_1', '照片本身應已上傳成功並取得 fileId');
   assertEqual(calls.length >= 1, true, '應已嘗試呼叫過 attachPhotoLinks');
+
+  // ===== 資安：照片是 PUT 到後端給的工作階段網址，瀏覽器端不得持有任何權杖 =====
+  assertEqual(uploads.length, 1, '應對 Drive 發出1次上傳請求');
+  assertEqual(uploads[0].init.method, 'PUT', '可續傳上傳應以 PUT 寫入');
+  assertEqual(uploads[0].url.indexOf('https://upload.example/session/') === 0, true, '應上傳到後端指定的工作階段網址');
+  const hdrs = Object.keys(uploads[0].init.headers || {}).map((k) => k.toLowerCase());
+  assertEqual(hdrs.indexOf('authorization') === -1, true, '瀏覽器端不可帶 Authorization 標頭（權杖不得外流）');
+  assertEqual(JSON.stringify(uploads[0].init).toLowerCase().indexOf('bearer') === -1, true, '上傳請求任何欄位都不應出現 Bearer 權杖');
 
   // ===== 情境2：紀錄送出完成後，下一輪 pump 應自動補寫連結成功 =====
   // 回寫失敗會設退避時間(首次1.5秒)，等過了退避才會真的重送
@@ -98,6 +114,26 @@ const settle = () => new Promise((r) => setTimeout(r, 300));
   const ghost = Array.from(b.photos.values())[0];
   assertEqual(ghost.status, 'orphan', '重試達上限後應標記 orphan 並停止重送');
   assertEqual(b.calls.length <= 20, true, `重送次數應被上限擋住(實際 ${b.calls.length} 次)`);
+
+  // ===== 情境5：後端還沒部署新版(取不到上傳網址)時，照片必須留在佇列等重試，不可遺失 =====
+  //   前端與後端無法同時更新，中間必然有空窗；這段期間照片只能延後上傳，絕不能被丟掉。
+  let apiBroken = true;
+  const c = loadUploader({ recordExists: () => true, sessionFails: () => apiBroken });
+  await c.uploader.enqueue({ blob: 'b', name: 'gap.jpg', pathParts: ['115年08月', 'Y'], recordId: 'R9', month: '11508' });
+  await settle();
+  let gap = Array.from(c.photos.values())[0];
+  assertEqual(gap.status, 'pending', '取不到上傳網址時照片應維持 pending（留在佇列裡）');
+  assertEqual(gap.tries, 1, '應記一次失敗次數以便退避');
+  assertEqual(gap.nextAt > Date.now(), true, '應設下次重試時間，不可密集重打後端');
+  assertEqual(c.uploads.length, 0, '沒有上傳網址時不應對 Drive 發出任何請求');
+
+  apiBroken = false;                                   // 後端部署完成
+  c.photos.set(gap.id, { ...gap, nextAt: 0 });         // 略過退避等待，直接驗證恢復行為
+  await c.uploader.pump();
+  await settle();
+  gap = Array.from(c.photos.values())[0];
+  assertEqual(gap.fileId, 'FILE_1', '後端恢復後同一張照片應成功上傳（沒有遺失）');
+  assertEqual(gap.status, 'linked', '恢復後連結也應成功回寫');
 
   console.log(failed === 0 ? '\n✅ 全部通過' : `\n❌ ${failed} 項失敗`);
   process.exit(failed === 0 ? 0 : 1);

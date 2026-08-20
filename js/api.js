@@ -89,8 +89,8 @@
     onRetry, // 供UI顯示「重試中 n/m」，避免暫時性失敗看起來像卡住
     login: (userId, password) => call('login', { userId, password }),
     getBootstrap: (month, section) => call('getBootstrap', { month, section }),
-    getDriveToken: () => call('getDriveToken'),
-    getUploadFolderId: (pathParts) => call('getUploadFolderId', { pathParts }),
+    // 只回傳「單檔上傳網址」，權杖留在後端（見 uploader.js 開頭說明）
+    createUploadSessions: (items) => call('createUploadSessions', { items }),
     submitRecord: (record) => call('submitRecord', { record }),
     attachPhotoLinks: (month, recordId, links) => call('attachPhotoLinks', { month, recordId, links }),
     queryRecords: (month, filter) => call('queryRecords', { month, filter }),
