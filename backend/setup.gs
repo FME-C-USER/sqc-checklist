@@ -185,7 +185,8 @@ function ensureSheet(name, headers) {
 //   背景：2026-08-20 照片直傳因缺少 Origin 標頭而被瀏覽器 CORS 擋掉，但 Drive 其實
 //         已寫入成功（回應 200），前端讀不到回應就每 15~60 秒重試一次 →
 //         同一張照片在同一個資料夾裡被寫入很多份。
-//   保留規則：每組同名檔案只保留「建立時間最早」的一份，其餘移到垃圾桶（可還原）。
+//   保留規則：優先保留「點檢紀錄的照片JSON已經引用」的那一份（避免報表連結失效），
+//             沒有被引用時才保留「建立時間最早」的一份；其餘移到垃圾桶（可還原）。
 //
 //   用法（在 Apps Script 編輯器選函式後按執行，結果看「執行記錄」）：
 //     1. reportDuplicatePhotos('115年08月')            ← 先只掃描列出，不會刪任何東西
@@ -218,6 +219,7 @@ function dupPhotos_(monthFolderName, doDelete) {
     start = it.next();
   }
 
+  var referenced = referencedFileIds_();   // 點檢紀錄「照片JSON」裡真的有引用到的 fileId
   var groups = {}, scanned = 0;
   walkFolderFiles_(start, start.getName(), function (file, pathStr) {
     scanned++;
@@ -231,10 +233,16 @@ function dupPhotos_(monthFolderName, doDelete) {
     var arr = groups[k];
     if (arr.length < 2) return;
     arr.sort(function (a, b) { return a.getDateCreated() - b.getDateCreated(); }); // 最早的排前面
+    // 保留哪一份：優先保留「點檢紀錄已經引用」的那一份，否則保留最早的。
+    // 若固定保留最早的，紀錄裡指向較晚副本的連結會在刪除後失效。
+    var keep = 0, keepReason = '最早';
+    for (var i = 0; i < arr.length; i++) {
+      if (referenced[arr[i].getId()]) { keep = i; keepReason = '紀錄已引用'; break; }
+    }
     dupCount += arr.length - 1;
-    detail.push(k + ' → ' + arr.length + ' 份，保留最早1份、處理 ' + (arr.length - 1) + ' 份');
+    detail.push(k + ' → ' + arr.length + ' 份，保留1份(' + keepReason + ')、處理 ' + (arr.length - 1) + ' 份');
     if (doDelete) {
-      for (var i = 1; i < arr.length; i++) { arr[i].setTrashed(true); deleted++; }
+      for (var j = 0; j < arr.length; j++) { if (j !== keep) { arr[j].setTrashed(true); deleted++; } }
     }
   });
 
@@ -255,4 +263,30 @@ function walkFolderFiles_(folder, pathStr, onFile) {
     var sub = subs.next();
     walkFolderFiles_(sub, pathStr + '/' + sub.getName(), onFile);
   }
+}
+
+/** 收集所有「點檢紀錄_*」活頁的 照片JSON 內已引用的 fileId，
+ *  清理重複檔案時據此保留「有被紀錄引用」的那一份，避免把報表看得到的連結刪掉 */
+function referencedFileIds_() {
+  var out = {};
+  try {
+    ss().getSheets().forEach(function (sh) {
+      if (String(sh.getName()).indexOf('點檢紀錄_') !== 0) return;
+      var data = sh.getDataRange().getValues();
+      if (!data.length) return;
+      var col = data[0].indexOf('照片JSON');
+      if (col < 0) return;
+      for (var i = 1; i < data.length; i++) {
+        var raw = String(data[i][col] || '');
+        if (!raw) continue;
+        try {
+          var obj = JSON.parse(raw);
+          Object.keys(obj).forEach(function (k) {
+            (obj[k] || []).forEach(function (e) { if (e && e.fileId) out[e.fileId] = 1; });
+          });
+        } catch (e) { /* 該列格式異常就略過 */ }
+      }
+    });
+  } catch (e) { /* 讀不到活頁時退回「保留最早」的行為 */ }
+  return out;
 }

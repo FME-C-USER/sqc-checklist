@@ -21,6 +21,7 @@ function makeDrive(tree) {
   const trashed = [];
   const mkFile = (f, owner) => ({
     getName: () => f.name,
+    getId: () => f.id || (owner + '/' + f.name + '@' + f.created),
     getDateCreated: () => new Date(f.created),
     setTrashed: (v) => { if (v) { f.trashed = true; trashed.push(owner + '/' + f.name + '@' + f.created); } },
     __raw: f,
@@ -42,13 +43,20 @@ function makeDrive(tree) {
   return { DriveApp: { getFolderById: () => mkFolder('照片根', tree) }, trashed };
 }
 
-function load(tree) {
+function load(tree, photoJsonRows) {
   const { DriveApp, trashed } = makeDrive(tree);
   const logs = [];
   const sandbox = {
     console, DriveApp,
     Logger: { log: (m) => logs.push(String(m)) },
-    SpreadsheetApp: { openById: () => ({}) },
+    SpreadsheetApp: {
+      openById: () => ({
+        getSheets: () => [{
+          getName: () => '點檢紀錄_11508',
+          getDataRange: () => ({ getValues: () => [['紀錄ID', '照片JSON']].concat((photoJsonRows || []).map((r) => ['R1', r])) }),
+        }],
+      }),
+    },
     Object, Date, String, Number, Array, JSON,
   };
   vm.createContext(sandbox);
@@ -131,6 +139,39 @@ t = load({ '115年08月': { __files: [{ name: 'only.jpg', created: '2026-08-01T0
 r = t.ctx.removeDuplicatePhotos('115年08月', true);
 assertEqual([r.duplicates, r.deleted], [0, 0], '沒有重複時不應有任何處理');
 assertEqual(t.logs[0].indexOf('沒有發現重複檔案') >= 0, true, '應明確回報沒有重複');
+
+// ===== 7. 紀錄已引用某一份時，必須保留那一份（不可只看建立時間）=====
+//   補寫連結時存進紀錄的 fileId 可能是較晚的副本；若固定保留最早的，
+//   報表上剛修好的照片連結會在清理後失效。
+const treeWithIds = () => ({
+  '115年08月': {
+    '缺失': {
+      __files: [
+        { name: 'B.jpg', id: 'FIRST_COPY', created: '2026-08-12T10:00:00Z' },
+        { name: 'B.jpg', id: 'LINKED_COPY', created: '2026-08-12T10:05:00Z' },   // 紀錄指向這份
+        { name: 'B.jpg', id: 'LAST_COPY', created: '2026-08-12T10:09:00Z' },
+      ],
+    },
+  },
+});
+t = load(treeWithIds(), ['{"115年08月/缺失":[{"name":"B.jpg","fileId":"LINKED_COPY"}]}']);
+r = t.ctx.removeDuplicatePhotos('115年08月', true);
+assertEqual(r.deleted, 2, '三份重複應處理掉兩份');
+assertEqual(t.trashed.length, 2, '應只刪兩份');
+assertEqual(t.trashed.join(',').indexOf('10:05') === -1, true, '被紀錄引用的那一份不可被刪除（否則報表連結失效）');
+assertEqual(r.detail[0].indexOf('紀錄已引用') >= 0, true, '明細應標示保留原因為「紀錄已引用」');
+
+// 沒有任何引用時，退回保留最早的那份
+t = load(treeWithIds(), []);
+r = t.ctx.removeDuplicatePhotos('115年08月', true);
+assertEqual(t.trashed.join(',').indexOf('10:00') === -1, true, '無引用時應保留最早那份');
+assertEqual(r.detail[0].indexOf('最早') >= 0, true, '明細應標示保留原因為「最早」');
+
+// 紀錄的 照片JSON 格式異常時不可整支掛掉，退回保留最早
+t = load(treeWithIds(), ['這不是JSON', '']);
+r = t.ctx.removeDuplicatePhotos('115年08月', true);
+assertEqual(r.deleted, 2, '照片JSON 格式異常時仍應正常運作');
+assertEqual(t.trashed.join(',').indexOf('10:00') === -1, true, '格式異常時退回保留最早那份');
 
 console.log(failed === 0 ? '\n✅ 全部通過' : `\n❌ ${failed} 項失敗`);
 process.exit(failed === 0 ? 0 : 1);
