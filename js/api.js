@@ -90,7 +90,7 @@
     login: (userId, password) => call('login', { userId, password }),
     getBootstrap: (month, section) => call('getBootstrap', { month, section }),
     // 只回傳「單檔上傳網址」，權杖留在後端（見 uploader.js 開頭說明）
-    createUploadSessions: (items) => call('createUploadSessions', { items }),
+    createUploadSessions: (items, origin) => call('createUploadSessions', { items, origin }),
     submitRecord: (record) => call('submitRecord', { record }),
     attachPhotoLinks: (month, recordId, links) => call('attachPhotoLinks', { month, recordId, links }),
     queryRecords: (month, filter) => call('queryRecords', { month, filter }),

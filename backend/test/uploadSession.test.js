@@ -28,7 +28,16 @@ const makeFolder = (name) => ({
   getFoldersByName: () => ({ hasNext: () => false, next: () => null }),
   createFolder: (n) => { folderSeq++; return makeFolder(n); },
 });
-ctx.DriveApp = { getFolderById: (id) => makeFolder('root:' + id) };
+let existingFiles = {};      // 檔名 -> fileId，模擬資料夾內已存在的照片
+ctx.DriveApp = {
+  getFolderById: (id) => Object.assign(makeFolder('root:' + id), {
+    getFilesByName: (name) => {
+      const hit = existingFiles[name];
+      let done = !hit;
+      return { hasNext: () => !done, next: () => { done = true; return { getId: () => hit }; } };
+    },
+  }),
+};
 ctx.ScriptApp = { getOAuthToken: () => SECRET };
 
 const cache = {};
@@ -117,6 +126,32 @@ sentRequests = [];
 const none = post('createUploadSessions', { items: [] }, token);
 assertEqual(none.result.sessions, [], '空清單應回空陣列');
 assertEqual(sentRequests.length, 0, '空清單不應對 Drive 發出任何請求');
+
+// ===== 10. 必須帶 Origin，否則 Drive 給的網址會被瀏覽器 CORS 擋掉（2026-08-20 實際踩到）=====
+//   症狀：PUT 回 net::ERR_FAILED 200 (OK) + No 'Access-Control-Allow-Origin' header
+sentRequests = [];
+post('createUploadSessions', { items: [items[0]], origin: 'https://fme-c-user.github.io' }, token);
+assertEqual(sentRequests[0].headers.Origin, 'https://fme-c-user.github.io', '建立工作階段時必須帶 Origin，否則跨網域 PUT 會被 CORS 擋掉');
+
+sentRequests = [];
+post('createUploadSessions', { items: [items[0]], origin: 'https://evil.example.com' }, token);
+assertEqual(sentRequests[0].headers.Origin, 'https://fme-c-user.github.io', '不在白名單的 origin 應換成正式網域，不可原樣回填');
+
+sentRequests = [];
+post('createUploadSessions', { items: [items[0]] }, token);
+assertEqual(sentRequests[0].headers.Origin, 'https://fme-c-user.github.io', '未帶 origin 時應用預設正式網域');
+
+// ===== 11. 同檔名已存在就認領既有檔案，不重複上傳 =====
+//   照片檔名固定為「店號_日期_題目_序號」，所以可用檔名做冪等；
+//   這同時能救回「Drive 其實已寫入成功、但瀏覽器因 CORS 讀不到回應」的照片。
+existingFiles = { 'a.jpg': 'EXISTING_FILE_A' };
+sentRequests = [];
+const dedup = post('createUploadSessions', { items: items, origin: 'https://fme-c-user.github.io' }, token);
+assertEqual(dedup.result.sessions[0], { ok: true, existing: true, fileId: 'EXISTING_FILE_A' }, '已存在的照片應直接回傳既有 fileId');
+assertEqual(sentRequests.length, 2, '只有不存在的照片才需要開工作階段');
+assertEqual(dedup.result.sessions[1].ok && !!dedup.result.sessions[1].url, true, '其餘照片仍應取得上傳網址');
+assertEqual(dedup.result.sessions[2].ok && !!dedup.result.sessions[2].url, true, '回傳順序需與傳入順序一致');
+existingFiles = {};
 
 console.log(failed === 0 ? '\n✅ 全部通過' : `\n❌ ${failed} 項失敗`);
 process.exit(failed === 0 ? 0 : 1);

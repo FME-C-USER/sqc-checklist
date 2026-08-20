@@ -15,11 +15,13 @@ function assertEqual(actual, expected, label) {
 }
 
 /** 載入 uploader.js，注入假的 SqcApi/SqcDB；recordExists 控制後端是否已有該筆紀錄 */
-function loadUploader({ recordExists, sessionFails }) {
+function loadUploader({ recordExists, sessionFails, existingIds }) {
   sessionFails = sessionFails || (() => false);
+  existingIds = existingIds || (() => ({}));
   const photos = new Map();
   const calls = [];
   const uploads = [];
+  const sessionArgs = [];
   const sandbox = {
     console, setTimeout, clearTimeout, setInterval: () => 0, clearInterval: () => {},
     navigator: { onLine: true },
@@ -29,14 +31,20 @@ function loadUploader({ recordExists, sessionFails }) {
       return { ok: true, json: async () => ({ id: 'FILE_' + uploads.length }) };
     },
     document: { addEventListener: () => {}, visibilityState: 'visible' },
+    location: { origin: 'https://fme-c-user.github.io' },
   };
   sandbox.window = sandbox;
   sandbox.addEventListener = () => {};
   sandbox.SqcApi = {
     // 後端只回單檔上傳網址，不再回傳 OAuth 權杖
-    createUploadSessions: async (items) => {
+    createUploadSessions: async (items, origin) => {
+      sessionArgs.push({ items, origin });
       if (sessionFails()) throw new Error('未知動作：createUploadSessions');   // 模擬後端尚未部署新版
-      return { sessions: items.map((it, i) => ({ ok: true, url: 'https://upload.example/session/' + i + '?name=' + it.name })) };
+      return {
+        sessions: items.map((it, i) => (existingIds()[it.name]
+          ? { ok: true, existing: true, fileId: existingIds()[it.name] }        // 後端說這張已經在 Drive 裡了
+          : { ok: true, url: 'https://upload.example/session/' + i + '?name=' + it.name })),
+      };
     },
     attachPhotoLinks: async (month, recordId, links) => {
       calls.push({ month, recordId, links });
@@ -54,7 +62,7 @@ function loadUploader({ recordExists, sessionFails }) {
   vm.createContext(sandbox);
   const src = fs.readFileSync(path.join(__dirname, '..', '..', 'js', 'uploader.js'), 'utf8');
   vm.runInContext(src, sandbox, { filename: 'uploader.js' });
-  return { uploader: sandbox.SqcUploader, photos, calls, uploads };
+  return { uploader: sandbox.SqcUploader, photos, calls, uploads, sessionArgs };
 }
 
 // enqueue() 內部會自行觸發一次未 await 的 pump()，且 pump 有 _running 互斥鎖，
@@ -64,7 +72,7 @@ const settle = () => new Promise((r) => setTimeout(r, 300));
 (async () => {
   // ===== 情境1：照片比紀錄更早完成（後端回「找不到紀錄」）=====
   let exists = false;
-  const { uploader, photos, calls, uploads } = loadUploader({ recordExists: () => exists });
+  const { uploader, photos, calls, uploads, sessionArgs } = loadUploader({ recordExists: () => exists });
   await uploader.enqueue({ blob: 'b', name: 'a.jpg', pathParts: ['115年08月', '1.店外海報', '缺失'], recordId: 'R1', month: '11508' });
   await settle();
 
@@ -134,6 +142,17 @@ const settle = () => new Promise((r) => setTimeout(r, 300));
   gap = Array.from(c.photos.values())[0];
   assertEqual(gap.fileId, 'FILE_1', '後端恢復後同一張照片應成功上傳（沒有遺失）');
   assertEqual(gap.status, 'linked', '恢復後連結也應成功回寫');
+
+  // ===== 情境6：後端回報「這張已在 Drive」時，不可再上傳一次（否則重試會產生重複檔案）=====
+  //   2026-08-20 的 CORS 失敗就是這種情形：Drive 已寫入成功(200)，但瀏覽器讀不到回應而重試。
+  const d = loadUploader({ recordExists: () => true, existingIds: () => ({ 'dup.jpg': 'ALREADY_IN_DRIVE' }) });
+  await d.uploader.enqueue({ blob: 'b', name: 'dup.jpg', pathParts: ['115年08月', 'Z'], recordId: 'R7', month: '11508' });
+  await settle();
+  const dup = Array.from(d.photos.values())[0];
+  assertEqual(d.uploads.length, 0, '已存在的照片不應再對 Drive 發出上傳請求');
+  assertEqual(dup.fileId, 'ALREADY_IN_DRIVE', '應直接認領 Drive 上既有的檔案');
+  assertEqual(dup.status, 'linked', '認領後仍要正常回寫連結');
+  assertEqual(d.sessionArgs[0].origin, 'https://fme-c-user.github.io', '必須把自己的 origin 送給後端（Drive 的 CORS 要求）');
 
   console.log(failed === 0 ? '\n✅ 全部通過' : `\n❌ ${failed} 項失敗`);
   process.exit(failed === 0 ? 0 : 1);

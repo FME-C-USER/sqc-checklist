@@ -10,7 +10,7 @@
 // 後端版本：每次修改本檔就更新，並於前端「資料更新時間」旁顯示。
 // 用途：貼上程式碼後若忘記「部署 → 管理部署作業 → 新版本」，畫面上的後端版本就不會變，
 //       可立即分辨是「沒貼上」「貼了但沒部署」還是「已生效」。
-var GAS_VERSION = '20260820-0950';
+var GAS_VERSION = '20260820-1030';
 
 var SPREADSHEET_ID = '1GRZZsZRgakMGENspOxmlx96NfckC8UYOe0ipuNNEoh0';
 var DRIVE_ROOT_ID  = '122nQjldImn5Zh5AUguxZF0YzobThgdc9';
@@ -45,7 +45,7 @@ function doPost(e) {
     var routes = {
       login: function () { return login(p.userId, p.password); },
       getBootstrap: function () { return getBootstrap(p.month, p.section); },
-      createUploadSessions: function () { return { sessions: createUploadSessions(p.items) }; },
+      createUploadSessions: function () { return { sessions: createUploadSessions(p.items, p.origin) }; },
       submitRecord: function () { return submitRecord(p.record); },
       attachPhotoLinks: function () { return attachPhotoLinks(p.month, p.recordId, p.links); },
       queryRecords: function () { return { records: queryRecords(p.month, p.filter) }; },
@@ -274,30 +274,62 @@ function getStores(month, section) {
  */
 var UPLOAD_SESSION_MAX = 20; // 一次最多開幾個，避免 UrlFetchApp 逾時
 
-function createUploadSessions(items) {
+// 建立工作階段時必須帶 Origin，該工作階段網址才會允許來自這個網域的跨網域 PUT。
+// 不帶的話瀏覽器會被 CORS 擋掉（No 'Access-Control-Allow-Origin' header）。
+// 用白名單而非直接回填呼叫端傳來的值，避免有人替自己的網站鑄造可用的上傳網址。
+var DEFAULT_ORIGIN = 'https://fme-c-user.github.io';
+var ALLOWED_ORIGINS = {
+  'https://fme-c-user.github.io': 1,
+  'http://localhost:8931': 1,      // 本機測試用
+};
+
+/** 同資料夾內已有同檔名的照片就直接回傳它的 ID（照片檔名為 店號_日期_題目_序號，固定不變）。
+ *  用途一：重試時不會再上傳一份，避免 Drive 出現大量重複檔案。
+ *  用途二：先前因 CORS 失敗（瀏覽器讀不到回應，但 Drive 其實已寫入成功）的照片可被認領回來。*/
+function findFileIdByName(folderId, name) {
+  try {
+    var it = DriveApp.getFolderById(folderId).getFilesByName(name);
+    return it.hasNext() ? it.next().getId() : '';
+  } catch (e) {
+    return '';
+  }
+}
+
+function createUploadSessions(items, origin) {
   items = (items || []).slice(0, UPLOAD_SESSION_MAX);
   if (!items.length) return [];
+  var org = ALLOWED_ORIGINS[String(origin || '')] ? String(origin) : DEFAULT_ORIGIN;
   var token = ScriptApp.getOAuthToken(); // 只在伺服器端使用，不回傳給前端
-  var reqs = items.map(function (it) {
+  var out = [], reqs = [], reqAt = [];
+  for (var i = 0; i < items.length; i++) {
+    var it = items[i] || {};
+    var name = String(it.name || 'photo.jpg');
     var folderId = getUploadFolderId(it.pathParts || []);
-    return {
+    var exist = findFileIdByName(folderId, name);
+    if (exist) { out[i] = { ok: true, existing: true, fileId: exist }; continue; }
+    out[i] = null;
+    reqAt.push(i);
+    reqs.push({
       url: 'https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&fields=id',
       method: 'post',
       contentType: 'application/json; charset=UTF-8',
-      headers: { Authorization: 'Bearer ' + token, 'X-Upload-Content-Type': 'image/jpeg' },
-      payload: JSON.stringify({ name: String(it.name || 'photo.jpg'), parents: [folderId] }),
+      headers: { Authorization: 'Bearer ' + token, 'X-Upload-Content-Type': 'image/jpeg', Origin: org },
+      payload: JSON.stringify({ name: name, parents: [folderId] }),
       muteHttpExceptions: true,
-    };
-  });
-  var res = UrlFetchApp.fetchAll(reqs);
-  return res.map(function (r) {
-    var code = r.getResponseCode();
-    if (code >= 300) return { ok: false, error: 'Drive 建立上傳工作階段失敗（' + code + '）' };
-    var h = r.getAllHeaders() || {};
-    var loc = h['Location'] || h['location'] || '';
-    if (loc && typeof loc !== 'string' && loc.length) loc = loc[0]; // 重複標頭會回陣列
-    return loc ? { ok: true, url: String(loc) } : { ok: false, error: 'Drive 未回傳上傳網址' };
-  });
+    });
+  }
+  if (reqs.length) {
+    var res = UrlFetchApp.fetchAll(reqs);
+    for (var k = 0; k < res.length; k++) {
+      var r = res[k], code = r.getResponseCode();
+      if (code >= 300) { out[reqAt[k]] = { ok: false, error: 'Drive 建立上傳工作階段失敗（' + code + '）' }; continue; }
+      var h = r.getAllHeaders() || {};
+      var loc = h['Location'] || h['location'] || '';
+      if (loc && typeof loc !== 'string' && loc.length) loc = loc[0]; // 重複標頭會回陣列
+      out[reqAt[k]] = loc ? { ok: true, url: String(loc) } : { ok: false, error: 'Drive 未回傳上傳網址' };
+    }
+  }
+  return out;
 }
 
 /** 依 [月份, 題目, 區域...] 取得目標資料夾 ID（自動建立、Script Properties 快取）

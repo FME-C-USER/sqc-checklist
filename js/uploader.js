@@ -18,13 +18,18 @@
   const onChange = (fn) => { _listeners.add(fn); return () => _listeners.delete(fn); };
 
   // 一次為整批照片取上傳網址（一次往返，不是每張一次）
+  //   origin 必須一併送出：Drive 只有在「建立工作階段時帶了 Origin」的情況下，該網址才會
+  //   允許來自這個網域的跨網域 PUT；沒帶的話瀏覽器會被 CORS 擋掉（No Access-Control-Allow-Origin）。
   async function sessionsFor(list) {
     const r = await window.SqcApi.createUploadSessions(
-      list.map((p) => ({ pathParts: p.pathParts || [], name: p.name })));
+      list.map((p) => ({ pathParts: p.pathParts || [], name: p.name })), location.origin);
     return (r && r.sessions) || [];
   }
 
   async function uploadOne(photo, session) {
+    // 後端發現同資料夾已有同檔名 → 直接認領那個檔案，不重複上傳
+    // （也涵蓋先前上傳其實已成功、只是瀏覽器讀不到回應的情況）
+    if (session && session.existing && session.fileId) return session.fileId;
     if (!session || !session.ok || !session.url) {
       throw new Error((session && session.error) || '未取得上傳網址');
     }
