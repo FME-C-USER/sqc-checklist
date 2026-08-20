@@ -55,6 +55,17 @@
     }));
   }
 
+  // 只數筆數、不讀出資料本體。照片的 blob 動輒 1MB，用 getAll 去數會把整個佇列
+  // （可能數十MB）讀進記憶體，畫面每次更新都做一次會明顯卡頓。
+  function countByIndex(store, index, value) {
+    return open().then((db) => new Promise((resolve, reject) => {
+      const os = db.transaction(store, 'readonly').objectStore(store);
+      const req = value === undefined ? os.count() : os.index(index).count(value);
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    }));
+  }
+
   window.SqcDB = {
     // 照片佇列
     addPhoto: (photo) => put('photoQueue', photo),
@@ -64,6 +75,7 @@
     allPhotos: () => all('photoQueue'),
     pendingPhotos: () => allByIndex('photoQueue', 'byStatus', 'pending'),
     photosOfRecord: (recordId) => allByIndex('photoQueue', 'byRecord', recordId),
+    countPhotos: (status) => countByIndex('photoQueue', 'byStatus', status),
     // 草稿
     saveDraft: (draft) => put('drafts', draft),
     getDraft: (id) => get('drafts', id),

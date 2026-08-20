@@ -254,10 +254,14 @@ function dupPhotos_(monthFolderName, doDelete) {
   return { scanned: scanned, duplicates: dupCount, deleted: deleted, detail: detail };
 }
 
-/** 遞迴走訪資料夾內所有檔案；pathStr 為「資料夾/子資料夾」相對路徑 */
+/** 遞迴走訪資料夾內所有檔案；pathStr 為「資料夾/子資料夾」相對路徑
+ *  DriveApp 的迭代會包含已在垃圾桶的檔案，必須排除，否則已清掉的重複檔會被重複計算 */
 function walkFolderFiles_(folder, pathStr, onFile) {
   var files = folder.getFiles();
-  while (files.hasNext()) onFile(files.next(), pathStr);
+  while (files.hasNext()) {
+    var f = files.next();
+    if (!f.isTrashed()) onFile(f, pathStr);
+  }
   var subs = folder.getFolders();
   while (subs.hasNext()) {
     var sub = subs.next();
@@ -289,4 +293,103 @@ function referencedFileIds_() {
     });
   } catch (e) { /* 讀不到活頁時退回「保留最早」的行為 */ }
   return out;
+}
+
+// ============================================================
+// 維護：依檔名把「照片JSON 只有檔名、缺 fileId」的項目補上 Drive 連結
+//   為什麼需要：紀錄剛送出時「照片JSON」只存檔名，要等前端回寫連結才會補上 fileId。
+//   若回寫失敗（網路不良、紀錄ID 對不上、換裝置…），報表就永遠點不到照片。
+//   這支工具直接在後端用檔名去對應資料夾查出 fileId 補回去，完全不依賴任何人的瀏覽器。
+//
+//   用法（在編輯器加一個 run 函式呼叫，結果看「執行記錄」）：
+//     1. repairPhotoLinks('11508')            ← 只列出會補哪些，不寫入
+//     2. repairPhotoLinks('11508', true)      ← 實際寫入
+//   一次最多處理 MAX_ROWS 筆紀錄，避免 Apps Script 6 分鐘逾時；
+//   記錄檔會告訴你這次處理到哪，重複執行即可接續（已補好的會自動跳過）。
+// ============================================================
+var REPAIR_MAX_ROWS = 40;
+
+function repairPhotoLinks(month, doWrite) {
+  var sh = ss().getSheetByName('點檢紀錄_' + month);
+  if (!sh) { Logger.log('找不到活頁：點檢紀錄_' + month); return { error: '找不到活頁' }; }
+  var data = sh.getDataRange().getValues();
+  var head = data[0];
+  var photoCol = head.indexOf('照片JSON');
+  var idCol = head.indexOf('紀錄ID');
+  var storeCol = head.indexOf('店名');
+  if (photoCol < 0) { Logger.log('找不到「照片JSON」欄'); return { error: '找不到欄位' }; }
+
+  var folderCache = {};
+  var detail = [], touchedRows = 0, filled = 0, missing = 0, scannedRows = 0;
+
+  for (var i = 1; i < data.length; i++) {
+    if (touchedRows >= REPAIR_MAX_ROWS) {
+      detail.push('（已達單次上限 ' + REPAIR_MAX_ROWS + " 筆，請再執行一次接續；下一筆從第 " + (i + 1) + ' 列開始）');
+      break;
+    }
+    var raw = String(data[i][photoCol] || '');
+    if (!raw) continue;
+    var obj;
+    try { obj = JSON.parse(raw); } catch (e) { detail.push('第' + (i + 1) + '列 照片JSON 格式異常，略過'); continue; }
+
+    scannedRows++;
+    var changed = false;
+    Object.keys(obj).forEach(function (key) {
+      var arr = obj[key] || [];
+      for (var j = 0; j < arr.length; j++) {
+        var e = arr[j];
+        var name = typeof e === 'string' ? e : (e && e.name);
+        var hasId = e && typeof e === 'object' && e.fileId;
+        if (!name || hasId) continue;                     // 已經有 fileId 就跳過
+        var folderId = folderCache[key];
+        if (folderId === undefined) {
+          folderId = folderIdOfPath_(key);
+          folderCache[key] = folderId;
+        }
+        if (!folderId) { missing++; continue; }
+        var fid = fileIdByNameNotTrashed_(folderId, name);
+        if (!fid) { missing++; continue; }
+        arr[j] = { name: name, fileId: fid };
+        changed = true; filled++;
+      }
+      obj[key] = arr;
+    });
+
+    if (changed) {
+      touchedRows++;
+      detail.push('第' + (i + 1) + '列 ' + (storeCol >= 0 ? data[i][storeCol] : '') + '（' + (idCol >= 0 ? data[i][idCol] : '') + '）→ 補上連結');
+      if (doWrite === true) sh.getRange(i + 1, photoCol + 1).setValue(JSON.stringify(obj));
+    }
+  }
+
+  Logger.log((doWrite === true ? '【已寫入】' : '【僅試算，未寫入】')
+    + ' 月份 ' + month
+    + '｜檢查紀錄 ' + scannedRows + ' 筆｜可補連結 ' + filled + ' 張｜需異動 ' + touchedRows + ' 筆'
+    + '｜Drive 找不到對應檔案 ' + missing + ' 張'
+    + (detail.length ? '\n' + detail.join('\n') : '\n（沒有需要補的項目）'));
+  return { scannedRows: scannedRows, filled: filled, touchedRows: touchedRows, missing: missing, detail: detail };
+}
+
+/** 由「115年08月/題目/缺失」這種相對路徑找出資料夾 ID；找不到回空字串（不建立新資料夾） */
+function folderIdOfPath_(pathStr) {
+  var parts = String(pathStr || '').split('/').filter(function (s) { return s !== ''; });
+  var folder;
+  try { folder = DriveApp.getFolderById(DRIVE_ROOT_ID); } catch (e) { return ''; }
+  for (var i = 0; i < parts.length; i++) {
+    var it = folder.getFoldersByName(parts[i]);
+    var next = null;
+    while (it.hasNext()) { var cand = it.next(); if (!cand.isTrashed()) { next = cand; break; } }
+    if (!next) return '';
+    folder = next;
+  }
+  return folder.getId();
+}
+
+/** 取同名且不在垃圾桶的檔案 ID */
+function fileIdByNameNotTrashed_(folderId, name) {
+  try {
+    var it = DriveApp.getFolderById(folderId).getFilesByName(name);
+    while (it.hasNext()) { var f = it.next(); if (!f.isTrashed()) return f.getId(); }
+  } catch (e) { /* 資料夾不存在 */ }
+  return '';
 }

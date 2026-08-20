@@ -25,7 +25,7 @@
 
   <script type="text/jsx" id="appCode">
     const { useState, useMemo, useEffect, useRef } = React;
-    const APP_VERSION = '20260820-1030'; // 每次部署更新，用來確認瀏覽器跑的是哪一版
+    const APP_VERSION = '20260820-1720'; // 每次部署更新，用來確認瀏覽器跑的是哪一版
 
     // 全域錯誤攔截：任何未預期錯誤（含 async 事件處理器的未捕捉 rejection）都要顯示出來，
     // 否則按鈕會「按了沒反應」而完全查不到原因
@@ -954,6 +954,23 @@
       const [bootWarn, setBootWarn] = useState(''); // 用快取撐著時的提示（非阻斷式）
       const [bootAt, setBootAt] = useState(null);   // 目前這份開場資料是何時取得的（供現場判斷名單夠不夠新）
       const [gasVer, setGasVer] = useState('');     // 後端版本；貼上 程式碼.gs 卻沒重新部署時，這裡不會變
+      // 背景待處理量：照片沒傳完就關掉 App 會延後上傳，點檢員必須看得到
+      const [pendingUp, setPendingUp] = useState({ unfinished: 0, orphan: 0, queuedRecords: 0 });
+      useEffect(() => {
+        if (!window.SqcUploader) return;
+        let alive = true;
+        const refresh = () => SqcUploader.counts().then(c => { if (alive) setPendingUp(c); }).catch(() => { });
+        refresh();
+        const off = SqcUploader.onChange(refresh);   // 每批處理完才觸發，不做輪詢
+        return () => { alive = false; off(); };
+      }, []);
+      // 還有東西沒送完就提醒，避免關掉分頁後照片停在佇列裡沒人知道
+      useEffect(() => {
+        if (!((pendingUp.unfinished || 0) + (pendingUp.queuedRecords || 0))) return;
+        const warn = (e) => { e.preventDefault(); e.returnValue = ''; return ''; };
+        window.addEventListener('beforeunload', warn);
+        return () => window.removeEventListener('beforeunload', warn);
+      }, [pendingUp.unfinished, pendingUp.queuedRecords]);
       const fmtStamp = (ts) => {
         if (!ts) return '';
         const d = new Date(ts);
@@ -1256,6 +1273,9 @@
         if (crossMonth && !confirm(`點檢時間已改到 ${monthFolderOf(workMonth)}，這筆紀錄會從 ${monthFolderOf(origMonth)} 搬到 ${monthFolderOf(workMonth)}。\n確定要這樣做嗎？`)) return;
 
         setSubmitting(true); // 送出到後端期間顯示進度條並鎖住按鈕，避免重複送出
+        // 送出失敗(尤其現場網路中斷)時要能自動重送：照片已經先進佇列，紀錄若沒寫進後端而使用者
+        // 又沒重送，這筆點檢就消失了(照片在 Drive、紀錄不存在)。編輯不排隊 —— 原紀錄仍完整，沒有遺失風險。
+        if (!isEdit) SqcDB.queueRecord({ id: recId, status: 'pending', month: workMonth, record, tries: 0, at: Date.now() }).catch(() => { });
         const api = !isEdit ? SqcApi.submitRecord(record)
           : !crossMonth ? SqcApi.updateRecord(origMonth, recId, record)
             : SqcApi.submitRecord(record).then(res => {
@@ -1265,14 +1285,17 @@
         api.then((result) => {
           if (result && result.ok === false) {
             // 後端二次把關（如同店本月已被他人搶先送出）
+            if (!isEdit) SqcDB.delQueuedRecord(recId).catch(() => { });   // 後端明確拒絕，重送也不會成功
             alert('⚠ ' + (result.message || '送出失敗，請稍後再試'));
             if (result.code === 'DUPLICATE') { setInspectedCodes(prev => ({ ...prev, [normCode(storeCode)]: true })); setTab('basic'); }
             return;
           }
+          if (!isEdit) SqcDB.delQueuedRecord(recId).catch(() => { });   // 已確認寫入後端，不需重送
           alert(`✅ ${isEdit ? '已更新' : '已送出'}\n店鋪：${storeName}　得分：${total}/${TOTAL_MAX}（${grade.txt}）` + (queue.length ? `\n新增照片 ${queue.length} 張背景上傳中` : ''));
           if (!isEdit) setInspectedCodes(prev => ({ ...prev, [normCode(storeCode)]: true }));
           resetWork(); setTab('records'); loadRecords();
-        }).catch(e => alert((isEdit ? '更新' : '送出') + '失敗：' + e.message))
+        }).catch(e => alert((isEdit ? '更新' : '送出') + '失敗：' + e.message
+          + (isEdit ? '' : '\n\n這筆已存入待送佇列，網路恢復後會自動重送，請保持頁面開啟。')))
           .finally(() => setSubmitting(false));
       };
 
@@ -1491,6 +1514,19 @@
                   後端 {gasVer || '—'}
                 </span>
                 <button onClick={() => { setLoading(true); reloadBoot(workMonth).catch(e => setBootWarn('連線不穩，目前顯示上次載入的資料（' + (e.message || '載入失敗') + '）')).finally(() => setLoading(false)); }} className="underline hover:text-slate-600">重新載入</button>
+              </div>
+            )}
+            {(pendingUp.unfinished > 0 || pendingUp.queuedRecords > 0 || pendingUp.orphan > 0) && (
+              <div className="bg-sky-50 border border-sky-300 text-sky-900 text-sm rounded-lg px-3 py-2 flex items-center justify-between gap-3">
+                <div>
+                  <span className="font-bold">📤 背景作業進行中，請保持頁面開啟</span>
+                  <span className="text-xs ml-2">
+                    {pendingUp.queuedRecords > 0 && <span className="mr-2">待送出紀錄 <b>{pendingUp.queuedRecords}</b> 筆</span>}
+                    {pendingUp.unfinished > 0 && <span className="mr-2">照片未完成 <b>{pendingUp.unfinished}</b> 張</span>}
+                    {pendingUp.orphan > 0 && <span className="text-amber-700">需人工處理 <b>{pendingUp.orphan}</b> 張</span>}
+                  </span>
+                </div>
+                <button onClick={() => SqcUploader.pump()} className="text-xs underline hover:text-sky-700 whitespace-nowrap">立即重試</button>
               </div>
             )}
             {tab === 'maintain' && sectionMismatch && !hideMismatch && (

@@ -28,13 +28,20 @@ const makeFolder = (name) => ({
   getFoldersByName: () => ({ hasNext: () => false, next: () => null }),
   createFolder: (n) => { folderSeq++; return makeFolder(n); },
 });
-let existingFiles = {};      // 檔名 -> fileId，模擬資料夾內已存在的照片
+let existingFiles = {};      // 檔名 -> fileId 或 {fileId, trashed}
+let lookups = [];            // 記錄後端查了哪些檔名（驗證首次上傳不該查）
 ctx.DriveApp = {
   getFolderById: (id) => Object.assign(makeFolder('root:' + id), {
     getFilesByName: (name) => {
-      const hit = existingFiles[name];
-      let done = !hit;
-      return { hasNext: () => !done, next: () => { done = true; return { getId: () => hit }; } };
+      lookups.push(name);
+      const raw = existingFiles[name];
+      const list = raw === undefined ? [] : (Array.isArray(raw) ? raw : [raw]);
+      const files = list.map((x) => (typeof x === 'string' ? { fileId: x, trashed: false } : x));
+      let i = 0;
+      return {
+        hasNext: () => i < files.length,
+        next: () => { const f = files[i++]; return { getId: () => f.fileId, isTrashed: () => !!f.trashed }; },
+      };
     },
   }),
 };
@@ -152,6 +159,34 @@ assertEqual(sentRequests.length, 2, '只有不存在的照片才需要開工作�
 assertEqual(dedup.result.sessions[1].ok && !!dedup.result.sessions[1].url, true, '其餘照片仍應取得上傳網址');
 assertEqual(dedup.result.sessions[2].ok && !!dedup.result.sessions[2].url, true, '回傳順序需與傳入順序一致');
 existingFiles = {};
+
+// ===== 12. 認領時不可認領到「已在垃圾桶」的檔案 =====
+//   否則紀錄的連結會指向一個 30 天後就消失的檔案，等於死連結。
+existingFiles = { 'a.jpg': [{ fileId: 'TRASHED_COPY', trashed: true }, { fileId: 'LIVE_COPY', trashed: false }] };
+sentRequests = [];
+let one = post('createUploadSessions', { items: [items[0]], origin: 'https://fme-c-user.github.io' }, token);
+assertEqual(one.result.sessions[0].fileId, 'LIVE_COPY', '應跳過垃圾桶內的檔案，認領還活著的那份');
+assertEqual(sentRequests.length, 0, '認領成功就不需要開工作階段');
+
+existingFiles = { 'a.jpg': [{ fileId: 'TRASHED_ONLY', trashed: true }] };
+sentRequests = [];
+one = post('createUploadSessions', { items: [items[0]], origin: 'https://fme-c-user.github.io' }, token);
+assertEqual(one.result.sessions[0].existing, undefined, '只有垃圾桶內的同名檔案時不可認領');
+assertEqual(sentRequests.length, 1, '應改為正常開工作階段重新上傳');
+existingFiles = {};
+
+// ===== 13. 效能：第一次上傳不查同檔名（每次查詢約 0.2~0.4 秒，白查沒有意義）=====
+lookups = [];
+post('createUploadSessions', { items: items.map((it) => Object.assign({}, it, { retry: false })), origin: 'https://fme-c-user.github.io' }, token);
+assertEqual(lookups, [], '首次上傳(retry:false)不應查詢同檔名');
+
+lookups = [];
+post('createUploadSessions', { items: items.map((it) => Object.assign({}, it, { retry: true })), origin: 'https://fme-c-user.github.io' }, token);
+assertEqual(lookups, ['a.jpg', 'b.jpg', 'c.jpg'], '重試(retry:true)時必須查詢同檔名，才不會產生重複檔案');
+
+lookups = [];
+post('createUploadSessions', { items: [items[0]], origin: 'https://fme-c-user.github.io' }, token);
+assertEqual(lookups, ['a.jpg'], '沒帶 retry 的舊版前端要維持安全行為(照樣查詢)');
 
 console.log(failed === 0 ? '\n✅ 全部通過' : `\n❌ ${failed} 項失敗`);
 process.exit(failed === 0 ? 0 : 1);

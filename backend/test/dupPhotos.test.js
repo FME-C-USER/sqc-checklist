@@ -21,13 +21,14 @@ function makeDrive(tree) {
   const trashed = [];
   const mkFile = (f, owner) => ({
     getName: () => f.name,
+    isTrashed: () => !!f.trashed,
     getId: () => f.id || (owner + '/' + f.name + '@' + f.created),
     getDateCreated: () => new Date(f.created),
     setTrashed: (v) => { if (v) { f.trashed = true; trashed.push(owner + '/' + f.name + '@' + f.created); } },
     __raw: f,
   });
   const mkFolder = (name, node) => {
-    const files = (node.__files || []).filter((f) => !f.trashed);
+    const files = (node.__files || []);   // 不預先過濾，交給程式自己用 isTrashed 判斷
     const subNames = Object.keys(node).filter((k) => k !== '__files');
     return {
       getName: () => name,
@@ -172,6 +173,19 @@ t = load(treeWithIds(), ['這不是JSON', '']);
 r = t.ctx.removeDuplicatePhotos('115年08月', true);
 assertEqual(r.deleted, 2, '照片JSON 格式異常時仍應正常運作');
 assertEqual(t.trashed.join(',').indexOf('10:00') === -1, true, '格式異常時退回保留最早那份');
+
+// ===== 8. 已在垃圾桶的檔案不可被算成重複 =====
+//   DriveApp 的檔案迭代會包含垃圾桶內的檔案。若不排除，清理過的檔案下次掃描還是會被算成重複，
+//   看起來像沒刪成功；重跑刪除時也會白做一輪。
+t = load({ '115年08月': { '缺失': { __files: [
+  { name: 'C.jpg', created: '2026-08-20T10:00:00Z' },
+  { name: 'C.jpg', created: '2026-08-20T10:01:00Z', trashed: true },   // 上一輪已清掉
+  { name: 'C.jpg', created: '2026-08-20T10:02:00Z', trashed: true },
+] } } });
+r = t.ctx.reportDuplicatePhotos('115年08月');
+assertEqual(r.scanned, 1, '垃圾桶內的檔案不應計入掃描數');
+assertEqual(r.duplicates, 0, '只剩一份有效檔案，不應再算成重複');
+assertEqual(t.logs[0].indexOf('沒有發現重複檔案') >= 0, true, '清理過後重掃應回報沒有重複');
 
 console.log(failed === 0 ? '\n✅ 全部通過' : `\n❌ ${failed} 項失敗`);
 process.exit(failed === 0 ? 0 : 1);

@@ -10,7 +10,7 @@
 // 後端版本：每次修改本檔就更新，並於前端「資料更新時間」旁顯示。
 // 用途：貼上程式碼後若忘記「部署 → 管理部署作業 → 新版本」，畫面上的後端版本就不會變，
 //       可立即分辨是「沒貼上」「貼了但沒部署」還是「已生效」。
-var GAS_VERSION = '20260820-1030';
+var GAS_VERSION = '20260820-1720';
 
 var SPREADSHEET_ID = '1GRZZsZRgakMGENspOxmlx96NfckC8UYOe0ipuNNEoh0';
 var DRIVE_ROOT_ID  = '122nQjldImn5Zh5AUguxZF0YzobThgdc9';
@@ -285,11 +285,17 @@ var ALLOWED_ORIGINS = {
 
 /** 同資料夾內已有同檔名的照片就直接回傳它的 ID（照片檔名為 店號_日期_題目_序號，固定不變）。
  *  用途一：重試時不會再上傳一份，避免 Drive 出現大量重複檔案。
- *  用途二：先前因 CORS 失敗（瀏覽器讀不到回應，但 Drive 其實已寫入成功）的照片可被認領回來。*/
+ *  用途二：先前因 CORS 失敗（瀏覽器讀不到回應，但 Drive 其實已寫入成功）的照片可被認領回來。
+ *  注意：DriveApp 的檔案迭代會包含「已在垃圾桶」的檔案，必須排除 —— 否則會認領到一個
+ *        30 天後就會消失的檔案，紀錄裡的連結等於是死的。*/
 function findFileIdByName(folderId, name) {
   try {
     var it = DriveApp.getFolderById(folderId).getFilesByName(name);
-    return it.hasNext() ? it.next().getId() : '';
+    while (it.hasNext()) {
+      var f = it.next();
+      if (!f.isTrashed()) return f.getId();
+    }
+    return '';
   } catch (e) {
     return '';
   }
@@ -305,7 +311,9 @@ function createUploadSessions(items, origin) {
     var it = items[i] || {};
     var name = String(it.name || 'photo.jpg');
     var folderId = getUploadFolderId(it.pathParts || []);
-    var exist = findFileIdByName(folderId, name);
+    // 效能：第一次上傳時 Drive 上不可能已有這個檔案，查了必然白查（每次約 0.2~0.4 秒）。
+    // 只有前端明確表示「這是重試」才查。舊版前端不會帶 retry → 預設仍查，維持安全行為。
+    var exist = (it.retry === false) ? '' : findFileIdByName(folderId, name);
     if (exist) { out[i] = { ok: true, existing: true, fileId: exist }; continue; }
     out[i] = null;
     reqAt.push(i);

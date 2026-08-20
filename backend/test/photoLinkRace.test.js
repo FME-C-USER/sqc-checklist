@@ -15,9 +15,10 @@ function assertEqual(actual, expected, label) {
 }
 
 /** 載入 uploader.js，注入假的 SqcApi/SqcDB；recordExists 控制後端是否已有該筆紀錄 */
-function loadUploader({ recordExists, sessionFails, existingIds }) {
+function loadUploader({ recordExists, sessionFails, existingIds, linkNetworkFails, queryRecords, submitRecord }) {
   sessionFails = sessionFails || (() => false);
   existingIds = existingIds || (() => ({}));
+  linkNetworkFails = linkNetworkFails || (() => false);
   const photos = new Map();
   const calls = [];
   const uploads = [];
@@ -37,6 +38,8 @@ function loadUploader({ recordExists, sessionFails, existingIds }) {
   sandbox.addEventListener = () => {};
   sandbox.SqcApi = {
     // 後端只回單檔上傳網址，不再回傳 OAuth 權杖
+    queryRecords: async (month, filter) => (queryRecords ? queryRecords(month, filter) : { records: [] }),
+    submitRecord: async (rec) => (submitRecord ? submitRecord(rec) : { ok: true }),
     createUploadSessions: async (items, origin) => {
       sessionArgs.push({ items, origin });
       if (sessionFails()) throw new Error('未知動作：createUploadSessions');   // 模擬後端尚未部署新版
@@ -48,11 +51,17 @@ function loadUploader({ recordExists, sessionFails, existingIds }) {
     },
     attachPhotoLinks: async (month, recordId, links) => {
       calls.push({ month, recordId, links });
+      if (linkNetworkFails()) throw new Error('網路連線中斷，請稍後再試');
       // 模擬後端：紀錄還不存在時回 ok:false（envelope 層是成功的，所以不會 throw）
       return recordExists() ? { ok: true } : { ok: false, message: '找不到紀錄' };
     },
   };
+  const recordQueue = new Map();
   sandbox.SqcDB = {
+    countPhotos: async (st) => Array.from(photos.values()).filter((p) => st === undefined || p.status === st).length,
+    queueRecord: async (r) => { recordQueue.set(r.id, { ...r }); },
+    delQueuedRecord: async (id) => { recordQueue.delete(id); },
+    pendingRecords: async () => Array.from(recordQueue.values()).filter((r) => r.status === 'pending'),
     addPhoto: async (p) => { photos.set(p.id, { ...p }); },
     updatePhoto: async (p) => { photos.set(p.id, { ...p }); },
     allPhotos: async () => Array.from(photos.values()),
@@ -62,7 +71,7 @@ function loadUploader({ recordExists, sessionFails, existingIds }) {
   vm.createContext(sandbox);
   const src = fs.readFileSync(path.join(__dirname, '..', '..', 'js', 'uploader.js'), 'utf8');
   vm.runInContext(src, sandbox, { filename: 'uploader.js' });
-  return { uploader: sandbox.SqcUploader, photos, calls, uploads, sessionArgs };
+  return { uploader: sandbox.SqcUploader, photos, calls, uploads, sessionArgs, recordQueue, api: sandbox.SqcApi };
 }
 
 // enqueue() 內部會自行觸發一次未 await 的 pump()，且 pump 有 _running 互斥鎖，
@@ -153,6 +162,66 @@ const settle = () => new Promise((r) => setTimeout(r, 300));
   assertEqual(dup.fileId, 'ALREADY_IN_DRIVE', '應直接認領 Drive 上既有的檔案');
   assertEqual(dup.status, 'linked', '認領後仍要正常回寫連結');
   assertEqual(d.sessionArgs[0].origin, 'https://fme-c-user.github.io', '必須把自己的 origin 送給後端（Drive 的 CORS 要求）');
+
+  // ===== 情境7：網路錯誤不可計入「放棄」次數 =====
+  //   門市現場網路不良是常態。若把網路失敗也算進 20 次上限，連續不良約 5 分鐘就會永久放棄回寫，
+  //   照片在 Drive 但報表永遠點不到（2026-08-20 檢視時發現的缺口）。
+  let netDown = true;
+  const e = loadUploader({ recordExists: () => true, linkNetworkFails: () => netDown });
+  await e.uploader.enqueue({ blob: 'b', name: 'net.jpg', pathParts: ['115年08月', 'N'], recordId: 'R5', month: '11508' });
+  await settle();
+  for (let i = 0; i < 40; i++) {                       // 遠超過 20 次上限
+    const p = Array.from(e.photos.values())[0];
+    e.photos.set(p.id, { ...p, linkNextAt: 0 });
+    await e.uploader.pump();
+    await new Promise((r) => setTimeout(r, 10));
+  }
+  let net = Array.from(e.photos.values())[0];
+  assertEqual(net.status, 'done', '網路錯誤重試 40 次後仍不可變成 orphan（要一直等網路恢復）');
+  assertEqual(net.linkTries || 0, 0, '網路錯誤不可累加「紀錄不存在」的放棄計數');
+  assertEqual(net.netTries > 0, true, '網路錯誤應另計數，用來拉長退避');
+  assertEqual(net.linkNextAt > Date.now(), true, '網路不良時應等久一點再試，不可空轉');
+
+  netDown = false;                                     // 網路恢復
+  net = Array.from(e.photos.values())[0];
+  e.photos.set(net.id, { ...net, linkNextAt: 0 });
+  await e.uploader.pump();
+  await settle();
+  assertEqual(Array.from(e.photos.values())[0].status, 'linked', '網路恢復後應成功補寫連結');
+
+  // ===== 情境8：送出失敗的紀錄要自動重送，且不可變成兩筆 =====
+  const submitted = [];
+  let recordOnServer = false;
+  const f = loadUploader({
+    recordExists: () => true,
+    queryRecords: async () => ({ records: recordOnServer ? [{ id: 'RQ1' }] : [] }),
+    submitRecord: async (rec) => { submitted.push(rec); recordOnServer = true; return { ok: true }; },
+  });
+  await f.api.__noop;
+  // 模擬 app.html 在送出前排入佇列、但送出當下失敗
+  await f.recordQueue.set('RQ1', { id: 'RQ1', status: 'pending', month: '11508', tries: 0, record: { id: 'RQ1', time: '2026-08-20 10:00' } });
+  await f.uploader.pumpRecords();
+  assertEqual(submitted.length, 1, '待送佇列裡的紀錄應被自動重送');
+  assertEqual(f.recordQueue.size, 0, '重送成功後應從佇列移除');
+
+  // 已經在後端存在時不可再送一次（避免同一筆變兩筆）
+  submitted.length = 0;
+  recordOnServer = true;
+  f.recordQueue.set('RQ1', { id: 'RQ1', status: 'pending', month: '11508', tries: 0, record: { id: 'RQ1', time: '2026-08-20 10:00' } });
+  await f.uploader.pumpRecords();
+  assertEqual(submitted.length, 0, '後端已有同一筆(相同紀錄ID)時不可重複送出');
+  assertEqual(f.recordQueue.size, 0, '確認已存在後應把佇列清掉');
+
+  // 後端明確拒絕(例如同店本月已有紀錄) → 標記 blocked，不再無限重送
+  const g = loadUploader({
+    recordExists: () => true,
+    queryRecords: async () => ({ records: [] }),
+    submitRecord: async () => ({ ok: false, message: '同店本月已有紀錄' }),
+  });
+  g.recordQueue.set('RQ2', { id: 'RQ2', status: 'pending', month: '11508', tries: 0, record: { id: 'RQ2', time: '2026-08-20 10:00' } });
+  await g.uploader.pumpRecords();
+  assertEqual(g.recordQueue.get('RQ2').status, 'blocked', '後端明確拒絕時應標記 blocked，不再重送');
+  assertEqual(g.recordQueue.get('RQ2').err.indexOf('同店') >= 0, true, '應保留後端的拒絕原因供人工判斷');
 
   console.log(failed === 0 ? '\n✅ 全部通過' : `\n❌ ${failed} 項失敗`);
   process.exit(failed === 0 ? 0 : 1);
