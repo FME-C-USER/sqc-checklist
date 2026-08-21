@@ -10,7 +10,7 @@
 // 後端版本：每次修改本檔就更新，並於前端「資料更新時間」旁顯示。
 // 用途：貼上程式碼後若忘記「部署 → 管理部署作業 → 新版本」，畫面上的後端版本就不會變，
 //       可立即分辨是「沒貼上」「貼了但沒部署」還是「已生效」。
-var GAS_VERSION = '20260820-1720';
+var GAS_VERSION = '20260821-0940';
 
 var SPREADSHEET_ID = '1GRZZsZRgakMGENspOxmlx96NfckC8UYOe0ipuNNEoh0';
 var DRIVE_ROOT_ID  = '122nQjldImn5Zh5AUguxZF0YzobThgdc9';
@@ -66,6 +66,9 @@ function doPost(e) {
       },
       getChangeLog: function () { return getChangeLog(p.limit); },
       lookupStore: function () { return lookupStore(p.q); },
+      getPhotoThumbs: function () { return { thumbs: photoThumbs(p.fileIds) }; },
+      getPhotoImage: function () { return photoImage(p.fileId); },
+      trashPhotos: function () { return trashPhotos(p.fileIds); },
     };
     if (!routes[action]) return json({ ok: false, error: '未知動作：' + action });
     var result = routes[action]();
@@ -73,7 +76,7 @@ function doPost(e) {
     // 記錄維護/資料異動軌跡
     // 異動紀錄：只記「刪除」與「修改」，不記新增/送出/匯入（避免每月上千筆送出把軌跡淹掉）
     // 「操作人」一律記登入帳號者（who 取自登入 token），與紀錄裡的「點檢人員」是不同概念
-    var LOGGED = { upsertItem: '修改題目', upsertRow: '修改', deleteItem: '刪除題目', deleteRow: '刪除', deleteRecord: '刪除點檢紀錄', updateRecord: '修改點檢紀錄' };
+    var LOGGED = { upsertItem: '修改題目', upsertRow: '修改', deleteItem: '刪除題目', deleteRow: '刪除', deleteRecord: '刪除點檢紀錄', updateRecord: '修改點檢紀錄', trashPhotos: '刪除照片' };
     var isUpsert = (action === 'upsertItem' || action === 'upsertRow');
     var skipAsAdd = isUpsert && result && result.mode !== 'update'; // upsert 若是新增就不記錄
     if (LOGGED[action] && !(result && result.ok === false) && !skipAsAdd) { // 被擋下的動作(如同店重複)不記錄
@@ -87,6 +90,7 @@ function doPost(e) {
         note = (p.id || '') + ' ' + (ur.storeName || '') + '（點檢人員：' + (ur.staffName || '') + '）';
       }
       else if (action === 'deleteRecord') { target = '點檢紀錄_' + p.month; note = p.id || ''; }
+      else if (action === 'trashPhotos') { target = 'Drive 照片'; note = (p.fileIds || []).length + ' 張（' + (p.note || '') + '）'; }
       logChange(who, LOGGED[action], target, note);
     }
     return json({ ok: true, result: result });
@@ -896,4 +900,56 @@ function mapToInternal(merged, month, id) {
     identity: merged['簽名身分別'], detail: merged.detail, observation: merged.observation, photos: merged.photos,
     paperPhotos: merged.paperPhotos, folderUrl: merged['照片資料夾'], createdAt: merged['建立時間'], updatedAt: merged.updatedAt,
   };
+}
+
+// ============================================================
+// 編輯紀錄時檢視/刪除既有照片
+//   照片存在腳本擁有者的 Drive 資料夾裡，其他登入者沒有該資料夾的檢視權，
+//   所以不能讓瀏覽器直接連 Drive 取圖，一律由後端代取（權杖仍不離開後端）。
+// ============================================================
+var THUMB_MAX = 40;                 // 一次最多取幾張縮圖
+var IMAGE_MAX_BYTES = 6291456;      // 放大檢視的單檔上限 6MB，超過就請使用者去 Drive 看
+
+/** 取縮圖（給編輯畫面的小圖用）：fileId -> dataURL；取不到的回空字串，前端顯示替代文字 */
+function photoThumbs(fileIds) {
+  var out = {};
+  (fileIds || []).slice(0, THUMB_MAX).forEach(function (id) {
+    id = String(id || '');
+    if (!id) return;
+    out[id] = '';
+    try {
+      var f = DriveApp.getFileById(id);
+      if (f.isTrashed()) return;                       // 已刪除的不給圖，前端會標示
+      var b = null;
+      try { b = f.getThumbnail(); } catch (e) { b = null; }
+      // 沒有縮圖時退而用原圖（本系統照片壓到 1.2MB 以內，尚可接受）
+      if (!b) { var raw = f.getBlob(); if (raw.getBytes().length <= 2097152) b = raw; }
+      if (!b) return;
+      out[id] = 'data:' + b.getContentType() + ';base64,' + Utilities.base64Encode(b.getBytes());
+    } catch (e) { /* 檔案不存在或無權限 → 留空 */ }
+  });
+  return out;
+}
+
+/** 取原圖（給點擊放大用），一次一張 */
+function photoImage(fileId) {
+  try {
+    var f = DriveApp.getFileById(String(fileId || ''));
+    if (f.isTrashed()) return { ok: false, message: '這個檔案已被刪除' };
+    var b = f.getBlob();
+    if (b.getBytes().length > IMAGE_MAX_BYTES) return { ok: false, message: '檔案過大，請直接在 Drive 開啟' };
+    return { ok: true, name: f.getName(), dataUrl: 'data:' + b.getContentType() + ';base64,' + Utilities.base64Encode(b.getBytes()) };
+  } catch (e) {
+    return { ok: false, message: '找不到檔案或沒有存取權' };
+  }
+}
+
+/** 刪除傳錯的照片：移到垃圾桶（可還原），不做永久刪除 */
+function trashPhotos(fileIds) {
+  var done = [], failed = [];
+  (fileIds || []).slice(0, THUMB_MAX).forEach(function (id) {
+    try { DriveApp.getFileById(String(id)).setTrashed(true); done.push(String(id)); }
+    catch (e) { failed.push(String(id)); }
+  });
+  return { trashed: done.length, failed: failed };
 }

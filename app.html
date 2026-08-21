@@ -25,7 +25,7 @@
 
   <script type="text/jsx" id="appCode">
     const { useState, useMemo, useEffect, useRef } = React;
-    const APP_VERSION = '20260820-1720'; // 每次部署更新，用來確認瀏覽器跑的是哪一版
+    const APP_VERSION = '20260821-0940'; // 每次部署更新，用來確認瀏覽器跑的是哪一版
 
     // 全域錯誤攔截：任何未預期錯誤（含 async 事件處理器的未捕捉 rejection）都要顯示出來，
     // 否則按鈕會「按了沒反應」而完全查不到原因
@@ -85,7 +85,42 @@
       return { name: file.name.replace(/\.[^.]+$/, '') + '.jpg', sizeKB: Math.round(blob.size / 1024), quality: q, thumb, blob };
     }
 
-    function PhotoUpload({ label, photos, onChange, required, max = 10, folderPath, existingCount = 0 }) {
+    // ============================================================
+    // 既有照片（Drive）的縮圖載入與放大檢視
+    //   照片在腳本擁有者的 Drive 資料夾裡，其他登入者沒有檢視權，所以縮圖一律由後端代取。
+    //   同一個 fileId 只取一次（快取），並把同批請求合併成一次往返。
+    // ============================================================
+    const ThumbCache = { map: {}, waiting: [], timer: null, listeners: new Set() };
+    function thumbOf(fileId) { return ThumbCache.map[fileId]; }   // undefined=還沒取、''=取不到、其他=dataURL
+    function requestThumb(fileId) {
+      if (!fileId || ThumbCache.map[fileId] !== undefined) return;
+      if (ThumbCache.waiting.indexOf(fileId) < 0) ThumbCache.waiting.push(fileId);
+      if (ThumbCache.timer) return;
+      ThumbCache.timer = setTimeout(() => {
+        const ids = ThumbCache.waiting.splice(0, 40);
+        ThumbCache.timer = null;
+        if (!ids.length) return;
+        SqcApi.getPhotoThumbs(ids)
+          .then(r => { Object.assign(ThumbCache.map, r.thumbs || {}); })
+          .catch(() => { ids.forEach(id => { ThumbCache.map[id] = ''; }); })   // 失敗也要標記，否則會一直重取
+          .finally(() => ThumbCache.listeners.forEach(fn => { try { fn(); } catch (e) { } }));
+      }, 120);
+    }
+    /** 讓元件在縮圖取回後重繪 */
+    function useThumbs(fileIds) {
+      const [, bump] = useState(0);
+      useEffect(() => {
+        const fn = () => bump(n => n + 1);
+        ThumbCache.listeners.add(fn);
+        return () => ThumbCache.listeners.delete(fn);
+      }, []);
+      (fileIds || []).forEach(requestThumb);
+    }
+    // 放大檢視：由 App 掛上開啟函式，PhotoUpload 直接呼叫（避免把 props 一路穿過 ItemRow）
+    const Lightbox = { open: null };
+
+    function PhotoUpload({ label, photos, onChange, required, max = 10, folderPath, existingCount = 0,
+      existing = [], onRemoveExisting = null }) {
       const [busy, setBusy] = useState(false);
       const list = photos || [];
       const handleFile = async (e) => {
@@ -101,6 +136,8 @@
         setBusy(false);
       };
       const remove = (i) => onChange(list.filter((_, idx) => idx !== i));
+      const exList = existing || [];
+      useThumbs(exList.map(e => e && e.fileId).filter(Boolean));
       const satisfied = existingCount > 0 || list.length > 0;
       const need = required && !satisfied;
       return (
@@ -123,6 +160,35 @@
             </div>
           </div>
           {folderPath && <div className="text-[10px] text-slate-400 mt-1">📁 {folderPath}</div>}
+          {/* 既有照片（Drive）：點縮圖放大；× 標記刪除，按「完成編輯」才真的移入垃圾桶 */}
+          {exList.length > 0 && (
+            <div className="flex flex-wrap gap-2 mt-2">
+              {exList.map((e, i) => {
+                const fid = e && e.fileId;
+                const nm = (e && e.name) || String(e || '');
+                const src = fid ? thumbOf(fid) : '';
+                return (
+                  <div key={nm + i} className="relative">
+                    {src ? (
+                      <img src={src} title={nm} onClick={() => Lightbox.open && Lightbox.open({ fileId: fid, name: nm })}
+                        className="w-16 h-16 object-cover rounded border-2 border-emerald-400 cursor-zoom-in" />
+                    ) : (
+                      <div title={nm}
+                        onClick={() => fid && Lightbox.open && Lightbox.open({ fileId: fid, name: nm })}
+                        className={"w-16 h-16 rounded border-2 border-emerald-400 bg-white flex items-center justify-center text-[9px] text-center px-1 " + (fid ? "cursor-zoom-in text-slate-500" : "text-slate-400")}>
+                        {fid ? (src === '' ? '無法預覽' : '載入中…') : '無雲端連結'}
+                      </div>
+                    )}
+                    <span className="absolute bottom-0 inset-x-0 bg-emerald-700/70 text-white text-[9px] text-center">原照片</span>
+                    {onRemoveExisting && (
+                      <button onClick={() => onRemoveExisting(i)} title="刪除這張（按完成編輯後生效）"
+                        className="absolute -top-1.5 -right-1.5 w-5 h-5 bg-red-500 text-white rounded-full text-xs leading-none">×</button>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
           {list.length > 0 && (
             <div className="flex flex-wrap gap-2 mt-2">
               {list.map((p, i) => (
@@ -319,6 +385,22 @@
         return line;
       }));
     }
+    /**
+     * 照片檔名的下一個序號：取「既有最大序號+1」，不是陣列長度+1。
+     * 為什麼：編輯時刪掉中間某張再新增，用長度會算出與仍存在的檔案相同的序號 →
+     * 檔名撞名，而後端的冪等機制會把它當成同一張照片而去認領舊檔，新照片就永遠傳不上去。
+     * list 內的項目可能是純檔名字串(舊資料)或 {name, fileId}。
+     */
+    function nextPhotoIdx(list) {
+      let mx = 0;
+      (list || []).forEach((e) => {
+        const nm = typeof e === 'string' ? e : ((e && e.name) || '');
+        const m = /_(\d+)\.jpg$/i.exec(nm);
+        if (m) mx = Math.max(mx, parseInt(m[1], 10));
+      });
+      return mx + 1;
+    }
+
     // ===== 報表共用樣式 =====
     const REPORT_FONT = '微軟正黑體';
     const REPORT_COLORS = {
@@ -848,7 +930,7 @@
     // ============================================================
     // 點檢項目列
     // ============================================================
-    function ItemRow({ item, state, setState, canPhoto, monthFolder, existingCount = 0 }) {
+    function ItemRow({ item, state, setState, canPhoto, monthFolder, existingCount = 0, existing = [], onRemoveExisting = null }) {
       const s = state || {};
       const labelOf = (sub) => typeof sub === 'string' ? sub : sub.label;
       const isCustom = (sub) => typeof sub === 'object' && sub.custom;
@@ -926,7 +1008,7 @@
           )}
 
           {isNG && canPhoto && (
-            <PhotoUpload label="缺失照片（NG 項目必須拍照記錄）" required photos={s.photos} onChange={p => setState({ ...s, photos: p })} folderPath={`${DRIVE_ROOT}/${monthFolder}/${item.name}/缺失`} existingCount={existingCount} />
+            <PhotoUpload label="缺失照片（NG 項目必須拍照記錄）" required photos={s.photos} onChange={p => setState({ ...s, photos: p })} folderPath={`${DRIVE_ROOT}/${monthFolder}/${item.name}/缺失`} existingCount={existingCount} existing={existing} onRemoveExisting={onRemoveExisting} />
           )}
         </div>
       );
@@ -1020,6 +1102,23 @@
       const monthFolder = monthFolderOf(workMonth);
       // 編輯既有紀錄時，查該欄位是否已有原照片（免重傳）；key 需與 submit() 的 addPhotos/hasExisting 一致
       const existingCountAt = (parts) => (existingPhotos[parts.join('/')] || []).length;
+      const existingAt = (parts) => existingPhotos[parts.join('/')] || [];
+      // 刪除既有照片：先從畫面與待送的照片JSON移除，Drive 檔案等「完成編輯」成功後才移入垃圾桶。
+      // 這樣中途放棄編輯就什麼都沒變，符合編輯應有的語意。
+      const removeExistingAt = (parts, i) => {
+        const key = parts.join('/');
+        const arr = existingPhotos[key] || [];
+        const gone = arr[i];
+        if (!gone) return;
+        const nm = (gone && gone.name) || String(gone || '');
+        if (!confirm(`要刪除這張原照片嗎？
+
+${nm}
+
+按「完成編輯」後才會真的刪除（移到 Drive 垃圾桶，可還原）。`)) return;
+        setExistingPhotos({ ...existingPhotos, [key]: arr.filter((_, k) => k !== i) });
+        if (gone && gone.fileId) setRemovedPhotos(prev => [...prev, { fileId: gone.fileId, name: nm }]);
+      };
 
       // 工號比對一律轉字串：Sheet 會把工號存成數字，下拉選單的值是字串，嚴格比對會找不到人
       const findStaff = (id) => STAFFS.find(s => String(s.id) === String(id));
@@ -1053,6 +1152,20 @@
       const [editingRecordId, setEditingRecordId] = useState(null); // 非 null＝編輯既有紀錄
       const [editingMonth, setEditingMonth] = useState(null);       // 該筆紀錄「原本所在」的月份活頁（點檢時間改跨月時仍要找得到原列）
       const [existingPhotos, setExistingPhotos] = useState({});      // 編輯時保留原有照片JSON
+      const [removedPhotos, setRemovedPhotos] = useState([]);        // 編輯中被標記刪除的原照片（完成編輯後才移入垃圾桶）
+      const [lightbox, setLightbox] = useState(null);                // 照片放大檢視
+      useEffect(() => {
+        // 供 PhotoUpload 直接呼叫（不必把 props 一路穿過 ItemRow）
+        Lightbox.open = ({ fileId, name }) => {
+          setLightbox({ name, dataUrl: '', err: '' });
+          SqcApi.getPhotoImage(fileId)
+            .then(r => setLightbox(r && r.ok
+              ? { name: r.name || name, dataUrl: r.dataUrl, err: '' }
+              : { name, dataUrl: '', err: (r && r.message) || '無法取得原圖' }))
+            .catch(e => setLightbox({ name, dataUrl: '', err: e.message || '無法取得原圖' }));
+        };
+        return () => { Lightbox.open = null; };
+      }, []);
       const [records, setRecords] = useState([]);
       // 正式模式：查詢紀錄/彙總 進場或改條件時，向後端查資料
       // 注意：紀錄依「點檢時間」分月活頁存放，查詢用的月份必須依查詢日期範圍(filter.from/to)決定，
@@ -1113,7 +1226,7 @@
         } catch (e) { alert('查詢失敗：' + e.message); }
       };
 
-      const resetWork = () => { setScores({}); setKeyObs({}); setToilet({}); setToiletPhotos({}); setToiletReasons({}); setObsText(''); setPerfectPhotos({}); setPaperForm([]); setSign({ count: '', identity: '', remark: '' }); setEditingRecordId(null); setEditingMonth(null); setExistingPhotos({}); };
+      const resetWork = () => { setScores({}); setKeyObs({}); setToilet({}); setToiletPhotos({}); setToiletReasons({}); setObsText(''); setPerfectPhotos({}); setPaperForm([]); setSign({ count: '', identity: '', remark: '' }); setEditingRecordId(null); setEditingMonth(null); setExistingPhotos({}); setRemovedPhotos([]); };
 
       // 編輯既有紀錄：把該筆載回點檢作業
       const openEdit = (row) => {
@@ -1237,7 +1350,7 @@
           const key = pathParts.join('/');
           photosJson[key] = photosJson[key] || [];
           arr.forEach((p) => {
-            const idx = photosJson[key].length + 1;
+            const idx = nextPhotoIdx(photosJson[key]);
             const name = `${storeCode || 'S'}_${basic.time.slice(0, 10)}_${key.replace(/[\/\s]/g, '')}_${idx}.jpg`;
             photosJson[key].push(name);
             queue.push({ blob: p.blob, name, pathParts, thumb: p.thumb });
@@ -1291,6 +1404,11 @@
             return;
           }
           if (!isEdit) SqcDB.delQueuedRecord(recId).catch(() => { });   // 已確認寫入後端，不需重送
+          // 紀錄已更新成功，才把被標記刪除的原照片移入 Drive 垃圾桶（可還原）
+          if (removedPhotos.length) {
+            SqcApi.trashPhotos(removedPhotos.map(x => x.fileId), storeName + ' ' + basic.time.slice(0, 10))
+              .catch(e => alert('紀錄已更新，但刪除舊照片失敗：' + e.message + '。照片仍在 Drive，可再編輯一次重試。'));
+          }
           alert(`✅ ${isEdit ? '已更新' : '已送出'}\n店鋪：${storeName}　得分：${total}/${TOTAL_MAX}（${grade.txt}）` + (queue.length ? `\n新增照片 ${queue.length} 張背景上傳中` : ''));
           if (!isEdit) setInspectedCodes(prev => ({ ...prev, [normCode(storeCode)]: true }));
           resetWork(); setTab('records'); loadRecords();
@@ -1516,6 +1634,19 @@
                 <button onClick={() => { setLoading(true); reloadBoot(workMonth).catch(e => setBootWarn('連線不穩，目前顯示上次載入的資料（' + (e.message || '載入失敗') + '）')).finally(() => setLoading(false)); }} className="underline hover:text-slate-600">重新載入</button>
               </div>
             )}
+            {lightbox && (
+              <div onClick={() => setLightbox(null)}
+                className="fixed inset-0 z-50 bg-black/80 flex flex-col items-center justify-center p-4 cursor-zoom-out">
+                <div className="text-white text-xs mb-2 break-all text-center max-w-full">{lightbox.name}</div>
+                {lightbox.err
+                  ? <div className="bg-white rounded-lg px-4 py-3 text-sm text-red-600">{lightbox.err}</div>
+                  : lightbox.dataUrl
+                    ? <img src={lightbox.dataUrl} onClick={e => e.stopPropagation()}
+                      className="max-h-[80vh] max-w-full object-contain rounded shadow-lg bg-white" />
+                    : <div className="bg-white rounded-lg px-4 py-3 text-sm text-slate-600">載入原圖中…</div>}
+                <div className="text-white/70 text-xs mt-3">點任意處關閉</div>
+              </div>
+            )}
             {(pendingUp.unfinished > 0 || pendingUp.queuedRecords > 0 || pendingUp.orphan > 0) && (
               <div className="bg-sky-50 border border-sky-300 text-sky-900 text-sm rounded-lg px-3 py-2 flex items-center justify-between gap-3">
                 <div>
@@ -1644,7 +1775,7 @@
                   return (
                     <div key={cat.key} className="bg-white rounded-xl shadow-sm overflow-hidden">
                       <div className="bg-slate-700 text-white px-4 py-2.5 flex justify-between"><span className="font-bold">{cat.name}</span><span className="text-sm">{cs} / {cat.max}</span></div>
-                      {cat.items.map(it => <ItemRow key={it.id} item={it} state={scores[it.id]} setState={st => setItemState(it.id, st)} canPhoto={canPhoto} monthFolder={monthFolder} existingCount={existingCountAt([monthFolder, it.name, '缺失'])} />)}
+                      {cat.items.map(it => <ItemRow key={it.id} item={it} state={scores[it.id]} setState={st => setItemState(it.id, st)} canPhoto={canPhoto} monthFolder={monthFolder} existingCount={existingCountAt([monthFolder, it.name, '缺失'])} existing={existingAt([monthFolder, it.name, '缺失'])} onRemoveExisting={i => removeExistingAt([monthFolder, it.name, '缺失'], i)} />)}
                     </div>
                   );
                 })}
@@ -1655,7 +1786,7 @@
                   <div className="p-4 space-y-3">
                     {/* 重點觀察題：僅可拍照店鋪需拍照 */}
                     {canPhoto && checklist.keyObservations.map(k => (
-                      <PhotoUpload key={k.id} label={k.name} required photos={keyObs[k.id]} onChange={p => setKeyObs({ ...keyObs, [k.id]: p })} folderPath={`${DRIVE_ROOT}/${monthFolder}/${k.name}`} existingCount={existingCountAt([monthFolder, k.name])} />
+                      <PhotoUpload key={k.id} label={k.name} required photos={keyObs[k.id]} onChange={p => setKeyObs({ ...keyObs, [k.id]: p })} folderPath={`${DRIVE_ROOT}/${monthFolder}/${k.name}`} existingCount={existingCountAt([monthFolder, k.name])} existing={existingAt([monthFolder, k.name])} onRemoveExisting={i => removeExistingAt([monthFolder, k.name], i)} />
                     ))}
 
                     {/* 對外廁所觀察記錄（條件式顯示） */}
@@ -1694,7 +1825,7 @@
                                 </div>
                               )}
                               {toilet[t.id] === '不符合' && canPhoto && (
-                                <PhotoUpload label="缺失照片（不符合必須拍照）" required photos={toiletPhotos[t.id]} onChange={p => setToiletPhotos({ ...toiletPhotos, [t.id]: p })} folderPath={`${DRIVE_ROOT}/${monthFolder}/廁所觀察/${t.name}/缺失`} existingCount={existingCountAt([monthFolder, '廁所觀察', t.name, '缺失'])} />
+                                <PhotoUpload label="缺失照片（不符合必須拍照）" required photos={toiletPhotos[t.id]} onChange={p => setToiletPhotos({ ...toiletPhotos, [t.id]: p })} folderPath={`${DRIVE_ROOT}/${monthFolder}/廁所觀察/${t.name}/缺失`} existingCount={existingCountAt([monthFolder, '廁所觀察', t.name, '缺失'])} existing={existingAt([monthFolder, '廁所觀察', t.name, '缺失'])} onRemoveExisting={i => removeExistingAt([monthFolder, '廁所觀察', t.name, '缺失'], i)} />
                               )}
                             </div>
                           ))}
@@ -1713,7 +1844,7 @@
                     <div className="p-4">
                       <p className="text-xs text-slate-500 mb-2">店鋪無缺失：請拍下列指定區域，每區可上傳 10 張；相鄰區域可共拍一張。</p>
                       <div className="grid md:grid-cols-2 gap-2">
-                        {PERFECT_ZONES.map(z => <PhotoUpload key={z} label={z} required photos={perfectPhotos[z]} onChange={p => setPerfectPhotos({ ...perfectPhotos, [z]: p })} folderPath={`${DRIVE_ROOT}/${monthFolder}/滿分照片/${z}`} existingCount={existingCountAt([monthFolder, '滿分照片', z])} />)}
+                        {PERFECT_ZONES.map(z => <PhotoUpload key={z} label={z} required photos={perfectPhotos[z]} onChange={p => setPerfectPhotos({ ...perfectPhotos, [z]: p })} folderPath={`${DRIVE_ROOT}/${monthFolder}/滿分照片/${z}`} existingCount={existingCountAt([monthFolder, '滿分照片', z])} existing={existingAt([monthFolder, '滿分照片', z])} onRemoveExisting={i => removeExistingAt([monthFolder, '滿分照片', z], i)} />)}
                       </div>
                     </div>
                   </div>
@@ -1735,7 +1866,7 @@
                       <textarea value={sign.remark} onChange={e => setSign({ ...sign, remark: e.target.value })} rows={2} className="w-full px-3 py-2 border border-slate-300 rounded-lg" placeholder="例：蕃薯機調理中、熱狗機已報修"></textarea></div>
                     <div>
                       <div className="text-sm font-semibold text-slate-600">📄 紙本點檢表上傳<span className="text-red-500 text-xs"> *所有店皆必須上傳才能送出</span></div>
-                      <PhotoUpload label="紙本點檢表照片" required photos={paperForm} onChange={setPaperForm} folderPath={`${DRIVE_ROOT}/${monthFolder}/SQC點檢表完成照片`} existingCount={existingCountAt([monthFolder, 'SQC點檢表完成照片'])} />
+                      <PhotoUpload label="紙本點檢表照片" required photos={paperForm} onChange={setPaperForm} folderPath={`${DRIVE_ROOT}/${monthFolder}/SQC點檢表完成照片`} existingCount={existingCountAt([monthFolder, 'SQC點檢表完成照片'])} existing={existingAt([monthFolder, 'SQC點檢表完成照片'])} onRemoveExisting={i => removeExistingAt([monthFolder, 'SQC點檢表完成照片'], i)} />
                     </div>
                   </div>
                 </div>

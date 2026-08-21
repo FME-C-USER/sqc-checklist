@@ -106,5 +106,9 @@
     getMaster: (kind, month) => call('getMaster', { kind, month }),
     getChangeLog: (limit) => call('getChangeLog', { limit }),
     lookupStore: (q) => call('lookupStore', { q }),
+    // 編輯畫面檢視/刪除既有照片（照片在腳本擁有者的 Drive，需由後端代取）
+    getPhotoThumbs: (fileIds) => call('getPhotoThumbs', { fileIds }),
+    getPhotoImage: (fileId) => call('getPhotoImage', { fileId }),
+    trashPhotos: (fileIds, note) => call('trashPhotos', { fileIds, note }),
   };
 })();
