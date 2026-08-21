@@ -21,7 +21,7 @@ const { ctx } = loadGasFile(GS_PATH);
 // login 需要 CacheService(發權杖) 與 UrlFetchApp(日翊驗證)。此處驗證一律回成功(000)，
 // 才能單獨測「名冊比對」與權限這段邏輯。
 const cache = {};
-ctx.CacheService = { getScriptCache: () => ({ put: (k, v) => { cache[k] = v; }, get: (k) => cache[k] || null }) };
+ctx.CacheService = { getScriptCache: () => ({ put: (k, v) => { cache[k] = v; }, get: (k) => cache[k] || null, remove: (k) => { delete cache[k]; } }) };
 ctx.UrlFetchApp = { fetch: () => ({ getContentText: () => JSON.stringify({ MSG: '000 OK' }) }) };
 vm.runInContext(fs.readFileSync(GS_PATH, 'utf8'), ctx, { filename: GS_PATH });
 

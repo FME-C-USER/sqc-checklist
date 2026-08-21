@@ -3,7 +3,7 @@
 //   - 本站靜態檔：cache-first（離線可用）
 //   - GAS API / Drive：一律走網路，不快取（資料要即時）
 // ============================================================
-const CACHE = 'sqc-shell-v2';
+const CACHE = 'sqc-shell-v3';
 const SHELL = [
   './',
   './index.html',
@@ -14,12 +14,14 @@ const SHELL = [
   './js/api.js',
   './js/db.js',
   './js/uploader.js',
-  // 外部 CDN（opaque 快取，離線可用）
-  'https://cdn.tailwindcss.com',
-  'https://unpkg.com/react@18/umd/react.production.min.js',
-  'https://unpkg.com/react-dom@18/umd/react-dom.production.min.js',
-  'https://unpkg.com/@babel/standalone/babel.min.js',
-  'https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js',
+  './js/billing.js',
+  // 函式庫改為自帶（見 vendor/README.md）：同源資源，不再依賴任何外部 CDN
+  './vendor/tailwindcss-3.4.17.js',
+  './vendor/react-18.3.1.min.js',
+  './vendor/react-dom-18.3.1.min.js',
+  './vendor/babel-standalone-8.0.4.min.js',
+  './vendor/xlsx-0.18.5.full.min.js',
+  './vendor/exceljs-4.4.0.min.js',
 ];
 
 self.addEventListener('install', (e) => {

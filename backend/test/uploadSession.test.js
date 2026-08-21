@@ -48,7 +48,7 @@ ctx.DriveApp = {
 ctx.ScriptApp = { getOAuthToken: () => SECRET };
 
 const cache = {};
-ctx.CacheService = { getScriptCache: () => ({ put: (k, v) => { cache[k] = v; }, get: (k) => cache[k] || null }) };
+ctx.CacheService = { getScriptCache: () => ({ put: (k, v) => { cache[k] = v; }, get: (k) => cache[k] || null, remove: (k) => { delete cache[k]; } }) };
 ctx.ContentService = { createTextOutput: (s) => ({ __text: s, setMimeType: () => ({ __text: s }) }), MimeType: { JSON: 'json' } };
 
 let sentRequests = [];      // 記錄後端送往 Drive 的請求，用來確認權杖只在伺服器端使用

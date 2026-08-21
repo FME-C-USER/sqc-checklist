@@ -10,7 +10,7 @@
 // 後端版本：每次修改本檔就更新，並於前端「資料更新時間」旁顯示。
 // 用途：貼上程式碼後若忘記「部署 → 管理部署作業 → 新版本」，畫面上的後端版本就不會變，
 //       可立即分辨是「沒貼上」「貼了但沒部署」還是「已生效」。
-var GAS_VERSION = '20260821-0940';
+var GAS_VERSION = '20260821-1215';
 
 var SPREADSHEET_ID = '1GRZZsZRgakMGENspOxmlx96NfckC8UYOe0ipuNNEoh0';
 var DRIVE_ROOT_ID  = '122nQjldImn5Zh5AUguxZF0YzobThgdc9';
@@ -106,10 +106,36 @@ function json(obj) {
 // ============================================================
 // 登入（伺服器端呼叫 CheckUserId，避免前端 CORS）
 // ============================================================
+// 登入節流（2026-08 資安檢測 Medium 項目）
+//   本 Web App 對外開放且 login 不需權杖，若不限制次數，本系統就成了對公司 AD
+//   做密碼噴灑/暴力破解的代理，而且在 AD 端看到的來源 IP 全是 Google 的伺服器。
+//   計數只算「帳密/AD 被拒絕」(100/200)；服務本身異常(998/999)不計，
+//   否則驗證服務出問題時會把正常使用者一起鎖住。
+var LOGIN_MAX_FAILS = 5;
+var LOGIN_BLOCK_SEC = 900;   // 連續失敗達上限後封鎖 15 分鐘（每次再嘗試會重新計時）
+
+function loginFailKey(userId) { return 'loginfail_' + String(userId || '').toLowerCase(); }
+function loginFailCount(userId) {
+  var v = CacheService.getScriptCache().get(loginFailKey(userId));
+  return v ? Number(v) || 0 : 0;
+}
+function bumpLoginFail(userId) {
+  var n = loginFailCount(userId) + 1;
+  CacheService.getScriptCache().put(loginFailKey(userId), String(n), LOGIN_BLOCK_SEC);
+  return n;
+}
+function clearLoginFail(userId) { CacheService.getScriptCache().remove(loginFailKey(userId)); }
+
 function login(userId, password) {
   userId = String(userId || '').slice(0, 15);
   password = String(password || '').slice(0, 30);
   if (!userId || !password) return { ok: false, message: '請輸入帳號與密碼' };
+
+  // 超過上限就直接擋下，連 AD 都不去打
+  if (loginFailCount(userId) >= LOGIN_MAX_FAILS) {
+    return { ok: false, code: 'THROTTLED',
+      message: '登入失敗次數過多，請等 ' + Math.round(LOGIN_BLOCK_SEC / 60) + ' 分鐘後再試（若忘記密碼請聯絡資訊人員）' };
+  }
 
   var code = '999';
   try {
@@ -125,8 +151,23 @@ function login(userId, password) {
     return { ok: false, message: '無法連線驗證服務，請稍後再試' };
   }
 
-  var errMap = { '100': '帳號或密碼錯誤', '200': 'AD 認證錯誤', '998': '系統暫時無法使用，請稍後再試', '999': '系統發生錯誤，請聯絡管理員' };
-  if (code !== '000') return { ok: false, message: errMap[code] || errMap['999'] };
+  var errMap = {
+    '100': '帳號或密碼錯誤',
+    // 200 不是打錯密碼(那是100)，是 AD 端拒絕/無法完成認證，常見於帳號被鎖定或密碼已過期
+    '200': 'AD 認證錯誤：可能是帳號已鎖定或密碼過期。請先用同一組帳密登入 EIP 確認，或聯絡資訊人員',
+    '998': '系統暫時無法使用，請稍後再試',
+    '999': '系統發生錯誤，請聯絡管理員',
+  };
+  if (code !== '000') {
+    // 只有「帳密/AD 被拒絕」才計入節流；服務異常不算，避免驗證服務出問題時鎖住正常使用者
+    if (code === '100' || code === '200') {
+      var fails = bumpLoginFail(userId);
+      var left = LOGIN_MAX_FAILS - fails;
+      return { ok: false, message: errMap[code] + (left > 0 ? '（再失敗 ' + left + ' 次將暫時鎖定）' : '') };
+    }
+    return { ok: false, message: errMap[code] || errMap['999'] };
+  }
+  clearLoginFail(userId);   // 成功即歸零
 
   // 以 AD 比對「點檢人員」名冊取身分。
   // 名冊多數人的 AD 欄是空的，故比對不到時仍放行（只要日翊帳密正確就能登入、能點檢），
