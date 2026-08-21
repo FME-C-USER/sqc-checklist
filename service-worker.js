@@ -20,7 +20,7 @@ const SHELL = [
   './vendor/react-18.3.1.min.js',
   './vendor/react-dom-18.3.1.min.js',
   './vendor/babel-standalone-8.0.4.min.js',
-  './vendor/xlsx-0.18.5.full.min.js',
+  './vendor/xlsx-0.20.3.full.min.js',
   './vendor/exceljs-4.4.0.min.js',
 ];
 

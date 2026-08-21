@@ -22,9 +22,17 @@
 | react-18.3.1.min.js | 18.3.1 | unpkg.com/react@18.3.1/umd/react.production.min.js | d949f1c3687aedad |
 | react-dom-18.3.1.min.js | 18.3.1 | unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js | 35f4f974f4b2bcd4 |
 | babel-standalone-8.0.4.min.js | 8.0.4 | unpkg.com/@babel/standalone@8.0.4/babel.min.js | 9a4b639c5c1e174e |
-| xlsx-0.18.5.full.min.js | 0.18.5 | cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js | c9506197caf809a0 |
+| xlsx-0.20.3.full.min.js | 0.20.3 | cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js | cc015130aa8521e7 |
 | exceljs-4.4.0.min.js | 4.4.0 | cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js | 7e49da68588e250d |
 | tailwindcss-3.4.17.js | 3.4.17 | cdn.tailwindcss.com/3.4.17 | 176e894661aa9cdc |
+
+## 為什麼 xlsx 不從 npm 取
+
+npm 上的 `xlsx` 停在 0.18.5 且已標為 deprecated，該版本有已知漏洞
+（原型污染 CVE-2023-30533，修於 0.19.3；ReDoS，修於 0.20.2）。
+本系統會用它解析使用者上傳的 .xlsx 匯入檔，屬於直接暴露面，
+因此改由官方來源 cdn.sheetjs.com 取 0.20.3。
+升級後已比對過：本專案的實際匯入檔（題庫、觀察題）解析結果與 0.18.5 完全相同。
 
 ## 升級版本的做法
 

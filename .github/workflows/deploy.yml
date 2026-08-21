@@ -1,0 +1,201 @@
+# generated-by: github-action-n
+# version: 2.1.9
+name: Deploy
+
+on:
+  push:
+    branches:
+      - main
+
+env:
+  REGION: asia-east1
+  PROJECT_ID: c000-493901
+  SERVICE_NAME: sqc-checklist
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set service name
+        id: svc
+        run: |
+          echo "name=${{ env.SERVICE_NAME }}" >> $GITHUB_OUTPUT
+
+      - name: Set deployer label
+        id: deployer
+        run: |
+          FULL_EMAIL="${{ github.event.head_commit.author.email }}"
+          PREFIX="${FULL_EMAIL%%@*}"
+          LABEL=$(echo "$PREFIX" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9_-]/-/g' | cut -c1-63)
+          REPO="${{ github.event.repository.name }}"
+          REPO_LABEL=$(echo "$REPO" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9_-]/-/g' | cut -c1-63)
+          echo "label=$LABEL" >> $GITHUB_OUTPUT
+          echo "repo=$REPO_LABEL" >> $GITHUB_OUTPUT
+          echo "Deployed by (GitHub actor): ${{ github.actor }}"
+          echo "Deployed by (full email): $FULL_EMAIL"
+          echo "Repo: $REPO"
+
+      - name: Check security report
+        run: |
+          TODAY=$(date +%Y%m%d)
+          REPORT=$(ls security-report-${TODAY}-*.docx 2>/dev/null | head -1)
+          if [ -z "$REPORT" ]; then
+            echo "No security report found. Cannot deploy. Please run security scan first."
+            exit 1
+          fi
+          echo "Security report confirmed: $REPORT"
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: "projects/403438157899/locations/global/workloadIdentityPools/github-pool/providers/github-provider"
+          service_account: "github-actions-sa@c000-493901.iam.gserviceaccount.com"
+
+      - name: Check if service exists
+        id: check
+        run: |
+          EXISTS=$(gcloud run services describe ${{ steps.svc.outputs.name }} \
+            --region=${{ env.REGION }} \
+            --project=${{ env.PROJECT_ID }} \
+            --format="value(name)" 2>/dev/null || echo "")
+          if [ -n "$EXISTS" ]; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Deploy existing service (no_traffic)
+        id: deploy
+        if: steps.check.outputs.exists == 'true'
+        uses: google-github-actions/deploy-cloudrun@v3
+        with:
+          service: ${{ steps.svc.outputs.name }}
+          region: ${{ env.REGION }}
+          project_id: ${{ env.PROJECT_ID }}
+          source: .
+          no_traffic: true
+          flags: --no-invoker-iam-check --update-labels=deployed-by=${{ steps.deployer.outputs.label }},repo=${{ steps.deployer.outputs.repo }}
+
+      - name: Deploy new service
+        id: deploy_new
+        if: steps.check.outputs.exists == 'false'
+        uses: google-github-actions/deploy-cloudrun@v3
+        with:
+          service: ${{ steps.svc.outputs.name }}
+          region: ${{ env.REGION }}
+          project_id: ${{ env.PROJECT_ID }}
+          source: .
+          no_traffic: true
+          flags: --no-invoker-iam-check --update-labels=deployed-by=${{ steps.deployer.outputs.label }},repo=${{ steps.deployer.outputs.repo }}
+
+      - name: Get deployed image digest
+        id: image
+        run: |
+          REVISION=$(gcloud run services describe ${{ steps.svc.outputs.name }} \
+            --region=${{ env.REGION }} \
+            --project=${{ env.PROJECT_ID }} \
+            --format="value(status.latestCreatedRevisionName)")
+          IMAGE_REF=$(gcloud run revisions describe $REVISION \
+            --region=${{ env.REGION }} \
+            --project=${{ env.PROJECT_ID }} \
+            --format="value(spec.containers[0].image)")
+          IMAGE_BASE=$(echo "$IMAGE_REF" | sed 's/@sha256:.*//' | sed 's/:.*//')
+          DIGEST=$(gcloud artifacts docker images describe "$IMAGE_REF" \
+            --format="value(image_summary.digest)" 2>/dev/null || echo "")
+          if [ -z "$DIGEST" ]; then
+            RESOURCE_URL="https://$IMAGE_REF"
+          else
+            RESOURCE_URL="https://${IMAGE_BASE}@${DIGEST}"
+          fi
+          echo "revision=$REVISION" >> $GITHUB_OUTPUT
+          echo "resource_url=$RESOURCE_URL" >> $GITHUB_OUTPUT
+          echo "Deployed revision: $REVISION"
+          echo "Resource URL: $RESOURCE_URL"
+
+      - name: Wait for container scan results
+        id: scan
+        run: |
+          PROJECT="${{ env.PROJECT_ID }}"
+          RESOURCE_URL="${{ steps.image.outputs.resource_url }}"
+          MAX_WAIT=900
+          INTERVAL=30
+          ELAPSED=0
+          echo "Waiting for container scan results..."
+          echo "Target: $RESOURCE_URL"
+          while [ $ELAPSED -lt $MAX_WAIT ]; do
+            sleep $INTERVAL
+            ELAPSED=$((ELAPSED + INTERVAL))
+            TOKEN=$(gcloud auth print-access-token)
+            DISCOVERY=$(curl -sf \
+              -H "Authorization: Bearer $TOKEN" \
+              --get \
+              --data-urlencode "filter=kind=\"DISCOVERY\" AND resourceUri=\"${RESOURCE_URL}\"" \
+              "https://containeranalysis.googleapis.com/v1/projects/${PROJECT}/occurrences" \
+              2>/dev/null || echo "")
+            STATUS=$(echo "$DISCOVERY" | python3 -c "import sys,json; d=json.load(sys.stdin); os=d.get('occurrences',[]); print(os[0].get('discovery',{}).get('analysisStatus','') if os else '')" 2>/dev/null || echo "")
+            echo "Discovery status: $STATUS (${ELAPSED}s elapsed)"
+            if [ "$STATUS" = "FINISHED_SUCCESS" ] || [ "$STATUS" = "FINISHED_FAILED" ]; then
+              echo "Scan complete!"
+              VULN=$(curl -sf \
+                -H "Authorization: Bearer $TOKEN" \
+                --get \
+                --data-urlencode "filter=kind=\"VULNERABILITY\" AND resourceUri=\"${RESOURCE_URL}\"" \
+                "https://containeranalysis.googleapis.com/v1/projects/${PROJECT}/occurrences" \
+                2>/dev/null || echo "")
+              COUNT=$(echo "$VULN" | python3 -c "import sys,json; d=json.load(sys.stdin); print(len(d.get('occurrences',[])))" 2>/dev/null || echo "0")
+              HIGH=$(echo "$VULN" | python3 -c "import sys,json;d=json.load(sys.stdin);print(sum(1 for o in d.get('occurrences',[]) if o.get('vulnerability',{}).get('severity','') in ['CRITICAL','HIGH','MEDIUM'] or (o.get('vulnerability',{}).get('severity','') in ['LOW','MINIMAL','','SEVERITY_UNSPECIFIED'] and any(p.get('fixedVersion',{}).get('name','') not in ['','none'] for p in o.get('vulnerability',{}).get('packageIssue',[])))))" 2>/dev/null || echo "0")
+              WARN=$(echo "$VULN" | python3 -c "import sys,json;d=json.load(sys.stdin);print(sum(1 for o in d.get('occurrences',[]) if o.get('vulnerability',{}).get('severity','') in ['LOW','MINIMAL','','SEVERITY_UNSPECIFIED'] and not any(p.get('fixedVersion',{}).get('name','') not in ['','none'] for p in o.get('vulnerability',{}).get('packageIssue',[]))))" 2>/dev/null || echo "0")
+              echo "Found $COUNT vulnerabilities: $HIGH blocking (critical/high/medium or fixable low), $WARN warning-only (unfixable low)."
+              echo "$VULN" | python3 -c "import sys,json;d=json.load(sys.stdin);[print(f'  [{o.get(\"vulnerability\",{}).get(\"severity\",\"\")}] {o.get(\"vulnerability\",{}).get(\"shortDescription\",\"\")} {p.get(\"affectedPackage\",\"\")} {p.get(\"affectedVersion\",{}).get(\"name\",\"\")} -> fix: {p.get(\"fixedVersion\",{}).get(\"name\",\"none\")}') for o in d.get('occurrences',[]) for p in o.get('vulnerability',{}).get('packageIssue',[])]" 2>/dev/null || true
+              echo "count=$COUNT" >> $GITHUB_OUTPUT
+              echo "high=$HIGH" >> $GITHUB_OUTPUT
+              echo "warn=$WARN" >> $GITHUB_OUTPUT
+              break
+            fi
+          done
+          if [ $ELAPSED -ge $MAX_WAIT ]; then
+            echo "SCAN_TIMEOUT=true" >> $GITHUB_ENV
+            echo "count=-1" >> $GITHUB_OUTPUT
+            echo "high=1" >> $GITHUB_OUTPUT
+            echo "Scan timeout after 900s. Treating as failure. Traffic will remain at 0%."
+          fi
+
+      - name: Open traffic if scan passed
+        if: steps.scan.outputs.high == '0'
+        run: |
+          SERVICE="${{ steps.svc.outputs.name }}"
+          REGION="${{ env.REGION }}"
+          PROJECT="${{ env.PROJECT_ID }}"
+          CURRENT="${{ steps.image.outputs.revision }}"
+          echo "Scan passed. Setting traffic to 100%..."
+          gcloud run services update-traffic $SERVICE \
+            --region=$REGION --project=$PROJECT \
+            --to-revisions=$CURRENT=100
+          echo "========================================="
+          echo "Deployed! Service: $SERVICE"
+          echo "URL: ${{ steps.deploy.outputs.url }}${{ steps.deploy_new.outputs.url }}"
+          echo "========================================="
+
+      - name: Warn for unfixable low severity
+        if: steps.scan.outputs.high == '0' && steps.scan.outputs.warn != '0'
+        run: |
+          echo "⚠️ 注意：發現 ${{ steps.scan.outputs.warn }} 個低風險漏洞（無可用修復版本），不影響部署，建議持續追蹤。"
+
+      - name: Keep traffic at 0 if scan failed
+        if: steps.scan.outputs.high != '0'
+        run: |
+          if [ "${{ env.SCAN_TIMEOUT }}" = "true" ]; then
+            echo "SCAN_ACTION=timeout" >> $GITHUB_ENV
+            echo "掃描逾時（15分鐘），掃描異常失敗，請AI協助確認問題。Traffic remains at 0%."
+          else
+            echo "SCAN_ACTION=blocked" >> $GITHUB_ENV
+            echo "Blocking vulnerabilities found (critical/high/medium or fixable low). Traffic remains at 0%."
+          fi
+          exit 1

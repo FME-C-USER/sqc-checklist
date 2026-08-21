@@ -10,7 +10,7 @@
 // 後端版本：每次修改本檔就更新，並於前端「資料更新時間」旁顯示。
 // 用途：貼上程式碼後若忘記「部署 → 管理部署作業 → 新版本」，畫面上的後端版本就不會變，
 //       可立即分辨是「沒貼上」「貼了但沒部署」還是「已生效」。
-var GAS_VERSION = '20260821-1215';
+var GAS_VERSION = '20260821-1330';
 
 var SPREADSHEET_ID = '1GRZZsZRgakMGENspOxmlx96NfckC8UYOe0ipuNNEoh0';
 var DRIVE_ROOT_ID  = '122nQjldImn5Zh5AUguxZF0YzobThgdc9';
@@ -951,6 +951,48 @@ function mapToInternal(merged, month, id) {
 var THUMB_MAX = 40;                 // 一次最多取幾張縮圖
 var IMAGE_MAX_BYTES = 6291456;      // 放大檢視的單檔上限 6MB，超過就請使用者去 Drive 看
 
+/**
+ * 檔案必須位於本系統的照片根資料夾底下才可存取。
+ * 為什麼需要：photoThumbs/photoImage/trashPhotos 都是 DriveApp.getFileById(前端給的ID)，
+ * 若不驗證歸屬，任何登入者只要知道任一個 fileId，就能透過本系統讀取、甚至丟棄
+ * 腳本擁有者帳號能存取的任何 Drive 檔案（不限 SQC 照片）。屬存取控制失效。
+ * 效能：以「資料夾」為單位判斷並快取（同一批照片通常共用少數資料夾），
+ * 不是每個檔案都往上爬，避免縮圖請求變慢。
+ */
+var _underRootMemo = {};
+function folderUnderPhotoRoot_(folderId) {
+  if (!folderId) return false;
+  if (folderId === DRIVE_ROOT_ID) return true;
+  if (_underRootMemo[folderId] !== undefined) return _underRootMemo[folderId];
+  var cached = CacheService.getScriptCache().get('underroot_' + folderId);
+  if (cached !== null && cached !== undefined) {
+    _underRootMemo[folderId] = (cached === '1');
+    return _underRootMemo[folderId];
+  }
+  var ok = false, cur = folderId, hops = 0;
+  try {
+    while (hops < 10) {
+      var it = DriveApp.getFolderById(cur).getParents();
+      if (!it.hasNext()) break;
+      var pid = it.next().getId();
+      if (pid === DRIVE_ROOT_ID) { ok = true; break; }
+      cur = pid; hops++;
+    }
+  } catch (e) { ok = false; }
+  CacheService.getScriptCache().put('underroot_' + folderId, ok ? '1' : '0', 21600);
+  _underRootMemo[folderId] = ok;
+  return ok;
+}
+function fileUnderPhotoRoot_(file) {
+  try {
+    var it = file.getParents();
+    while (it.hasNext()) {
+      if (folderUnderPhotoRoot_(it.next().getId())) return true;
+    }
+  } catch (e) { /* 取不到父層就視為不允許 */ }
+  return false;
+}
+
 /** 取縮圖（給編輯畫面的小圖用）：fileId -> dataURL；取不到的回空字串，前端顯示替代文字 */
 function photoThumbs(fileIds) {
   var out = {};
@@ -961,6 +1003,7 @@ function photoThumbs(fileIds) {
     try {
       var f = DriveApp.getFileById(id);
       if (f.isTrashed()) return;                       // 已刪除的不給圖，前端會標示
+      if (!fileUnderPhotoRoot_(f)) return;             // 只能看本系統照片資料夾裡的檔案
       var b = null;
       try { b = f.getThumbnail(); } catch (e) { b = null; }
       // 沒有縮圖時退而用原圖（本系統照片壓到 1.2MB 以內，尚可接受）
@@ -977,6 +1020,7 @@ function photoImage(fileId) {
   try {
     var f = DriveApp.getFileById(String(fileId || ''));
     if (f.isTrashed()) return { ok: false, message: '這個檔案已被刪除' };
+    if (!fileUnderPhotoRoot_(f)) return { ok: false, message: '不是本系統的照片，無法檢視' };
     var b = f.getBlob();
     if (b.getBytes().length > IMAGE_MAX_BYTES) return { ok: false, message: '檔案過大，請直接在 Drive 開啟' };
     return { ok: true, name: f.getName(), dataUrl: 'data:' + b.getContentType() + ';base64,' + Utilities.base64Encode(b.getBytes()) };
@@ -989,8 +1033,11 @@ function photoImage(fileId) {
 function trashPhotos(fileIds) {
   var done = [], failed = [];
   (fileIds || []).slice(0, THUMB_MAX).forEach(function (id) {
-    try { DriveApp.getFileById(String(id)).setTrashed(true); done.push(String(id)); }
-    catch (e) { failed.push(String(id)); }
+    try {
+      var f = DriveApp.getFileById(String(id));
+      if (!fileUnderPhotoRoot_(f)) { failed.push(String(id)); return; }   // 只能刪本系統照片
+      f.setTrashed(true); done.push(String(id));
+    } catch (e) { failed.push(String(id)); }
   });
   return { trashed: done.length, failed: failed };
 }
