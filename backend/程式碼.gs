@@ -10,7 +10,7 @@
 // 後端版本：每次修改本檔就更新，並於前端「資料更新時間」旁顯示。
 // 用途：貼上程式碼後若忘記「部署 → 管理部署作業 → 新版本」，畫面上的後端版本就不會變，
 //       可立即分辨是「沒貼上」「貼了但沒部署」還是「已生效」。
-var GAS_VERSION = '20260824-1030';
+var GAS_VERSION = '20260824-1145';
 
 var SPREADSHEET_ID = '1GRZZsZRgakMGENspOxmlx96NfckC8UYOe0ipuNNEoh0';
 var DRIVE_ROOT_ID  = '122nQjldImn5Zh5AUguxZF0YzobThgdc9';
@@ -62,7 +62,9 @@ function doPost(e) {
         ensureKindSheet(p.kind, p.month);
         var all = readSheet(sheetForKind(p.kind, p.month));
         var LIMIT = 800; // 大表(如店鋪主檔4000+筆)避免整包傳輸拖慢/逾時
-        return { rows: all.slice(0, LIMIT), total: all.length, truncated: all.length > LIMIT };
+        // byType 必須在後端用「全部資料」算：前端只拿到前 800 筆，自己數會少算
+        return { rows: all.slice(0, LIMIT), total: all.length, truncated: all.length > LIMIT,
+          byType: countByStoreType(all) };
       },
       getChangeLog: function () { return getChangeLog(p.limit); },
       lookupStore: function () { return lookupStore(p.q); },
@@ -97,6 +99,18 @@ function doPost(e) {
   } catch (err) {
     return json({ ok: false, error: String(err && err.message || err) });
   }
+}
+
+/** 依「店鋪型態」統計筆數（供店鋪名單顯示「總店數x店(一般店x店，隨盤點點檢店x店)」）。
+ *  沒有這個欄位的表（題庫、人員…）回 null，前端就不顯示。*/
+function countByStoreType(rows) {
+  if (!rows || !rows.length || !rows[0].hasOwnProperty('店鋪型態')) return null;
+  var out = {};
+  rows.forEach(function (r) {
+    var t = String(r['店鋪型態'] == null ? '' : r['店鋪型態']).trim() || '(未填)';
+    out[t] = (out[t] || 0) + 1;
+  });
+  return out;
 }
 
 function json(obj) {
