@@ -10,7 +10,7 @@
 // 後端版本：每次修改本檔就更新，並於前端「資料更新時間」旁顯示。
 // 用途：貼上程式碼後若忘記「部署 → 管理部署作業 → 新版本」，畫面上的後端版本就不會變，
 //       可立即分辨是「沒貼上」「貼了但沒部署」還是「已生效」。
-var GAS_VERSION = '20260824-1400';
+var GAS_VERSION = '20260824-1500';
 
 var SPREADSHEET_ID = '1GRZZsZRgakMGENspOxmlx96NfckC8UYOe0ipuNNEoh0';
 var DRIVE_ROOT_ID  = '122nQjldImn5Zh5AUguxZF0YzobThgdc9';
@@ -49,8 +49,9 @@ function doPost(e) {
       submitRecord: function () { return submitRecord(p.record); },
       attachPhotoLinks: function () { return attachPhotoLinks(p.month, p.recordId, p.links); },
       queryRecords: function () { return { records: queryRecords(p.month, p.filter) }; },
-      updateRecord: function () { return updateRecord(p.month, p.id, p.record); },
-      deleteRecord: function () { return deleteRecord(p.month, p.id); },
+      updateRecord: function () { return updateRecord(p.month, p.id, p.record, p.pass); },
+      deleteRecord: function () { return deleteRecord(p.month, p.id, p.pass); },
+      checkEditPass: function () { return checkEditPass(p.pass); },
       getSummary: function () { return getSummary(p.month, p.filter); },
       buildMonthlyReport: function () { return buildMonthlyReport(p.month, p.filter, sess && sess.role === '管理者'); },
       importMaster: function () { return importMaster(p.kind, p.month, p.rows, p.fileName); },
@@ -540,7 +541,7 @@ function queryRecords(month, filter) {
   }).map(rowToRecord);
 }
 
-function updateRecord(month, id, rec) {
+function updateRecord(month, id, rec, pass) {
   var lock = LockService.getScriptLock();
   lock.waitLock(20000);
   try {
@@ -551,6 +552,10 @@ function updateRecord(month, id, rec) {
     for (var i = 1; i < data.length; i++) {
       if (String(data[i][idCol]) === String(id)) {
         var orig = rowObj(head, data[i]);
+        // 非當週的紀錄要密碼才能改。用「原紀錄」的點檢時間判斷，不能用前端送來的 rec.time
+        // —— 否則只要把時間改成本週就能繞過。
+        var blocked = guardCrossWeek(toYmd(orig['點檢時間']), pass);
+        if (blocked) return blocked;
         rec.id = id; rec.createdAt = orig['建立時間'] || nowStr(); rec.updatedAt = nowStr();
         var newRow = recordToRow(sh, rec); // rec 為前端英文鍵完整紀錄，直接覆寫
         sh.getRange(i + 1, 1, 1, newRow.length).setValues([newRow]);
@@ -564,7 +569,7 @@ function updateRecord(month, id, rec) {
   }
 }
 
-function deleteRecord(month, id) {
+function deleteRecord(month, id, pass) {
   var lock = LockService.getScriptLock();
   lock.waitLock(20000);
   try {
@@ -572,7 +577,13 @@ function deleteRecord(month, id) {
     var data = sh.getDataRange().getValues();
     var idCol = data[0].indexOf('紀錄ID');
     for (var i = 1; i < data.length; i++) {
-      if (String(data[i][idCol]) === String(id)) { sh.deleteRow(i + 1); return { ok: true }; }
+      if (String(data[i][idCol]) === String(id)) {
+        var timeCol = data[0].indexOf('點檢時間');
+        var blocked = guardCrossWeek(timeCol >= 0 ? toYmd(data[i][timeCol]) : '', pass);
+        if (blocked) return blocked;
+        sh.deleteRow(i + 1);
+        return { ok: true };
+      }
     }
     return { ok: false, message: '找不到紀錄' };
   } finally {
@@ -925,6 +936,40 @@ function getPricing() {
   };
 }
 
+// ============================================================
+// 跨週修改的保護：編輯/刪除只限「當週」(週一~週日)，非當週要輸入密碼。
+//   密碼放「設定」活頁的「跨週修改密碼」，沒設定時用預設 9588，改密碼不必動程式。
+//   前端也會先問一次密碼(體驗)，但真正的把關在這裡 —— 否則用開發者工具就能繞過。
+// ============================================================
+function editPassword() { return String(getSetting('跨週修改密碼') || '9588'); }
+function checkEditPass(pass) { return { ok: String(pass || '') === editPassword() }; }
+
+/** 該日期字串所屬那一週的週一(yyyy-MM-dd)；週一為一週之始 */
+function weekMondayOf(ymd) {
+  var s = String(ymd || '').slice(0, 10);
+  var parts = s.split('-');
+  if (parts.length !== 3) return '';
+  var d = new Date(Date.UTC(Number(parts[0]), Number(parts[1]) - 1, Number(parts[2])));
+  var dow = (d.getUTCDay() + 6) % 7;            // 週一=0、週日=6
+  d.setUTCDate(d.getUTCDate() - dow);
+  return Utilities.formatDate(d, 'UTC', 'yyyy-MM-dd');
+}
+
+/** 這筆紀錄是否落在「今天所屬的那一週」之外（今天以台北時區計） */
+function isCrossWeek(recTime) {
+  var recWeek = weekMondayOf(recTime);
+  var today = Utilities.formatDate(new Date(), 'Asia/Taipei', 'yyyy-MM-dd');
+  if (!recWeek) return false;                    // 日期解析不出來就不阻擋，避免誤鎖
+  return recWeek !== weekMondayOf(today);
+}
+
+/** 編輯/刪除前的把關：非當週且密碼不對就擋下 */
+function guardCrossWeek(recTime, pass) {
+  if (!isCrossWeek(recTime)) return null;
+  if (String(pass || '') === editPassword()) return null;
+  return { ok: false, code: 'CROSS_WEEK',
+    message: '這筆是 ' + String(recTime).slice(0, 10) + ' 的紀錄，不在本週(週一~週日)範圍內，需輸入正確密碼才能修改或刪除' };
+}
 function getSetting(key) {
   var rows = readSheet('設定');
   for (var i = 0; i < rows.length; i++) if (rows[i]['參數'] === key) return rows[i]['值'];

@@ -1,0 +1,8 @@
+# 統一用 LF：專案的批次編輯工具以 \n 比對，混用 CRLF 會讓多行替換靜默失敗
+* text=auto eol=lf
+
+# 自帶函式庫與二進位檔不要做換行轉換（避免無意義的巨大 diff）
+vendor/** -text
+*.xlsx binary
+*.docx binary
+*.svg -text

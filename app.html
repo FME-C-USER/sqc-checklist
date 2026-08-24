@@ -25,12 +25,12 @@
 
   <script type="text/jsx" id="appCode">
     const { useState, useMemo, useEffect, useRef } = React;
-    const APP_VERSION = '20260824-1400'; // 每次部署更新，用來確認瀏覽器跑的是哪一版
+    const APP_VERSION = '20260824-1500'; // 每次部署更新，用來確認瀏覽器跑的是哪一版
     // 這一版前端「至少」需要的後端版本。前後端是各自演進的，版本號本來就不會相等
     // （只改前端時後端不動，反之亦然），所以不能用「兩者相等」當健康指標 ——
     // 要比的是「線上後端有沒有舊到缺少本前端需要的 API」。
     // 規則：改了 程式碼.gs 且前端會用到那個改動時，才把這個值提到該後端版本。
-    const NEEDS_GAS = '20260824-1400';   // 需要：店鋪名單型態統計、缺失子項只輸出人工填寫的名稱
+    const NEEDS_GAS = '20260824-1500';   // 需要：店鋪名單型態統計、缺失子項只輸出人工填寫的名稱
 
     // 全域錯誤攔截：任何未預期錯誤（含 async 事件處理器的未捕捉 rejection）都要顯示出來，
     // 否則按鈕會「按了沒反應」而完全查不到原因
@@ -935,20 +935,30 @@
     // ============================================================
     // 點檢項目列
     // ============================================================
+    // 缺失單位數（＝扣分項數）：固定子項用其 units；可填子項用填入的名稱數（至少1）。
+    // 抽到 module scope 是因為「送出前檢查缺失照片張數」也要用同一份定義 ——
+    // 兩邊各算一次總有一天會不一致（畫面扣 4 分卻只要求 1 張照片之類）。
+    const subLabelOf = (sub) => typeof sub === 'string' ? sub : sub.label;
+    const subIsCustom = (sub) => typeof sub === 'object' && sub.custom;
+    const subFixedUnits = (sub) => (typeof sub === 'object' && sub.units) ? sub.units : 1;
+    const splitNames = (v) => String(v || '').split(/[\s,，、;；\/|]+/).filter(Boolean);
+    function ngUnitsOf(item, st) {
+      const s = st || {};
+      return (s.ngSubs || []).reduce((sum, lbl) => {
+        const sub = (item.subs || []).find(x => subLabelOf(x) === lbl);
+        if (!sub) return sum;
+        const named = splitNames(s.customNames?.[lbl]).length;
+        return sum + (subIsCustom(sub) ? Math.max(1, named) : subFixedUnits(sub));
+      }, 0);
+    }
+
     function ItemRow({ item, state, setState, canPhoto, monthFolder, existingCount = 0, existing = [], onRemoveExisting = null }) {
       const s = state || {};
-      const labelOf = (sub) => typeof sub === 'string' ? sub : sub.label;
-      const isCustom = (sub) => typeof sub === 'object' && sub.custom;
-      const fixedUnits = (sub) => (typeof sub === 'object' && sub.units) ? sub.units : 1;
-      const splitNames = (v) => String(v || '').split(/[\s,，、;；\/|]+/).filter(Boolean);
+      const labelOf = subLabelOf;
+      const isCustom = subIsCustom;
+      const fixedUnits = subFixedUnits;
       const nameUnits = (lbl) => splitNames(s.customNames?.[lbl]).length;
-
-      // 缺失單位數：固定子項用其 units；可填子項用填入的名稱數（至少1）
-      const totalUnits = (s.ngSubs || []).reduce((sum, lbl) => {
-        const sub = (item.subs || []).find(x => labelOf(x) === lbl);
-        if (!sub) return sum;
-        return sum + (isCustom(sub) ? Math.max(1, nameUnits(lbl)) : fixedUnits(sub));
-      }, 0);
+      const totalUnits = ngUnitsOf(item, s);
 
       const subdeductScore = item.type === 'subdeduct' ? Math.max(0, item.max - totalUnits * item.perPoint) : null;
       const score = item.type === 'subdeduct' ? subdeductScore : (s.score != null ? s.score : item.max);
@@ -1029,7 +1039,8 @@
       const [tab, setTab] = useState('basic');
 
       // ---- 基本資料 ----（時間用台北；月份由點檢時間決定；登入預帶自己的部/課/姓名）
-      const [basic, setBasic] = useState({ time: taipeiNow(), dept: currentUser.dept || '', section: currentUser.section || '', staffId: currentUser.empId || '', storeCode: '', customStore: '', customInfo: null, storeType: '', noPhotoReason: '', noPhotoOther: '' });
+      // 點檢時間：日期預設當天、時間留空（送出前必填，見 doSubmit 的檢查）
+      const [basic, setBasic] = useState({ time: taipeiToday(), dept: currentUser.dept || '', section: currentUser.section || '', staffId: currentUser.empId || '', storeCode: '', customStore: '', customInfo: null, storeType: '', noPhotoReason: '', noPhotoOther: '' });
       const workMonth = rocMonth(basic.time); // 依點檢時間對應的民國年月
 
       // ---- 開場資料（依 workMonth 由後端載入；載入前為空）----
@@ -1172,6 +1183,7 @@ ${nm}
       const [editingRecordId, setEditingRecordId] = useState(null); // 非 null＝編輯既有紀錄
       const [editingMonth, setEditingMonth] = useState(null);       // 該筆紀錄「原本所在」的月份活頁（點檢時間改跨月時仍要找得到原列）
       const [existingPhotos, setExistingPhotos] = useState({});      // 編輯時保留原有照片JSON
+      const [editPass, setEditPass] = useState('');                  // 跨週編輯用的密碼（後端會再驗一次）
       const [removedPhotos, setRemovedPhotos] = useState([]);        // 編輯中被標記刪除的原照片（完成編輯後才移入垃圾桶）
       const [lightbox, setLightbox] = useState(null);                // 照片放大檢視
       useEffect(() => {
@@ -1246,11 +1258,15 @@ ${nm}
         } catch (e) { alert('查詢失敗：' + e.message); }
       };
 
-      const resetWork = () => { setScores({}); setKeyObs({}); setToilet({}); setToiletPhotos({}); setToiletReasons({}); setObsText(''); setPerfectPhotos({}); setPaperForm([]); setSign({ count: '', identity: '', remark: '' }); setEditingRecordId(null); setEditingMonth(null); setExistingPhotos({}); setRemovedPhotos([]); };
+      const resetWork = () => { setScores({}); setKeyObs({}); setToilet({}); setToiletPhotos({}); setToiletReasons({}); setObsText(''); setPerfectPhotos({}); setPaperForm([]); setSign({ count: '', identity: '', remark: '' }); setEditingRecordId(null); setEditingMonth(null); setExistingPhotos({}); setRemovedPhotos([]); setEditPass(''); };
 
       // 編輯既有紀錄：把該筆載回點檢作業
-      const openEdit = (row) => {
+      const openEdit = async (row) => {
         const rec = row._raw || row;
+        // 非當週的紀錄要先過密碼才讓它進編輯畫面；密碼留著，完成編輯時一併送後端把關
+        const pass = await askCrossWeekPass(rec.time, '編輯');
+        if (pass === null) return;
+        setEditPass(pass);
         const d = rec.detail || {}, o = rec.observation || {};
         const sc = {};
         Object.keys(d).forEach(id => { sc[id] = { score: d[id].score, ngSubs: d[id].ngSubs || [], customNames: d[id].customNames || {} }; });
@@ -1290,6 +1306,7 @@ ${nm}
           alert('目前沒有載入到本月題庫，為避免分數被覆蓋成 0 分，已阻止送出。\n請重新整理頁面；若仍為空，請確認「維護專區→點檢題目」該月份已匯入題庫。');
           return;
         }
+        if (basic.time.length <= 10) { alert('請先在「基本資料」填寫點檢時間（時間為必填）'); setTab('basic'); return; }
         if (!effStore) { alert('請先在「基本資料」選擇店鋪'); setTab('basic'); return; }
         if (!isEdit && inspectedCodes[normCode(effStore.code)]) { alert('這家店本月已有點檢紀錄，不可重複點檢（如需修正請至查詢紀錄編輯該筆）'); setTab('basic'); return; }
         if (!basic.storeType) { alert('請先在「基本資料」選擇可否拍照'); setTab('basic'); return; }
@@ -1327,7 +1344,15 @@ ${nm}
           } else {
             for (const c of checklist.categories) for (const it of c.items) {
               const s = scores[it.id]; const sc = (s && s.score != null) ? s.score : it.max; const ng = sc < it.max;
-              if (ng && (!s?.photos || !s.photos.length) && !hasExisting([monthFolder, it.name, '缺失'])) { alert(`「${it.name}」有扣分，請補上缺失照片`); return; }
+              // 多缺失項的題目：鎖定幾個扣分項就要幾張缺失照片（一個缺失一張憑證）。
+              // 「填寫型」子項填了幾個名稱就算幾個扣分項，與扣分邏輯同一份定義（ngUnitsOf）。
+              // 既有照片（編輯時的原照片）也算在內，不需要重傳。
+              const needShots = it.type === 'subdeduct' ? Math.max(1, ngUnitsOf(it, s)) : 1;
+              const haveShots = (s?.photos || []).length + existingCountAt([monthFolder, it.name, '缺失']);
+              if (ng && haveShots < needShots) {
+                alert(`「${it.name}」鎖定了 ${needShots} 個扣分項，需上傳 ${needShots} 張缺失照片（目前 ${haveShots} 張）`);
+                return;
+              }
             }
           }
           if (toilet['O1'] === '有') {
@@ -1410,7 +1435,7 @@ ${nm}
         // 又沒重送，這筆點檢就消失了(照片在 Drive、紀錄不存在)。編輯不排隊 —— 原紀錄仍完整，沒有遺失風險。
         if (!isEdit) SqcDB.queueRecord({ id: recId, status: 'pending', month: workMonth, record, tries: 0, at: Date.now() }).catch(() => { });
         const api = !isEdit ? SqcApi.submitRecord(record)
-          : !crossMonth ? SqcApi.updateRecord(origMonth, recId, record)
+          : !crossMonth ? SqcApi.updateRecord(origMonth, recId, record, editPass)
             : SqcApi.submitRecord(record).then(res => {
               if (res && res.ok === false) return res; // 新月份該店已有紀錄 → 中止搬移，原紀錄保持不動
               return SqcApi.deleteRecord(origMonth, recId).then(() => res);
@@ -1464,10 +1489,42 @@ ${nm}
       // 正式模式：進查詢/彙總頁或改條件時，重新向後端查當月
       // 只在切換進「查詢紀錄/彙總」分頁時自動查一次；改變日期/課別後需按「查詢」才會重新查詢
       useEffect(() => { if (CONFIGURED && (tab === 'records' || tab === 'summary')) loadRecords(); }, [tab]);
-      const delRecord = (id, recordMonth) => {
+      // ---- 跨週修改保護 ----
+      // 編輯/刪除只限「當週」(週一~週日)；非當週要輸入密碼。
+      // 前端先問一次是為了體驗（不必填完整份表單才被拒），真正的把關在後端 ——
+      // 前端的驗證用開發者工具就能繞過，密碼也不該寫在前端程式裡。
+      const weekMondayOf = (ymd) => {
+        const s = String(ymd || '').slice(0, 10);
+        if (s.length !== 10) return '';
+        const d = new Date(s + 'T00:00:00Z');
+        d.setUTCDate(d.getUTCDate() - ((d.getUTCDay() + 6) % 7));   // 週一=0
+        return d.toISOString().slice(0, 10);
+      };
+      const isCrossWeek = (recTime) => {
+        const w = weekMondayOf(recTime);
+        return !!w && w !== weekMondayOf(taipeiToday());
+      };
+      /** 需要密碼時就問並向後端驗證；回傳 null＝使用者取消或密碼錯誤（呼叫端應中止） */
+      const askCrossWeekPass = async (recTime, actionText) => {
+        if (!isCrossWeek(recTime)) return '';
+        const p = prompt(`這筆是 ${String(recTime).slice(0, 10)} 的紀錄，不在本週（週一~週日）範圍內。\n${actionText}非當週紀錄需要輸入密碼：`);
+        if (p === null) return null;
+        if (!CONFIGURED) return String(p).trim();
+        try {
+          const r = await SqcApi.checkEditPass(String(p).trim());
+          if (!r.ok) { alert('密碼錯誤，已取消'); return null; }
+          return String(p).trim();
+        } catch (e) { alert('無法驗證密碼：' + e.message); return null; }
+      };
+
+      const delRecord = async (id, recordMonth, recTime) => {
+        const pass = await askCrossWeekPass(recTime, '刪除');
+        if (pass === null) return;
         if (!confirm('確定刪除此筆評核紀錄？')) return;
         if (!CONFIGURED) { setRecords(records.filter(r => r.id !== id)); return; }
-        SqcApi.deleteRecord(recordMonth || workMonth, id).then(() => loadRecords()).catch(e => alert('刪除失敗：' + e.message));
+        SqcApi.deleteRecord(recordMonth || workMonth, id, pass)
+          .then(res => { if (res && res.ok === false) { alert('⚠ ' + (res.message || '刪除失敗')); return; } loadRecords(); })
+          .catch(e => alert('刪除失敗：' + e.message));
       };
 
 
@@ -1702,7 +1759,17 @@ ${nm}
                 <h2 className="font-bold text-slate-700">📋 基本資料</h2>
                 <div className="grid md:grid-cols-2 gap-4 text-sm">
                   <div><label className="block text-xs text-slate-500 mb-1">點檢時間</label>
-                    <input type="datetime-local" value={basic.time} onChange={e => setBasic({ ...basic, time: e.target.value })} className="w-full px-3 py-2 border border-slate-300 rounded-lg" /></div>
+                    {/* 日期預設當天、時間預設空白且必填：datetime-local 做不到「只有日期」，故拆成兩個欄位。
+                        basic.time 仍是單一來源（'YYYY-MM-DD' 或 'YYYY-MM-DDTHH:mm'），其餘程式不必改。 */}
+                    <div className="flex gap-2">
+                      <input type="date" value={basic.time.slice(0, 10)}
+                        onChange={e => setBasic({ ...basic, time: e.target.value + (basic.time.slice(10, 16) || '') })}
+                        className="flex-1 px-3 py-2 border border-slate-300 rounded-lg" />
+                      <input type="time" value={basic.time.slice(11, 16)} required
+                        onChange={e => setBasic({ ...basic, time: basic.time.slice(0, 10) + (e.target.value ? 'T' + e.target.value : '') })}
+                        className={"w-32 px-3 py-2 border rounded-lg " + (basic.time.length > 10 ? "border-slate-300" : "border-red-300 bg-red-50")} />
+                    </div>
+                    {basic.time.length <= 10 && <div className="text-xs text-red-500 mt-1">請填寫點檢時間（必填）</div>}</div>
                   <div><label className="block text-xs text-slate-500 mb-1">部別</label>
                     <select value={basic.dept} onChange={e => setBasic({ ...basic, dept: e.target.value, section: '' })} className="w-full px-3 py-2 border border-slate-300 rounded-lg">
                       <option value="">— 請選擇 —</option>{DEPTS.map(d => <option key={d.dept}>{d.dept}</option>)}</select></div>
@@ -1962,7 +2029,7 @@ ${nm}
                         <tr key={r.id} className="border-b border-slate-100">
                           <td className="py-2 px-3 text-slate-500">{r.date}</td><td className="font-medium text-slate-800">{r.store}</td><td className="text-slate-500">{r.section}</td><td className="text-slate-500">{r.staff}</td>
                           <td className="font-bold">{r.total}</td><td><span className={"text-xs px-2 py-0.5 rounded " + gradeOf(r.total).bg}>{r.grade}</span></td>
-                          <td className="px-3 whitespace-nowrap"><button onClick={() => openEdit(r)} className="text-xs text-blue-600 mr-2">編輯</button><button onClick={() => delRecord(r.id, r.version)} className="text-xs text-red-600">刪除</button></td>
+                          <td className="px-3 whitespace-nowrap"><button onClick={() => openEdit(r)} className="text-xs text-blue-600 mr-2">編輯</button><button onClick={() => delRecord(r.id, r.version, r.time)} className="text-xs text-red-600">刪除</button></td>
                         </tr>
                       ))}
                       {filtered.length === 0 && <tr><td colSpan="7" className="py-8 text-center text-slate-400">無符合條件的紀錄</td></tr>}

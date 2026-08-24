@@ -94,8 +94,10 @@
     submitRecord: (record) => call('submitRecord', { record }),
     attachPhotoLinks: (month, recordId, links) => call('attachPhotoLinks', { month, recordId, links }),
     queryRecords: (month, filter) => call('queryRecords', { month, filter }),
-    updateRecord: (month, id, record) => call('updateRecord', { month, id, record }),
-    deleteRecord: (month, id) => call('deleteRecord', { month, id }),
+    // pass：非當週紀錄的修改/刪除密碼（後端把關，前端只是先問一次）
+    updateRecord: (month, id, record, pass) => call('updateRecord', { month, id, record, pass }),
+    deleteRecord: (month, id, pass) => call('deleteRecord', { month, id, pass }),
+    checkEditPass: (pass) => call('checkEditPass', { pass }),
     getSummary: (month, filter) => call('getSummary', { month, filter }),
     buildMonthlyReport: (month, filter) => call('buildMonthlyReport', { month, filter }),
     importMaster: (kind, month, rows, fileName) => call('importMaster', { kind, month, rows, fileName }),
