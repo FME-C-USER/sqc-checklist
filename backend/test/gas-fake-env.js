@@ -81,6 +81,8 @@ function loadGasFile(gsPath) {
     },
     DriveApp: {}, ScriptApp: {}, CacheService: {}, UrlFetchApp: {}, ContentService: { createTextOutput: () => ({ setMimeType: () => ({}) }), MimeType: {} },
     HtmlService: {},
+    // 真實 GAS 一定有 Logger；後端多處用它記錄維護/失敗訊息，假環境也要有
+    Logger: { log: (m) => { sandbox.__logs = (sandbox.__logs || []).concat(String(m)); } },
   };
   vm.createContext(sandbox);
   const src = fs.readFileSync(gsPath, 'utf8');

@@ -393,3 +393,56 @@ function fileIdByNameNotTrashed_(folderId, name) {
   } catch (e) { /* 資料夾不存在 */ }
   return '';
 }
+
+// ============================================================
+// 一次性維護：把既有照片設為「知道連結的人可檢視」
+//   為什麼需要：報表（含客戶版）裡的照片連結，若檔案沒開放，收到報表的人必須
+//   先登入有權限的 Google 帳號才看得到。新上傳的照片已由 attachPhotoLinks 自動設定，
+//   這支負責補設之前累積的照片。
+//
+//   用法（在編輯器加一個 run 函式呼叫，結果看「執行記錄」）：
+//     1. reportPhotoSharing('115年08月')          ← 只清點，不改任何權限
+//     2. sharePhotosByLink('115年08月', true)     ← 實際設定
+//   一次最多處理 SHARE_MAX 個檔案，避免 6 分鐘逾時；重複執行會接續（已設定的會跳過）。
+//
+//   注意：若公司 Workspace 政策禁止「知道連結的人」分享，這裡會全部失敗並在記錄檔
+//   顯示錯誤訊息，需請資訊人員開放該政策。
+// ============================================================
+var SHARE_MAX = 300;
+
+function reportPhotoSharing(monthFolderName) { return sharePhotos_(monthFolderName, false); }
+
+function sharePhotosByLink(monthFolderName, doApply) {
+  if (doApply !== true) {
+    Logger.log('保護機制：要實際設定請明確傳入 true → sharePhotosByLink(\'115年08月\', true)');
+    return sharePhotos_(monthFolderName, false);
+  }
+  return sharePhotos_(monthFolderName, true);
+}
+
+function sharePhotos_(monthFolderName, doApply) {
+  var start = DriveApp.getFolderById(DRIVE_ROOT_ID);
+  if (monthFolderName) {
+    var it = start.getFoldersByName(String(monthFolderName));
+    if (!it.hasNext()) { Logger.log('找不到資料夾：' + monthFolderName); return { error: '找不到資料夾' }; }
+    start = it.next();
+  }
+  var scanned = 0, already = 0, changed = 0, failed = 0, lastErr = '', stopped = false;
+  walkFolderFiles_(start, start.getName(), function (file) {
+    if (stopped) return;
+    if (changed >= SHARE_MAX) { stopped = true; return; }
+    scanned++;
+    try {
+      if (file.getSharingAccess() === DriveApp.Access.ANYONE_WITH_LINK) { already++; return; }
+      if (doApply) { file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW); changed++; }
+      else changed++;   // 清點模式：只計算「需要設定的數量」
+    } catch (e) { failed++; lastErr = String(e && e.message || e); }
+  });
+  Logger.log((doApply ? '【已設定為知道連結可檢視】' : '【僅清點，未變更權限】')
+    + ' 範圍：' + start.getName()
+    + '｜掃描 ' + scanned + ' 個｜原本已開放 ' + already + ' 個｜'
+    + (doApply ? '本次設定 ' : '待設定 ') + changed + ' 個｜失敗 ' + failed + ' 個'
+    + (stopped ? '（已達單次上限 ' + SHARE_MAX + '，請再執行一次接續）' : '')
+    + (failed ? '\n最後一個錯誤：' + lastErr + '\n若是政策限制，請請資訊人員開放「知道連結的人」分享' : ''));
+  return { scanned: scanned, already: already, changed: changed, failed: failed, truncated: stopped };
+}

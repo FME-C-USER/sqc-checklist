@@ -10,7 +10,7 @@
 // 後端版本：每次修改本檔就更新，並於前端「資料更新時間」旁顯示。
 // 用途：貼上程式碼後若忘記「部署 → 管理部署作業 → 新版本」，畫面上的後端版本就不會變，
 //       可立即分辨是「沒貼上」「貼了但沒部署」還是「已生效」。
-var GAS_VERSION = '20260824-1230';
+var GAS_VERSION = '20260824-1330';
 
 var SPREADSHEET_ID = '1GRZZsZRgakMGENspOxmlx96NfckC8UYOe0ipuNNEoh0';
 var DRIVE_ROOT_ID  = '122nQjldImn5Zh5AUguxZF0YzobThgdc9';
@@ -111,6 +111,32 @@ function countByStoreType(rows) {
     out[t] = (out[t] || 0) + 1;
   });
   return out;
+}
+
+/**
+ * 把剛回寫連結的照片設為「知道連結的人可檢視」，讓客戶版報表的照片連結不必登入 Google 也能開。
+ *
+ * 安全前提：fileId 是前端傳進來的，若不驗證歸屬，有心人可以拿這支 API 把擁有者帳號裡
+ * 任何檔案設成對外公開。因此一律先用 fileUnderPhotoRoot_() 確認檔案在照片資料夾底下。
+ * 另外：若公司 Workspace 政策禁止對外連結分享，setSharing 會丟例外 —— 不可讓它中斷
+ * 連結回寫（照片與紀錄的關聯比分享權限重要），故個別 try/catch 並回報失敗數。
+ */
+function shareLinkedPhotos(links) {
+  var ok = 0, failed = 0, lastErr = '';
+  Object.keys(links || {}).forEach(function (key) {
+    (links[key] || []).forEach(function (link) {
+      var id = link && link.fileId;
+      if (!id) return;
+      try {
+        var f = DriveApp.getFileById(String(id));
+        if (!fileUnderPhotoRoot_(f)) { failed++; return; }      // 不是本系統照片，一律不動
+        f.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+        ok++;
+      } catch (e) { failed++; lastErr = String(e && e.message || e); }
+    });
+  });
+  if (failed) Logger.log('照片分享設定失敗 ' + failed + ' 張：' + lastErr);
+  return { ok: ok, failed: failed };
 }
 
 function json(obj) {
@@ -490,7 +516,9 @@ function attachPhotoLinks(month, recordId, links) {
         photos[key] = arr;
       });
       sh.getRange(i + 1, photoCol + 1).setValue(JSON.stringify(photos));
-      return { ok: true };
+      // 報表(含客戶版)裡的照片連結要讓沒有 Google 帳號的人也能開 → 逐檔設為「知道連結可檢視」
+      var share = shareLinkedPhotos(links);
+      return { ok: true, shared: share.ok, shareFailed: share.failed };
     }
     return { ok: false, message: '找不到紀錄' };
   } finally {
