@@ -25,7 +25,7 @@
 
   <script type="text/jsx" id="appCode">
     const { useState, useMemo, useEffect, useRef } = React;
-    const APP_VERSION = '20260824-1500'; // 每次部署更新，用來確認瀏覽器跑的是哪一版
+    const APP_VERSION = '20260824-1620'; // 每次部署更新，用來確認瀏覽器跑的是哪一版
     // 這一版前端「至少」需要的後端版本。前後端是各自演進的，版本號本來就不會相等
     // （只改前端時後端不動，反之亦然），所以不能用「兩者相等」當健康指標 ——
     // 要比的是「線上後端有沒有舊到缺少本前端需要的 API」。
@@ -125,7 +125,7 @@
     const Lightbox = { open: null };
 
     function PhotoUpload({ label, photos, onChange, required, max = 10, folderPath, existingCount = 0,
-      existing = [], onRemoveExisting = null }) {
+      existing = [], onRemoveExisting = null, needShots = 0 }) {
       const [busy, setBusy] = useState(false);
       const list = photos || [];
       const handleFile = async (e) => {
@@ -152,6 +152,9 @@
               {label}{required && <span className="text-red-500"> *必須</span>}
               <span className="text-slate-400">（{existingCount > 0 ? `新增${list.length}` : list.length}/{max}）</span>
               {existingCount > 0 && <span className="ml-1 text-emerald-600">✓ 已有 {existingCount} 張原照片（免重傳）</span>}
+              {needShots > 1 && (list.length + existingCount >= needShots
+                ? <span className="ml-1 text-emerald-600 font-bold">✓ 已達需求 {needShots} 張</span>
+                : <span className="ml-1 text-red-600 font-bold">需 {needShots} 張（還缺 {needShots - list.length - existingCount} 張）</span>)}
             </span>
             <div className="flex gap-1.5 shrink-0">
               <label className={"text-xs px-2 py-1 rounded cursor-pointer whitespace-nowrap " + (busy ? "bg-slate-300 text-slate-500" : "bg-slate-600 text-white hover:bg-slate-700")}>
@@ -1023,7 +1026,7 @@
           )}
 
           {isNG && canPhoto && (
-            <PhotoUpload label="缺失照片（NG 項目必須拍照記錄）" required photos={s.photos} onChange={p => setState({ ...s, photos: p })} folderPath={`${DRIVE_ROOT}/${monthFolder}/${item.name}/缺失`} existingCount={existingCount} existing={existing} onRemoveExisting={onRemoveExisting} />
+            <PhotoUpload label="缺失照片（NG 項目必須拍照記錄）" required needShots={item.type === 'subdeduct' ? Math.max(1, totalUnits) : 1} photos={s.photos} onChange={p => setState({ ...s, photos: p })} folderPath={`${DRIVE_ROOT}/${monthFolder}/${item.name}/缺失`} existingCount={existingCount} existing={existing} onRemoveExisting={onRemoveExisting} />
           )}
         </div>
       );
@@ -1360,7 +1363,15 @@ ${nm}
           }
           if (toilet['O1'] === '有') {
             for (const t of checklist.toiletInspect) {
-              if (toilet[t.id] === '不符合' && !(toiletPhotos[t.id] || []).length && !hasExisting([monthFolder, '廁所觀察', t.name, '缺失'])) { alert(`廁所觀察「${t.name}」為不符合，請補上缺失照片`); return; }
+              // 廁所觀察與分區扣分題一致：勾了幾個不合格項目就要幾張缺失照片（一個缺失一張憑證）
+              if (toilet[t.id] === '不符合') {
+                const needT = Math.max(1, (toiletReasons[t.id] || []).length);
+                const haveT = (toiletPhotos[t.id] || []).length + existingCountAt([monthFolder, '廁所觀察', t.name, '缺失']);
+                if (haveT < needT) {
+                  alert(`廁所觀察「${t.name}」勾了 ${needT} 個不合格項目，需上傳 ${needT} 張缺失照片（目前 ${haveT} 張）`);
+                  return;
+                }
+              }
             }
           }
         }
@@ -1954,7 +1965,7 @@ ${nm}
                                 </div>
                               )}
                               {toilet[t.id] === '不符合' && canPhoto && (
-                                <PhotoUpload label="缺失照片（不符合必須拍照）" required photos={toiletPhotos[t.id]} onChange={p => setToiletPhotos({ ...toiletPhotos, [t.id]: p })} folderPath={`${DRIVE_ROOT}/${monthFolder}/廁所觀察/${t.name}/缺失`} existingCount={existingCountAt([monthFolder, '廁所觀察', t.name, '缺失'])} existing={existingAt([monthFolder, '廁所觀察', t.name, '缺失'])} onRemoveExisting={i => removeExistingAt([monthFolder, '廁所觀察', t.name, '缺失'], i)} />
+                                <PhotoUpload label="缺失照片（不符合必須拍照）" required needShots={Math.max(1, (toiletReasons[t.id] || []).length)} photos={toiletPhotos[t.id]} onChange={p => setToiletPhotos({ ...toiletPhotos, [t.id]: p })} folderPath={`${DRIVE_ROOT}/${monthFolder}/廁所觀察/${t.name}/缺失`} existingCount={existingCountAt([monthFolder, '廁所觀察', t.name, '缺失'])} existing={existingAt([monthFolder, '廁所觀察', t.name, '缺失'])} onRemoveExisting={i => removeExistingAt([monthFolder, '廁所觀察', t.name, '缺失'], i)} />
                               )}
                             </div>
                           ))}

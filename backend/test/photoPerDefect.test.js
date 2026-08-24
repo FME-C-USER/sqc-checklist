@@ -84,5 +84,29 @@ assertEqual(enough(2, 2, 0), true, '新拍2張足夠');
 assertEqual(enough(2, 1, 1), true, '新拍1張+原照片1張足夠（編輯時不必重傳）');
 assertEqual(enough(2, 1, 0), false, '只有1張不足，應擋下');
 
+
+// ===== 8. 廁所觀察題：勾幾個不合格項目就要幾張照片 =====
+//   2026-08-24 使用者回報：「廁所乾淨無髒污及垃圾桶無明顯滿溢」勾了 2 個不合格項目
+//   （廁所髒污、垃圾桶明顯滿溢）卻只上傳 1 張照片，應該要被擋下。
+//   廁所觀察的缺失項數就是 toiletReasons[t.id] 的長度（沒有填寫型子項的概念）。
+const toiletNeed = (reasons) => Math.max(1, (reasons || []).length);
+assertEqual(toiletNeed(['廁所髒污', '垃圾桶明顯滿溢']), 2, '勾2個不合格項目＝需要2張照片（使用者的案例）');
+assertEqual(toiletNeed(['廁所髒污']), 1, '勾1個＝1張');
+assertEqual(toiletNeed([]), 1, '不符合但還沒勾項目時仍至少要1張');
+assertEqual(toiletNeed(undefined), 1, '未定義時也要至少1張');
+assertEqual(enough(toiletNeed(['廁所髒污', '垃圾桶明顯滿溢']), 1, 0), false,
+  '2個缺失只給1張照片必須擋下（正是使用者截圖的情況）');
+assertEqual(enough(toiletNeed(['廁所髒污', '垃圾桶明顯滿溢']), 2, 0), true, '2個缺失2張照片可通過');
+assertEqual(enough(toiletNeed(['廁所髒污', '垃圾桶明顯滿溢']), 0, 2), true, '編輯時原有的2張也算，不必重傳');
+
+// 畫面提示與送出檢查必須用同一個算式，否則會出現「畫面說夠了卻送不出去」
+const src2 = fs.readFileSync(APP_PATH, 'utf8');
+assertEqual(src2.includes('needShots={Math.max(1, (toiletReasons[t.id] || []).length)}'), true,
+  '廁所觀察的 PhotoUpload 需求張數應與送出檢查一致');
+assertEqual(src2.includes('const needT = Math.max(1, (toiletReasons[t.id] || []).length)'), true,
+  '送出檢查應以不合格項目數為需求張數');
+assertEqual(src2.includes("needShots={item.type === 'subdeduct' ? Math.max(1, totalUnits) : 1}"), true,
+  '分區扣分題的 PhotoUpload 也要傳入需求張數');
+
 console.log(failed === 0 ? '\n✅ 全部通過' : `\n❌ ${failed} 項失敗`);
 process.exit(failed === 0 ? 0 : 1);
