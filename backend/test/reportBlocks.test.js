@@ -136,5 +136,40 @@ const many = {
 assertEqual(buildKpiBlock(many, 'x').slice(1).map(r => r[0]),
   ['合計', '北一課', '北二課', '北三課', '北四課', '桃竹課', '一部'], '課別應按中文數字數值排序');
 
+
+// ===== 缺失子項的文字：填寫型子項只呈現人工key入的名稱 =====
+//   2026-08-24：中和景會店第12題勾了「其他貨架」並填「報架，其他」，
+//   原本輸出「其他貨架、報架，其他」，但人工版只要「報架，其他」。
+//   一般子項（口巧、TM前貨架）仍用子項名稱本身。
+(function () {
+  const { ctx } = require('./gas-fake-env').loadGasFile(require('path').join(__dirname, '..', '程式碼.gs'));
+  ctx.ensureSheetNamed('設定', ['參數', '值']);
+  ctx.ensureMonth('11508');
+  ctx.upsertItem('11508', { 排序: 1, 編號: 'A12', 大分類: '商品陳列', 題號名稱: '12.價格清楚標示', 配分: 12,
+    計分方式: '分區扣分', 每項扣分: 2, 子項清單: 'OC|WI|冷凍櫃|口巧|零食|加工|TM前貨架|其他貨架:填寫' });
+  ctx.upsertRow('roster', '11508', { 店號: '000001', 店名: '中和景會店', 課別: '北一課', 店鋪型態: '一般店', 遠程店: '否', 假日店: '否', 預排梯次: '' });
+  ctx.upsertRow('roster', '11508', { 店號: '000002', 店名: 'B店', 課別: '北一課', 店鋪型態: '一般店', 遠程店: '否', 假日店: '否', 預排梯次: '' });
+  const rec = (id, code, name, detail) => ({
+    id, month: '11508', time: '2026-08-24 10:00', dept: '一部', section: '北一課',
+    empId: 'A1', staffName: '測試員', storeCode: code, storeName: name, storeType: '可拍照',
+    total: 96, grade: '優良', staffCount: '1', identity: '店長', note: '',
+    detail: detail, observation: {}, photos: {}, paperPhotos: [],
+  });
+  // 中和景會店：勾「其他貨架」並人工填入兩個貨架名稱
+  ctx.submitRecord(rec('R1', '000001', '中和景會店', {
+    A12: { name: '12.價格清楚標示', score: 8, ngSubs: ['其他貨架'], customNames: { '其他貨架': '報架，其他' } },
+  }));
+  // B店：只勾一般子項，沒有填寫型
+  ctx.submitRecord(rec('R2', '000002', 'B店', {
+    A12: { name: '12.價格清楚標示', score: 10, ngSubs: ['口巧'], customNames: {} },
+  }));
+  const rep = ctx.buildMonthlyReport('11508', { from: '2026-08-01', to: '2026-08-31' }, true);
+  const byStore = {};
+  rep.rows.forEach(r => { byStore[r.店名] = r.itemExtra['A12']; });
+  assertEqual(byStore['中和景會店'], '報架，其他', '填寫型子項只輸出人工key入的名稱，不含「其他貨架」標籤');
+  assertEqual(byStore['B店'], '口巧', '一般子項仍輸出子項名稱本身');
+})();
+
+
 console.log(failed === 0 ? '\n✅ 全部通過' : `\n❌ ${failed} 項失敗`);
 process.exit(failed === 0 ? 0 : 1);

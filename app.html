@@ -25,12 +25,12 @@
 
   <script type="text/jsx" id="appCode">
     const { useState, useMemo, useEffect, useRef } = React;
-    const APP_VERSION = '20260824-1145'; // 每次部署更新，用來確認瀏覽器跑的是哪一版
+    const APP_VERSION = '20260824-1230'; // 每次部署更新，用來確認瀏覽器跑的是哪一版
     // 這一版前端「至少」需要的後端版本。前後端是各自演進的，版本號本來就不會相等
     // （只改前端時後端不動，反之亦然），所以不能用「兩者相等」當健康指標 ——
     // 要比的是「線上後端有沒有舊到缺少本前端需要的 API」。
     // 規則：改了 程式碼.gs 且前端會用到那個改動時，才把這個值提到該後端版本。
-    const NEEDS_GAS = '20260824-1145';   // 需要：店鋪名單的型態統計 byType
+    const NEEDS_GAS = '20260824-1230';   // 需要：店鋪名單型態統計、缺失子項只輸出人工填寫的名稱
 
     // 全域錯誤攔截：任何未預期錯誤（含 async 事件處理器的未捕捉 rejection）都要顯示出來，
     // 否則按鈕會「按了沒反應」而完全查不到原因
@@ -1133,6 +1133,21 @@ ${nm}
         : show === 'has' ? toilet['O1'] === '有'
           : (toilet['O1'] === '有' || toilet['O1'] === '廁所封閉');
       const sectionStores = STORE_ROSTER.filter(s => !basic.section || s.section === basic.section);
+      const [storeQuery, setStoreQuery] = useState('');
+      const [showDoneStores, setShowDoneStores] = useState(false);
+      // 店鋪挑選清單：標記已點檢（不可重複點檢）、依搜尋字串過濾。
+      // 「已完成」數量算的是整個課別，不受搜尋與顯示開關影響，才能當作進度看。
+      const storePick = useMemo(() => {
+        const q = storeQuery.trim().toLowerCase();
+        const all = sectionStores.map(s => {
+          const editingThis = !!editingRecordId && String(s.code) === String(basic.storeCode);
+          return { ...s, editingThis, done: !!inspectedCodes[normCode(s.code)] && !editingThis };
+        });
+        const list = all
+          .filter(s => showDoneStores || !s.done || String(s.code) === String(basic.storeCode))
+          .filter(s => !q || String(s.code).toLowerCase().includes(q) || String(s.name).toLowerCase().includes(q));
+        return { total: all.length, doneCount: all.filter(s => s.done).length, list };
+      }, [sectionStores, storeQuery, showDoneStores, inspectedCodes, editingRecordId, basic.storeCode]);
       const store = STORE_ROSTER.find(s => s.code === basic.storeCode);
       const effStore = store || basic.customInfo; // 名單選的 或 自行新增(比對主檔後)的店
       // 可否拍照必須由點檢人員手選；不可拍照需再選原因
@@ -1700,16 +1715,52 @@ ${nm}
                 </div>
 
                 <div>
-                  <label className="block text-xs text-slate-500 mb-1">點檢店鋪名單<span className="text-slate-400">（依課別自動帶出，亦可自行新增）</span></label>
-                  <select value={basic.storeCode} onChange={e => setBasic({ ...basic, storeCode: e.target.value, customStore: '', customInfo: null })} className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm">
-                    <option value="">— 請選擇店鋪 —</option>
-                    {sectionStores.map(s => {
-                      const isEditingThis = !!editingRecordId && String(s.code) === String(basic.storeCode);
-                      const done = inspectedCodes[normCode(s.code)] && !isEditingThis;
-                      return <option key={s.code} value={s.code} disabled={done}>{s.code} {s.name}{s.type === '隨盤點點檢店' ? '（隨盤點點檢店）' : ''}{done ? ' ✓已點檢(不可選)' : (isEditingThis ? ' (編輯中)' : '')}</option>;
-                    })}
-                    <option value="__custom">＋ 自行新增店鋪…</option>
-                  </select>
+                  <label className="block text-xs text-slate-500 mb-1">應點檢店鋪<span className="text-slate-400">（單選；依課別自動帶出，亦可自行新增）</span></label>
+                  {/* 一個課上百家店，下拉選單很難找 → 改為可搜尋的清單，並直接顯示完成進度 */}
+                  <div className="border border-emerald-200 rounded-xl bg-emerald-50/40 overflow-hidden">
+                    <div className="flex flex-wrap items-center gap-2 px-3 py-2 border-b border-emerald-100">
+                      <span className="text-sm font-bold text-emerald-800 whitespace-nowrap">
+                        共 {storePick.total} 間 · 已完成 {storePick.doneCount}
+                      </span>
+                      <input value={storeQuery} onChange={e => setStoreQuery(e.target.value)} placeholder="搜尋店號或店名"
+                        className="flex-1 min-w-[8rem] px-3 py-1.5 border border-slate-300 rounded-full text-sm" />
+                      <label className="text-sm text-slate-600 whitespace-nowrap flex items-center gap-1 cursor-pointer">
+                        <input type="checkbox" checked={showDoneStores} onChange={e => setShowDoneStores(e.target.checked)} />
+                        顯示已完成
+                      </label>
+                    </div>
+                    <div className="max-h-72 overflow-y-auto divide-y divide-slate-100 bg-white">
+                      {storePick.list.map(s => {
+                        const sel = String(basic.storeCode) === String(s.code);
+                        return (
+                          <button type="button" key={s.code} disabled={s.done}
+                            onClick={() => setBasic({ ...basic, storeCode: s.code, customStore: '', customInfo: null })}
+                            className={"w-full text-left px-3 py-2.5 flex items-center gap-3 " + (s.done ? "bg-slate-50 cursor-not-allowed" : (sel ? "bg-emerald-50" : "hover:bg-emerald-50/60"))}>
+                            <span className={"w-5 h-5 rounded-full border-2 shrink-0 flex items-center justify-center " + (sel ? "border-emerald-600 bg-emerald-600" : "border-emerald-300")}>
+                              {sel && <span className="w-2 h-2 rounded-full bg-white" />}
+                            </span>
+                            <span className={"text-sm tabular-nums " + (s.done ? "text-slate-400" : "text-slate-500")}>{s.code}</span>
+                            <span className={"font-bold " + (s.done ? "text-slate-400" : "text-slate-800")}>{s.name}</span>
+                            {s.type === '隨盤點點檢店' && <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-100 text-amber-700 whitespace-nowrap">隨盤點</span>}
+                            <span className="ml-auto flex items-center gap-2 whitespace-nowrap">
+                              {s.done && <span className="text-xs text-slate-400">✓ 已點檢</span>}
+                              {s.editingThis && <span className="text-xs text-blue-600">編輯中</span>}
+                              <span className="text-xs px-2 py-0.5 rounded bg-emerald-100 text-emerald-700">{s.section}</span>
+                            </span>
+                          </button>
+                        );
+                      })}
+                      {!storePick.list.length && (
+                        <div className="px-3 py-6 text-center text-sm text-slate-400">
+                          {storePick.total === 0 ? '此課別本月沒有店鋪名單' : (storeQuery ? '找不到符合「' + storeQuery + '」的店鋪' : '本課別已全部完成；勾選「顯示已完成」可查看')}
+                        </div>
+                      )}
+                    </div>
+                    <button type="button" onClick={() => setBasic({ ...basic, storeCode: '__custom', customStore: '', customInfo: null })}
+                      className={"w-full px-3 py-2 text-sm border-t border-emerald-100 " + (basic.storeCode === '__custom' ? "bg-emerald-100 text-emerald-800 font-bold" : "bg-emerald-50/60 text-emerald-700 hover:bg-emerald-100")}>
+                      ＋ 自行新增店鋪（名單外）
+                    </button>
+                  </div>
                   {basic.storeCode === '__custom' && (
                     <div className="mt-2">
                       <div className="flex gap-2">

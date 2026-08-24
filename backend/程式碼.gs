@@ -10,7 +10,7 @@
 // 後端版本：每次修改本檔就更新，並於前端「資料更新時間」旁顯示。
 // 用途：貼上程式碼後若忘記「部署 → 管理部署作業 → 新版本」，畫面上的後端版本就不會變，
 //       可立即分辨是「沒貼上」「貼了但沒部署」還是「已生效」。
-var GAS_VERSION = '20260824-1145';
+var GAS_VERSION = '20260824-1230';
 
 var SPREADSHEET_ID = '1GRZZsZRgakMGENspOxmlx96NfckC8UYOe0ipuNNEoh0';
 var DRIVE_ROOT_ID  = '122nQjldImn5Zh5AUguxZF0YzobThgdc9';
@@ -624,11 +624,22 @@ function buildMonthlyReport(month, filter, isManager) {
     checklist.forEach(function (it) {
       var d = (rec.detail || {})[it.id];
       itemScores[it.id] = d && d.score != null ? d.score : it.max;
-      if (d && d.ngSubs && d.ngSubs.length) itemExtra[it.id] = d.ngSubs.join('、');
-      if (d && d.customNames) {
-        var names = Object.keys(d.customNames).map(function (k) { return d.customNames[k]; }).filter(Boolean);
-        if (names.length) itemExtra[it.id] = (itemExtra[it.id] ? itemExtra[it.id] + '、' : '') + names.join('、');
-      }
+      // 缺失子項的文字：
+      //   一般子項（口巧、TM前貨架…）→ 直接用子項名稱
+      //   「填寫型」子項（如 其他貨架:填寫）→ 只呈現人工key入的名稱，不要再輸出「其他貨架」這個標籤本身
+      //     （原本是兩者都輸出，會變成「其他貨架、報架，其他」，人工版只需要「報架，其他」）
+      var labels = [];
+      var ngSubs = (d && d.ngSubs) || [];
+      var customNames = (d && d.customNames) || {};
+      ngSubs.forEach(function (nm) {
+        var typed = customNames[nm];
+        labels.push(typed ? String(typed) : String(nm));
+      });
+      // 有填了名稱但子項沒被勾選的情況（理論上不會發生），仍要呈現，避免漏掉缺失
+      Object.keys(customNames).forEach(function (k) {
+        if (ngSubs.indexOf(k) < 0 && customNames[k]) labels.push(String(customNames[k]));
+      });
+      if (labels.length) itemExtra[it.id] = labels.join('、');
     });
     var catSubtotal = {};
     catOrder.forEach(function (cat) {
