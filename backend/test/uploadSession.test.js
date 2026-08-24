@@ -144,6 +144,11 @@ sentRequests = [];
 post('createUploadSessions', { items: [items[0]], origin: 'https://evil.example.com' }, token);
 assertEqual(sentRequests[0].headers.Origin, 'https://fme-c-user.github.io', '不在白名單的 origin 應換成正式網域，不可原樣回填');
 
+// Cloud Run 是 2026-08-24 起的第二個入口，白名單漏掉它的話從該網址上傳照片會被 CORS 擋掉
+sentRequests = [];
+post('createUploadSessions', { items: [items[0]], origin: 'https://sqc-checklist-ec6xuimwxa-de.a.run.app' }, token);
+assertEqual(sentRequests[0].headers.Origin, 'https://sqc-checklist-ec6xuimwxa-de.a.run.app', 'Cloud Run 網址必須在白名單內');
+
 sentRequests = [];
 post('createUploadSessions', { items: [items[0]] }, token);
 assertEqual(sentRequests[0].headers.Origin, 'https://fme-c-user.github.io', '未帶 origin 時應用預設正式網域');

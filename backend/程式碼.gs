@@ -10,7 +10,7 @@
 // 後端版本：每次修改本檔就更新，並於前端「資料更新時間」旁顯示。
 // 用途：貼上程式碼後若忘記「部署 → 管理部署作業 → 新版本」，畫面上的後端版本就不會變，
 //       可立即分辨是「沒貼上」「貼了但沒部署」還是「已生效」。
-var GAS_VERSION = '20260821-1330';
+var GAS_VERSION = '20260824-1030';
 
 var SPREADSHEET_ID = '1GRZZsZRgakMGENspOxmlx96NfckC8UYOe0ipuNNEoh0';
 var DRIVE_ROOT_ID  = '122nQjldImn5Zh5AUguxZF0YzobThgdc9';
@@ -324,8 +324,9 @@ var UPLOAD_SESSION_MAX = 20; // 一次最多開幾個，避免 UrlFetchApp 逾�
 // 用白名單而非直接回填呼叫端傳來的值，避免有人替自己的網站鑄造可用的上傳網址。
 var DEFAULT_ORIGIN = 'https://fme-c-user.github.io';
 var ALLOWED_ORIGINS = {
-  'https://fme-c-user.github.io': 1,
-  'http://localhost:8931': 1,      // 本機測試用
+  'https://fme-c-user.github.io': 1,                        // GitHub Pages（原入口）
+  'https://sqc-checklist-ec6xuimwxa-de.a.run.app': 1,       // GCP Cloud Run（2026-08-24 新增的入口）
+  'http://localhost:8931': 1,                               // 本機測試用
 };
 
 /** 同資料夾內已有同檔名的照片就直接回傳它的 ID（照片檔名為 店號_日期_題目_序號，固定不變）。
