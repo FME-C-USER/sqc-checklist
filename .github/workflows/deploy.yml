@@ -83,6 +83,10 @@ jobs:
           no_traffic: true
           flags: --no-invoker-iam-check --update-labels=deployed-by=${{ steps.deployer.outputs.label }},repo=${{ steps.deployer.outputs.repo }}
 
+      # 注意：建立「全新服務」時不可帶 no_traffic —— Cloud Run 會直接拒絕：
+      #   ERROR: (gcloud.run.deploy) --no-traffic not supported when creating a new service.
+      # 因此第一次部署的服務會立即承接流量，容器掃描是在服務上線後才完成；
+      # 第二次以後走上面的 existing 分支，就會回到「先不給流量 → 掃描通過 → 才開流量」。
       - name: Deploy new service
         id: deploy_new
         if: steps.check.outputs.exists == 'false'
@@ -92,7 +96,6 @@ jobs:
           region: ${{ env.REGION }}
           project_id: ${{ env.PROJECT_ID }}
           source: .
-          no_traffic: true
           flags: --no-invoker-iam-check --update-labels=deployed-by=${{ steps.deployer.outputs.label }},repo=${{ steps.deployer.outputs.repo }}
 
       - name: Get deployed image digest
