@@ -1143,22 +1143,6 @@ ${nm}
       const obsVisible = (show) => show === 'always' ? true
         : show === 'has' ? toilet['O1'] === '有'
           : (toilet['O1'] === '有' || toilet['O1'] === '廁所封閉');
-      const sectionStores = STORE_ROSTER.filter(s => !basic.section || s.section === basic.section);
-      const [storeQuery, setStoreQuery] = useState('');
-      const [showDoneStores, setShowDoneStores] = useState(false);
-      // 店鋪挑選清單：標記已點檢（不可重複點檢）、依搜尋字串過濾。
-      // 「已完成」數量算的是整個課別，不受搜尋與顯示開關影響，才能當作進度看。
-      const storePick = useMemo(() => {
-        const q = storeQuery.trim().toLowerCase();
-        const all = sectionStores.map(s => {
-          const editingThis = !!editingRecordId && String(s.code) === String(basic.storeCode);
-          return { ...s, editingThis, done: !!inspectedCodes[normCode(s.code)] && !editingThis };
-        });
-        const list = all
-          .filter(s => showDoneStores || !s.done || String(s.code) === String(basic.storeCode))
-          .filter(s => !q || String(s.code).toLowerCase().includes(q) || String(s.name).toLowerCase().includes(q));
-        return { total: all.length, doneCount: all.filter(s => s.done).length, list };
-      }, [sectionStores, storeQuery, showDoneStores, inspectedCodes, editingRecordId, basic.storeCode]);
       const store = STORE_ROSTER.find(s => s.code === basic.storeCode);
       const effStore = store || basic.customInfo; // 名單選的 或 自行新增(比對主檔後)的店
       // 可否拍照必須由點檢人員手選；不可拍照需再選原因
@@ -1184,6 +1168,25 @@ ${nm}
       const [editingMonth, setEditingMonth] = useState(null);       // 該筆紀錄「原本所在」的月份活頁（點檢時間改跨月時仍要找得到原列）
       const [existingPhotos, setExistingPhotos] = useState({});      // 編輯時保留原有照片JSON
       const [editPass, setEditPass] = useState('');                  // 跨週編輯用的密碼（後端會再驗一次）
+      // 店鋪挑選清單必須放在 editingRecordId / editPass 等 state 宣告之後 ——
+      // useMemo 的計算在 render 當下就執行，若放在前面會踩到 const 的暫時性死區
+      // （ReferenceError: Cannot access 'editingRecordId' before initialization）。
+      const sectionStores = STORE_ROSTER.filter(s => !basic.section || s.section === basic.section);
+      const [storeQuery, setStoreQuery] = useState('');
+      const [showDoneStores, setShowDoneStores] = useState(false);
+      // 店鋪挑選清單：標記已點檢（不可重複點檢）、依搜尋字串過濾。
+      // 「已完成」數量算的是整個課別，不受搜尋與顯示開關影響，才能當作進度看。
+      const storePick = useMemo(() => {
+        const q = storeQuery.trim().toLowerCase();
+        const all = sectionStores.map(s => {
+          const editingThis = !!editingRecordId && String(s.code) === String(basic.storeCode);
+          return { ...s, editingThis, done: !!inspectedCodes[normCode(s.code)] && !editingThis };
+        });
+        const list = all
+          .filter(s => showDoneStores || !s.done || String(s.code) === String(basic.storeCode))
+          .filter(s => !q || String(s.code).toLowerCase().includes(q) || String(s.name).toLowerCase().includes(q));
+        return { total: all.length, doneCount: all.filter(s => s.done).length, list };
+      }, [sectionStores, storeQuery, showDoneStores, inspectedCodes, editingRecordId, basic.storeCode]);
       const [removedPhotos, setRemovedPhotos] = useState([]);        // 編輯中被標記刪除的原照片（完成編輯後才移入垃圾桶）
       const [lightbox, setLightbox] = useState(null);                // 照片放大檢視
       useEffect(() => {
