@@ -10,7 +10,7 @@
 // 後端版本：每次修改本檔就更新，並於前端「資料更新時間」旁顯示。
 // 用途：貼上程式碼後若忘記「部署 → 管理部署作業 → 新版本」，畫面上的後端版本就不會變，
 //       可立即分辨是「沒貼上」「貼了但沒部署」還是「已生效」。
-var GAS_VERSION = '20260824-1330';
+var GAS_VERSION = '20260824-1400';
 
 var SPREADSHEET_ID = '1GRZZsZRgakMGENspOxmlx96NfckC8UYOe0ipuNNEoh0';
 var DRIVE_ROOT_ID  = '122nQjldImn5Zh5AUguxZF0YzobThgdc9';
@@ -954,7 +954,9 @@ function normName(n) { return String(n == null ? '' : n).trim().replace(/店$/, 
 // 照片項目轉雲端連結；尚未回寫 fileId(上傳中/舊紀錄)則回傳空字串
 function photoUrlOf(entry) {
   var fileId = entry && typeof entry === 'object' ? entry.fileId : '';
-  return fileId ? ('https://drive.google.com/open?id=' + fileId) : '';
+  // 用 /file/d/<id>/view 這個標準格式：open?id= 在「未登入」時常導向登入頁或預覽失敗，
+  // 而 /file/d/<id>/view 是 Drive 對「知道連結的人」提供的正式檢視網址，未登入也能開。
+  return fileId ? ('https://drive.google.com/file/d/' + fileId + '/view') : '';
 }
 function photoUrlsOf(arr) { return (arr || []).map(photoUrlOf).filter(Boolean); }
 

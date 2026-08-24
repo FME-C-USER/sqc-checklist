@@ -46,7 +46,21 @@ assertEqual(r3.ok, false, '找不到紀錄應回傳 ok:false');
 
 // photoUrlOf：舊資料(純檔名字串，尚未回寫連結)應回傳空字串，不應噴錯
 assertEqual(ctx.photoUrlOf('legacy_filename.jpg'), '', '純檔名(舊資料/尚未連結)應回傳空字串');
-assertEqual(ctx.photoUrlOf({ name: 'a.jpg', fileId: 'FILE_A' }), 'https://drive.google.com/open?id=FILE_A', '已回寫連結應組出正確網址');
+assertEqual(ctx.photoUrlOf({ name: 'a.jpg', fileId: 'FILE_A' }), 'https://drive.google.com/file/d/FILE_A/view', '已回寫連結應組出正確網址');
+
+
+// ===== 照片連結格式：要用未登入也能開的 /file/d/<id>/view =====
+//   2026-08-24：使用者反映報表連結要登入 Google 才看得到。除了把檔案設為「知道連結可檢視」，
+//   連結格式也要用 Drive 的正式檢視網址；open?id= 在未登入時常導向登入頁或預覽失敗。
+assertEqual(ctx.photoUrlOf({ name: 'a.jpg', fileId: 'ABC123' }),
+  'https://drive.google.com/file/d/ABC123/view', '應使用 /file/d/<id>/view 格式');
+assertEqual(ctx.photoUrlOf({ name: 'a.jpg', fileId: 'ABC123' }).indexOf('open?id=') === -1, true,
+  '不可再用 open?id= 舊格式（未登入會被導到登入頁）');
+assertEqual(ctx.photoUrlOf({ name: 'a.jpg' }), '', '還沒回寫 fileId 的照片回空字串，不可產生壞連結');
+assertEqual(ctx.photoUrlOf('a.jpg'), '', '舊資料只有檔名字串時也要回空字串');
+assertEqual(ctx.photoUrlsOf([{ fileId: 'X' }, { name: 'no-id' }, { fileId: 'Y' }]),
+  ['https://drive.google.com/file/d/X/view', 'https://drive.google.com/file/d/Y/view'],
+  '多張照片只輸出已有 fileId 的連結');
 
 console.log(failed === 0 ? '\n✅ 全部通過' : `\n❌ ${failed} 項失敗`);
 process.exit(failed === 0 ? 0 : 1);

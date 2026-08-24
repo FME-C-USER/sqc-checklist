@@ -73,15 +73,15 @@ assertEqual(row.分類小計['商品陳列'], 6, '商品陳列分類小計應為
 assertEqual(row.遠程店, '是', '遠程店應從店鋪名單帶出');
 assertEqual(row.店型態, '隨盤點點檢店', '店型態應來自店鋪名單(角色/名單分類)，而非拍照類型');
 assertEqual(row.拍照類型, '可拍照', '拍照類型應來自紀錄本身，與店型態是不同欄位');
-assertEqual(row.photoGroups['1.店外海報/缺失'], ['https://drive.google.com/open?id=FILE_A'], '已回寫連結的照片應出現在photoGroups(去掉月份資料夾前綴)');
+assertEqual(row.photoGroups['1.店外海報/缺失'], ['https://drive.google.com/file/d/FILE_A/view'], '已回寫連結的照片應出現在photoGroups(去掉月份資料夾前綴)');
 
 // 報表(前端)是以資料夾名稱前綴比對觀察區照片，這裡驗證後端回傳的 key 確實符合該前綴約定，
 // 否則「課長版觀察區沒有照片連結」的問題會再次發生
 const groupKeys = Object.keys(row.photoGroups);
 assertEqual(groupKeys.filter(k => k.indexOf('重點觀察題1') === 0), ['重點觀察題1.【店外全景照】'], '重點觀察題照片的key應以「重點觀察題1」開頭');
-assertEqual(row.photoGroups['重點觀察題1.【店外全景照】'], ['https://drive.google.com/open?id=FILE_KO1'], '重點觀察題1應帶出雲端連結');
+assertEqual(row.photoGroups['重點觀察題1.【店外全景照】'], ['https://drive.google.com/file/d/FILE_KO1/view'], '重點觀察題1應帶出雲端連結');
 assertEqual(groupKeys.filter(k => k.indexOf('廁所觀察/') === 0).length, 1, '廁所觀察缺失照片的key應以「廁所觀察/」開頭');
-assertEqual(row.photoGroups['廁所觀察/廁所乾淨無髒污及垃圾桶無明顯滿溢/缺失'], ['https://drive.google.com/open?id=FILE_T1'], '廁所觀察缺失照片應帶出雲端連結');
+assertEqual(row.photoGroups['廁所觀察/廁所乾淨無髒污及垃圾桶無明顯滿溢/缺失'], ['https://drive.google.com/file/d/FILE_T1/view'], '廁所觀察缺失照片應帶出雲端連結');
 
 assertEqual(report.obsList.length, 1, '應回傳觀察題定義供報表產生欄位使用');
 assertEqual(report.obsList[0].id, 'O1', '觀察題編號');
