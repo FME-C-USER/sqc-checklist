@@ -109,7 +109,8 @@ assertEqual(parse([{ aoa: [['店號', '店名'], ['001', 'A店']] }]), null, '�
 
 assertEqual(app.includes("rec ? (rec.實際梯次 || '') : ''"), true, '查核店鋪名單的「實際點檢梯次」應取實際梯次');
 assertEqual(app.includes('(rec ? rec.預排梯次 : s.預排梯次)'), true, '已點檢的店，預排梯次欄要顯示實際值');
-assertEqual(app.includes('batchOf(r.實際梯次 || r.預排梯次)'), true, '梯次表的實際側應以實際梯次統計');
+// 梯次表的實際側以實際梯次為準（沒有梯次期間時才退回預排）；預計側也跟著搬，見 reportBlocks 測試
+assertEqual(app.includes("batchOf(rec ? (rec.實際梯次 || rec.預排梯次) : '')"), true, '梯次表應以實際梯次為準');
 
 // 表頭不一定在第一列（官方名單常有標題列），也可能整張沒有表頭 —— 都要能抓到，
 // 因為靜默失敗會讓使用者以為梯次已生效，實際上仍在沿用預排。
@@ -124,6 +125,16 @@ assertEqual(parse([{ aoa: [['店號', '梯次', '評核日期' + String.fromChar
   ONE, '欄名含換行也要抓得到');
 assertEqual(app.includes('未在檔案中找到「梯次／評核日期區間」小表'), true,
   '找不到小表時必須明確提示，不可靜默沿用預排');
+
+// 匯入訊息只能報「後端實際存了幾筆」。舊版後端沒有這段程式會安靜地把 batches 丟掉，
+// 若訊息只報前端解析到的筆數，使用者會誤以為梯次已生效（實際梯次其實仍是空的）。
+assertEqual(app.includes('const saved = r.batchCount;'), true, '匯入訊息應取後端回傳的 batchCount');
+assertEqual(app.includes('後端版本過舊（不支援梯次期間）'), true, '後端沒回 batchCount 時要指出是後端太舊');
+assertEqual(/saved > 0[\s\S]{0,120}同時轉入梯次期間/.test(app), true, '只有真的存下才顯示「同時轉入梯次期間」');
+assertEqual(fs.readFileSync(GS_PATH, 'utf8').includes('var batchCount = '), true,
+  '後端 importMaster 要回報實際存下的筆數');
+// 報表端：沒有梯次期間時「實際點檢梯次」會整片空白，必須說明原因
+assertEqual(app.includes('本月尚未載入「梯次期間」'), true, '產報表時若沒有梯次期間要提醒使用者');
 
 console.log(failed === 0 ? '\n✅ 全部通過' : `\n❌ ${failed} 項失敗`);
 process.exit(failed === 0 ? 0 : 1);

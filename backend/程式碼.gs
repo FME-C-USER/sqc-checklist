@@ -10,7 +10,7 @@
 // 後端版本：每次修改本檔就更新，並於前端「資料更新時間」旁顯示。
 // 用途：貼上程式碼後若忘記「部署 → 管理部署作業 → 新版本」，畫面上的後端版本就不會變，
 //       可立即分辨是「沒貼上」「貼了但沒部署」還是「已生效」。
-var GAS_VERSION = '20260825-1000';
+var GAS_VERSION = '20260825-1500';
 
 var SPREADSHEET_ID = '1GRZZsZRgakMGENspOxmlx96NfckC8UYOe0ipuNNEoh0';
 var DRIVE_ROOT_ID  = '122nQjldImn5Zh5AUguxZF0YzobThgdc9';
@@ -72,6 +72,7 @@ function doPost(e) {
       getPhotoThumbs: function () { return { thumbs: photoThumbs(p.fileIds) }; },
       getPhotoImage: function () { return photoImage(p.fileId); },
       trashPhotos: function () { return trashPhotos(p.fileIds); },
+      repairRecordPhotos: function () { return repairRecordPhotos(p.month, p.recordId); },
     };
     if (!routes[action]) return json({ ok: false, error: '未知動作：' + action });
     var result = routes[action]();
@@ -526,6 +527,44 @@ function attachPhotoLinks(month, recordId, links) {
     SpreadsheetApp.flush();
     lock.releaseLock();
   }
+}
+
+/**
+ * 補回某筆紀錄照片JSON裡缺少的 fileId。
+ * 照片上傳完成後才會呼叫 attachPhotoLinks 回寫 fileId；若當下網路斷掉或使用者
+ * 直接關閉頁面，照片其實已經在 Drive，但紀錄裡只剩檔名 —— 編輯時就顯示「無雲端連結」，
+ * 報表裡也沒有連結。檔名是固定規則（店號_日期_題目_序號），所以能依「資料夾＋檔名」找回來。
+ * 注意：查 Drive 的部分不可以持鎖 —— ensureFolderId 自己會拿 script lock，
+ *       在持鎖中呼叫會互鎖等到逾時。所以先查完，再交給 attachPhotoLinks 寫回。
+ */
+function repairRecordPhotos(month, recordId) {
+  var sh = ssBook().getSheetByName('點檢紀錄_' + month);
+  if (!sh) return { ok: false, message: '找不到月份活頁' };
+  var data = sh.getDataRange().getValues();
+  var head = data[0];
+  var idCol = head.indexOf('紀錄ID'), photoCol = head.indexOf('照片JSON');
+  var at = -1;
+  for (var i = 1; i < data.length; i++) { if (String(data[i][idCol]) === String(recordId)) { at = i; break; } }
+  if (at < 0) return { ok: false, message: '找不到紀錄' };
+
+  var photos = safeJson(data[at][photoCol]);
+  var links = {}, filled = 0, missing = 0;
+  Object.keys(photos).forEach(function (key) {
+    var folderId = null;   // 同一個資料夾只查一次
+    (photos[key] || []).forEach(function (e) {
+      var name = (typeof e === 'string') ? e : (e && e.name);
+      if (!name || (e && e.fileId)) return;               // 已經有 fileId 就跳過
+      if (folderId === null) folderId = ensureFolderId(key.split('/'));
+      var fid = folderId ? findFileIdByName(folderId, name) : '';
+      if (!fid) { missing++; return; }                    // Drive 裡真的沒有這張（可能當時根本沒上傳成功）
+      if (!links[key]) links[key] = [];
+      links[key].push({ name: name, fileId: fid });
+      filled++;
+    });
+  });
+  if (!filled) return { ok: true, filled: 0, missing: missing };
+  var res = attachPhotoLinks(month, recordId, links);
+  return { ok: res.ok !== false, filled: filled, missing: missing, message: res.message };
 }
 
 function queryRecords(month, filter) {

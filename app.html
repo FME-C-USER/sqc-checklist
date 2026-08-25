@@ -25,12 +25,12 @@
 
   <script type="text/jsx" id="appCode">
     const { useState, useMemo, useEffect, useRef } = React;
-    const APP_VERSION = '20260825-1000'; // 每次部署更新，用來確認瀏覽器跑的是哪一版
+    const APP_VERSION = '20260825-1500'; // 每次部署更新，用來確認瀏覽器跑的是哪一版
     // 這一版前端「至少」需要的後端版本。前後端是各自演進的，版本號本來就不會相等
     // （只改前端時後端不動，反之亦然），所以不能用「兩者相等」當健康指標 ——
     // 要比的是「線上後端有沒有舊到缺少本前端需要的 API」。
     // 規則：改了 程式碼.gs 且前端會用到那個改動時，才把這個值提到該後端版本。
-    const NEEDS_GAS = '20260825-1000';   // 需要：梯次期間（實際梯次）、跨週密碼嘗試次數限制
+    const NEEDS_GAS = '20260825-1500';   // 需要：照片連結修復(repairRecordPhotos)、匯入回報梯次筆數
 
     // 全域錯誤攔截：任何未預期錯誤（含 async 事件處理器的未捕捉 rejection）都要顯示出來，
     // 否則按鈕會「按了沒反應」而完全查不到原因
@@ -540,20 +540,39 @@
     function buildBatchBlock(report, periodLabel) {
       const roster = report.roster || [], rows = report.rows || [];
       const batchOf = (v) => String(v || '').trim();
+      const NONE = '(未列梯次)';   // 判不出梯次的也要有欄位，否則合計會少掉幾筆，數字對不起來
+      const recOf = {};
+      rows.forEach(r => { const c = normCode(r.店號); if (c) recOf[c] = r; });   // 店號空白不可當成一把「通用鑰匙」
+      // 每家店的「有效梯次」：點過的以實際點檢日期落在哪一梯為準，沒點的用名單的預排。
+      //   預計側也用有效梯次（而非原預排）—— 脫期的店若預計留在第一梯、實際算在第二梯，
+      //   兩梯永遠各差一筆，全部點完也到不了 100%。原預排在名單裡另有一欄可查。
+      const effOf = (code, planned) => {
+        const c = normCode(code);
+        const rec = c ? recOf[c] : null;
+        return batchOf(rec ? (rec.實際梯次 || rec.預排梯次) : '') || batchOf(planned) || NONE;
+      };
+      const inRoster = {};
+      roster.forEach(s => { const c = normCode(s.店號); if (c) inRoster[c] = true; });
       const batches = [];
-      roster.forEach(s => { const b = batchOf(s.預排梯次); if (b && batches.indexOf(b) < 0) batches.push(b); });
-      rows.forEach(r => { const b = batchOf(r.實際梯次); if (b && batches.indexOf(b) < 0) batches.push(b); });
-      batches.sort();
+      const addBatch = (b) => { if (b && batches.indexOf(b) < 0) batches.push(b); };
+      roster.forEach(s => addBatch(effOf(s.店號, s.預排梯次)));
+      rows.forEach(r => addBatch(effOf(r.店號, '')));   // 名單外自行新增的店也要有欄位
+      batches.sort((a, b) => a === NONE ? 1 : b === NONE ? -1 : (a < b ? -1 : a > b ? 1 : 0));
       if (!batches.length) return [];
       const deptOfSection = sectionDeptMap(report); // 含零點檢課別，順序才會與KPI表一致
       const sections = [];
       roster.forEach(s => { if (s.課別 && sections.indexOf(s.課別) < 0) sections.push(s.課別); });
+      rows.forEach(r => { if (r.主責課 && sections.indexOf(r.主責課) < 0) sections.push(r.主責課); });
       sections.sort(cmpSection);
       const plan = {}, actual = {};
       const bump = (obj, key, b) => { if (!obj[key]) obj[key] = {}; obj[key][b] = (obj[key][b] || 0) + 1; };
-      roster.forEach(s => { const b = batchOf(s.預排梯次); if (b) bump(plan, s.課別 || '(未分類)', b); });
-      // 實際側用「實際點檢日期落在哪一梯」；預計側維持名單的原預排，兩者並列才看得出脫期
-      rows.forEach(r => { const b = batchOf(r.實際梯次 || r.預排梯次); if (b) bump(actual, r.主責課 || '(未分類)', b); });
+      roster.forEach(s => bump(plan, s.課別 || '(未分類)', effOf(s.店號, s.預排梯次)));
+      rows.forEach(r => {
+        const b = effOf(r.店號, '');
+        bump(actual, r.主責課 || '(未分類)', b);
+        // 名單外自行新增的店：名單裡沒有它，預計側也要補上，否則實際會大於預計
+        if (!inRoster[normCode(r.店號)]) bump(plan, r.主責課 || '(未分類)', b);
+      });
 
       const head1 = ['期間'], head2 = [periodLabel];
       batches.forEach(b => { head1.push(b, ''); head2.push('預計點檢店數', '實際點檢店數'); });
@@ -1144,8 +1163,15 @@ ${nm}
         if (gone && gone.fileId) setRemovedPhotos(prev => [...prev, { fileId: gone.fileId, name: nm }]);
       };
 
-      // 工號比對一律轉字串：Sheet 會把工號存成數字，下拉選單的值是字串，嚴格比對會找不到人
-      const findStaff = (id) => STAFFS.find(s => String(s.id) === String(id));
+      // 工號比對一律轉字串：Sheet 會把工號存成數字，下拉選單的值是字串，嚴格比對會找不到人。
+      // 另外去頭尾空白、忽略前導0（同一個工號在點檢人員是文字「012345」、在紀錄裡是數字 12345
+      // 的情況很常見），否則編輯舊紀錄時會找不到人而被擋下。
+      const normEmp = (v) => String(v == null ? '' : v).trim().replace(/^0+(?=\d)/, '');
+      const findStaff = (id) => {
+        const k = normEmp(id);
+        if (!k) return undefined;
+        return STAFFS.find(s => String(s.id) === String(id)) || STAFFS.find(s => normEmp(s.id) === k);
+      };
       // 觀察區題目的顯示條件（畫面與必填檢核共用同一份判斷，避免兩邊規則走鐘）
       //   always＝一律顯示｜has＝有對外廁所才顯示｜hasOrClosed＝有或廁所封閉才顯示
       const obsVisible = (show) => show === 'always' ? true
@@ -1176,6 +1202,7 @@ ${nm}
       const [editingMonth, setEditingMonth] = useState(null);       // 該筆紀錄「原本所在」的月份活頁（點檢時間改跨月時仍要找得到原列）
       const [existingPhotos, setExistingPhotos] = useState({});      // 編輯時保留原有照片JSON
       const [editPass, setEditPass] = useState('');                  // 跨週編輯用的密碼（後端會再驗一次）
+      const [editOrigStaff, setEditOrigStaff] = useState(null);      // 該筆原本的點檢人員（員編已不在名單時沿用，不擋住編輯）
       // 店鋪挑選清單必須放在 editingRecordId / editPass 等 state 宣告之後 ——
       // useMemo 的計算在 render 當下就執行，若放在前面會踩到 const 的暫時性死區
       // （ReferenceError: Cannot access 'editingRecordId' before initialization）。
@@ -1285,6 +1312,21 @@ ${nm}
         setToilet(o.toilet || {}); setObsText(o.obsText || ''); setToiletReasons(o.toiletReasons || {});
         setKeyObs({}); setToiletPhotos({}); setPerfectPhotos({}); setPaperForm([]);
         setExistingPhotos(rec.photos || {});
+        // 照片已在 Drive 但紀錄裡只剩檔名（上傳完成後回寫連結那一步被網路中斷或關頁面打掉）→
+        // 縮圖會顯示「無雲端連結」，報表也沒有連結。檔名是固定規則，直接請後端補回來。
+        const needFix = Object.keys(rec.photos || {}).some(k =>
+          (rec.photos[k] || []).some(e => e && !(typeof e === 'object' && e.fileId)));
+        if (needFix && CONFIGURED) {
+          SqcApi.repairRecordPhotos(rec.month || workMonth, rec.id)
+            .then(r => {
+              if (!r || !r.filled) return;
+              return SqcApi.queryRecords(rec.month || workMonth, {}).then(q => {
+                const fresh = (q.records || []).find(x => String(x.id) === String(rec.id));
+                if (fresh) setExistingPhotos(fresh.photos || {});
+              });
+            })
+            .catch(() => { /* 補不回來也不影響編輯，縮圖維持「無雲端連結」 */ });
+        }
         // 備註欄與「不可拍照原因」共用同一個後端欄位，用固定分隔字串拆開還原
         const rawNote = String(rec.note || '');
         const sepIdx = rawNote.indexOf('｜備註：');
@@ -1305,6 +1347,7 @@ ${nm}
           noPhotoReason: npr, noPhotoOther: npo,
         });
         setEditingRecordId(rec.id);
+        setEditOrigStaff({ id: rec.empId || '', name: rec.staffName || '' });
         setEditingMonth(String(rec.month || rocMonth(rec.time))); // 轉字串：Sheet 的題庫版本可能是數字，比對月份時會誤判成跨月
         setTab('work');
       };
@@ -1380,9 +1423,17 @@ ${nm}
             }
           }
         }
-        const staff = findStaff(basic.staffId);
-        // 找不到就擋下：寧可要求重選，也不要默默把紀錄掛到登入者名下（會造成點檢人員誤植）
-        if (!staff) { alert('找不到所選點檢人員的資料，請重新選擇「點檢人員」'); setTab('basic'); return; }
+        let staff = findStaff(basic.staffId);
+        // 編輯舊紀錄時，該員編可能已不在「點檢人員」名單（離職、或名單重匯後工號格式改變）。
+        // 這種情況不該把人卡在現場：沿用紀錄原本存的點檢人員即可，既不會誤植也不會擋住編輯。
+        if (!staff && isEdit && editOrigStaff && String(editOrigStaff.id) === String(basic.staffId) && editOrigStaff.name) {
+          staff = { id: editOrigStaff.id, name: editOrigStaff.name, dept: basic.dept, section: basic.section };
+        }
+        // 新增時找不到就擋下：寧可要求重選，也不要默默把紀錄掛到登入者名下（會造成點檢人員誤植）
+        if (!staff) {
+          alert(`找不到所選點檢人員的資料（員編 ${basic.staffId || '空白'}），請重新選擇「點檢人員」`);
+          setTab('basic'); return;
+        }
         const storeName = effStore ? effStore.name : '';
         const storeCode = effStore ? effStore.code : '';
         const recId = editingRecordId || ((window.crypto && crypto.randomUUID) ? crypto.randomUUID() : 'r' + Date.now());
@@ -1592,6 +1643,13 @@ ${nm}
           // 該月「觀察題」活頁未匯入時後端回空陣列，但點檢當時是用內建預設題目進行的，
           // 報表改用同一份預設定義，否則觀察區的欄位與照片連結會整片空白
           if (!report.obsList || !report.obsList.length) report.obsList = defaultObsList();
+          // 沒有梯次期間就算不出「實際點檢梯次」，報表那一欄會整片空白 —— 要講清楚原因，
+          // 否則使用者只看到空白欄位，無從判斷是資料問題還是功能沒生效
+          if (!(report.batchPeriods || []).length) {
+            alert('⚠ 本月尚未載入「梯次期間」，所以「實際點檢梯次」會是空白，梯次表也只能依名單的預排統計。\n'
+              + '請到「維護專區 → 店鋪名單」重新匯入官方委外名單（檔案右側需含「梯次／評核日期區間」小表），'
+              + '匯入後訊息會顯示「同時轉入梯次期間 N 筆」才算成功。');
+          }
           const wb = new ExcelJS.Workbook();
           if (!customerFacing) addPlainSheet(wb, '不及格店', buildFailStoreSheet(report));
           buildRosterCheckSheet(wb, report, customerFacing, filter);
@@ -2427,12 +2485,23 @@ ${nm}
             const c = rosterToRows(parsed.sheets);
             if (c) { data = c; convMsg = '\n（偵測到官方委外名單，已自動轉：主責課→課別、隨盤點→店鋪型態）'; }
             batches = rosterBatchPeriods(parsed.sheets);
-            convMsg += batches
-              ? '\n（同時轉入梯次期間 ' + batches.length + ' 筆：' + batches.map(b => b.梯次 + ' ' + b.區間).join('、') + '）'
-              : '\n⚠ 未在檔案中找到「梯次／評核日期區間」小表 → 梯次仍會沿用名單的預排值，'
+            if (!batches) {
+              convMsg += '\n⚠ 未在檔案中找到「梯次／評核日期區間」小表 → 梯次仍會沿用名單的預排值，'
                 + '報表的「實際點檢梯次」不會依實際日期判定。請確認名單檔右側有這兩欄。';
+            }
           }
           const r = await SqcApi.importMaster(area.importKind, month, data, f.name, batches);
+          // 梯次期間必須看「後端回報實際存了幾筆」，不能只報前端解析到幾筆 ——
+          // 舊版後端沒有這段程式，會安靜地把 batches 丟掉，訊息卻顯示成功，
+          // 使用者就會誤以為梯次已生效（實際梯次仍是空的）。
+          if (batches) {
+            const saved = r.batchCount;
+            convMsg += saved === undefined
+              ? '\n⚠ 梯次期間沒有轉入：後端版本過舊（不支援梯次期間），請重新部署後端 Apps Script 後再匯入一次。'
+              : saved > 0
+                ? '\n（同時轉入梯次期間 ' + saved + ' 筆：' + batches.map(b => b.梯次 + ' ' + b.區間).join('、') + '）'
+                : '\n⚠ 梯次期間解析到 ' + batches.length + ' 筆但後端存下 0 筆，請檢查區間格式（需為 8/1-8/15 這種寫法）。';
+          }
           setUploaded({ ...uploaded, [sub]: f.name });
           load(); await onReload();
           alert(`✅ 已匯入「${f.name}」${r.count} 筆（同名覆蓋，以最新為主）` + convMsg);

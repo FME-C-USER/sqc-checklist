@@ -24,26 +24,34 @@ const grab = (startMarker, endMarker) => {
 // 這一整段（日期工具 → 每日店數表 → 課別排序 → KPI表 → 梯次表）都在 window.SqcReport 之前
 const code = grab('// ===== 每日店數表', 'window.SqcReport =');
 
+// 梯次表要用店號比對「這家店有沒有被點過」，normCode 定義在更上面
+const normCodeSrc = grab('function normCode(', '\n');
+
 const sandbox = { window: {}, console };
 vm.createContext(sandbox);
-vm.runInContext(code + '\nthis.__api = { buildDailyCountBlock, buildBatchBlock, buildKpiBlock };', sandbox);
+vm.runInContext(normCodeSrc + '\n' + code + '\nthis.__api = { buildDailyCountBlock, buildBatchBlock, buildKpiBlock };', sandbox);
 const { buildDailyCountBlock, buildBatchBlock, buildKpiBlock } = sandbox.__api;
 
 // ===== 測資：8/1(六) 7家、8/3(一) 127家；第一梯已完成、第二梯未開始 =====
-const mk = (date, dept, section, batch, score, name) => ({
+// 梯次表是以「店號」把名單與紀錄對起來的，測資的店號必須真的對得上（實務資料一定有店號）
+const mk = (date, dept, section, batch, score, name, code) => ({
   點檢時間: date + ' 10:00', 主責部: dept, 主責課: section, 預排梯次: batch, 合計: score, 店名: name,
+  店號: code,
 });
+const seq = (n, from) => Array.from({ length: n }, (_, i) => String(from + i).padStart(6, '0'));
+const N1A = seq(100, 1), N1B = seq(44, 101), TC = seq(60, 201), YW = seq(10, 301);
 const rows = []
-  .concat(Array.from({ length: 3 }, (_, i) => mk('2026-08-01', '一部', '北一課', '第一梯', 90, 'a' + i)))
-  .concat(Array.from({ length: 4 }, (_, i) => mk('2026-08-01', '二部', '台中課', '第一梯', 95, 'b' + i)))
-  .concat(Array.from({ length: 67 }, (_, i) => mk('2026-08-03', '一部', '北一課', '第一梯', 90, 'c' + i)))
-  .concat(Array.from({ length: 54 }, (_, i) => mk('2026-08-03', '二部', '台中課', '第一梯', 80, 'd' + i)))
-  .concat(Array.from({ length: 6 }, (_, i) => mk('2026-08-03', '業務部', '業務課', '第一梯', 93, 'e' + i)));
+  .concat(N1A.slice(0, 3).map((c, i) => mk('2026-08-01', '一部', '北一課', '第一梯', 90, 'a' + i, c)))
+  .concat(TC.slice(0, 4).map((c, i) => mk('2026-08-01', '二部', '台中課', '第一梯', 95, 'b' + i, c)))
+  .concat(N1A.slice(3, 70).map((c, i) => mk('2026-08-03', '一部', '北一課', '第一梯', 90, 'c' + i, c)))
+  .concat(TC.slice(4, 58).map((c, i) => mk('2026-08-03', '二部', '台中課', '第一梯', 80, 'd' + i, c)))
+  .concat(YW.slice(0, 6).map((c, i) => mk('2026-08-03', '業務部', '業務課', '第一梯', 93, 'e' + i, c)));
+const ros = (code, section, batch) => ({ 店號: code, 課別: section, 預排梯次: batch });
 const roster = []
-  .concat(Array.from({ length: 100 }, () => ({ 課別: '北一課', 預排梯次: '第一梯' })))
-  .concat(Array.from({ length: 44 }, () => ({ 課別: '北一課', 預排梯次: '第二梯' })))
-  .concat(Array.from({ length: 60 }, () => ({ 課別: '台中課', 預排梯次: '第一梯' })))
-  .concat(Array.from({ length: 10 }, () => ({ 課別: '業務課', 預排梯次: '第一梯' })));
+  .concat(N1A.map(c => ros(c, '北一課', '第一梯')))
+  .concat(N1B.map(c => ros(c, '北一課', '第二梯')))
+  .concat(TC.map(c => ros(c, '台中課', '第一梯')))
+  .concat(YW.map(c => ros(c, '業務課', '第一梯')));
 const report = { rows, roster, passScore: 85 };
 
 // ===== 1. 每日店數表 =====
@@ -91,6 +99,48 @@ assertEqual(bTotal, ['合計', 170, 134, 44, 0], '合計：第一梯預計170/�
 const b1 = batch.find(r => r[0] === '北一課');
 assertEqual(b1, ['北一課', 100, 70, 44, 0], '北一課梯次數字');
 assertEqual(batch.slice(2).map(r => r[0]), ['合計', '北一課', '一部', '台中課', '二部', '業務課', '業務部'], '梯次表列順序同KPI表');
+// 全部點完時，實際必須等於預計（執行率 100%）—— 這是使用者驗收梯次表的方式
+const allDone = {
+  passScore: 85,
+  roster: N1A.concat(N1B).map(c => ros(c, '北一課', N1A.indexOf(c) >= 0 ? '第一梯' : '第二梯')),
+  rows: N1A.concat(N1B).map((c, i) => Object.assign(
+    mk('2026-08-03', '一部', '北一課', '', 90, 'z' + i, c), { 實際梯次: i < 100 ? '第一梯' : '第二梯' })),
+};
+const done = buildBatchBlock(allDone, '8/1-8/31')[2];
+assertEqual(done, ['合計', 100, 100, 44, 44], '全部點完時每一梯的實際＝預計（執行率100%）');
+
+// ===== 3c. 脫期：預排第二梯、實際在第一梯點完 → 預計也要跟著移到第一梯 =====
+//   否則第一梯永遠 1 家沒預計卻有實際、第二梯永遠差 1 家，全部點完也到不了 100%。
+const late = {
+  passScore: 85,
+  roster: [ros('000001', '北一課', '第一梯'), ros('000002', '北一課', '第二梯')],
+  rows: [Object.assign(mk('2026-08-05', '一部', '北一課', '', 90, '脫期店', '000002'), { 實際梯次: '第一梯' })],
+};
+const lateBlock = buildBatchBlock(late, '8/1-8/31');
+// 兩家店的有效梯次都變成第一梯（一家原本就是、一家脫期補點），所以只剩第一梯這一組欄位
+assertEqual(lateBlock[0], ['期間', '第一梯', ''], '預計搬到第一梯後，第二梯已無店可算，欄位不再出現');
+assertEqual(lateBlock[2], ['合計', 2, 1], '脫期店的預計跟著搬到第一梯（預計2、實際1）');
+// 那一家補點完之後，第一梯就會是 2/2 → 執行率 100%
+const lateDone = {
+  passScore: 85, roster: late.roster,
+  rows: late.rows.concat([Object.assign(mk('2026-08-05', '一部', '北一課', '', 91, '準時店', '000001'), { 實際梯次: '第一梯' })]),
+};
+assertEqual(buildBatchBlock(lateDone, '8/1-8/31')[2], ['合計', 2, 2], '含脫期店在內全部點完後，執行率為100%');
+
+// ===== 3d. 合計必須等於總店數：名單外自行新增的店與判不出梯次的店都不可以憑空消失 =====
+const odd = {
+  passScore: 85,
+  roster: [ros('000001', '北一課', '第一梯'), ros('000002', '北一課', '')],   // 第二家名單上沒填預排
+  rows: [
+    Object.assign(mk('2026-08-05', '一部', '北一課', '', 90, '名單外店', '009999'), { 實際梯次: '第一梯' }),
+    Object.assign(mk('2026-08-06', '一部', '北一課', '', 88, '沒梯次店', '000002'), { 實際梯次: '' }),
+  ],
+};
+const oddBlock = buildBatchBlock(odd, '8/1-8/31');
+assertEqual(oddBlock[0], ['期間', '第一梯', '', '(未列梯次)', ''], '判不出梯次的要有自己的欄位，不可被丟掉');
+const oddTotal = oddBlock[2];
+assertEqual(oddTotal[1] + oddTotal[3], 3, '預計合計＝名單2家＋名單外1家');
+assertEqual(oddTotal[2] + oddTotal[4], 2, '實際合計＝已點檢2家（與紀錄筆數相同）');
 
 // ===== 3b. 不及格店只列在課別列，合計列與部小計列不重複列出 =====
 const failCase = {
