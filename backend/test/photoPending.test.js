@@ -82,13 +82,48 @@ assertEqual(log.some(r => r.action === 'anythingElse'), false, '被拒絕的事�
 assertEqual(APP.includes('pendingPhotos: Number(x.pendingPhotos) || 0'), true, '查詢結果要帶入未齊張數');
 assertEqual(APP.includes('只看照片未齊'), true, '查詢紀錄要能篩選出未齊的紀錄');
 assertEqual(APP.includes('r.pendingPhotos > 0 && <span'), true, '清單列要有紅色標記');
-assertEqual(/setPostSubmit\(\{ store: storeName/.test(APP), true, '送出後要進上傳進度畫面');
-assertEqual(APP.includes("const postDone = !!postSubmit && !((pendingUp.unfinished || 0) + (pendingUp.queuedRecords || 0))"), true,
-  '照片與待送紀錄都清空才算完成');
+// 進度畫面不再每家店都彈：緩衝期內傳完只顯示一行提示，還沒完成才擋人
+assertEqual(APP.includes('const POST_GRACE_MS = 4000;'), true, '要有送出後的緩衝期');
+assertEqual(/if \(c\.pending \|\| c\.done\) \{ setPostSubmit\(info\); return; \}/.test(APP), true,
+  '緩衝期後仍有未完成才彈進度畫面');
+assertEqual(/setToast\(c\.orphan[\s\S]{0,200}張照片已全部完成/.test(APP), true, '傳完只顯示一行提示，不再彈畫面');
+// 完成判斷只看「這一筆」，且 orphan 不可被當成沒事
+assertEqual(APP.includes('const postDone = !!postStat && postStat.pending === 0 && postStat.done === 0;'), true,
+  '完成判斷只看本筆的 pending 與 done（全域數字會被別筆污染）');
+assertEqual(APP.includes('SqcUploader.countsOfRecord(postRecId)'), true, '要向 uploader 查本筆的狀態');
+assertEqual(/if \(!postDone \|\| !postStat \|\| postStat\.orphan\) return;/.test(APP), true,
+  '有需要人工處理的照片時不可自動關閉，要讓人看到');
+assertEqual(APP.includes('已上傳，但有照片需人工處理'), true, 'orphan 要明講，不可顯示成「全部完成」');
 assertEqual(APP.includes("SqcApi.logEvent('leaveWithPendingPhotos'"), true, '選擇提前離開要記軌跡');
 assertEqual(APP.includes('navigator.storage.persist()'), true, '要向瀏覽器要求持久化儲存（iOS 會回收網站資料）');
 // 出口必須存在：門市訊號差時硬擋會讓人做不完事情
 assertEqual(APP.includes('我知道風險，稍後再傳'), true, '必須留一個出口，不可硬擋死');
+
+// ===== 6. 「立即重試」不可以是空操作（現場回報按不動）=====
+const UP = fs.readFileSync(path.join(__dirname, '..', '..', 'js', 'uploader.js'), 'utf8');
+assertEqual(/if \(_running\) \{ _again = true; emit\(\); return; \}/.test(UP), true,
+  '正在跑時要記下待重跑，不可直接 return（原本按了毫無反應）');
+assertEqual(/do \{ _again = false; await pumpOnce\(\); \} while \(_again && navigator\.onLine\)/.test(UP), true,
+  '跑完要接著把待重跑的那一輪跑掉');
+assertEqual(UP.includes('async function clearBackoff(recordId)'), true, 'force 要能清掉退避時間');
+assertEqual(/nextAt: 0, linkNextAt: 0/.test(UP), true, '上傳退避與連結回寫退避都要清');
+assertEqual(UP.includes('busy: _running'), true, '要對外回報忙碌狀態，按鈕才有回饋');
+assertEqual((APP.match(/pendingUp\.busy \? '正在重試…' : '立即重試'/g) || []).length, 2,
+  '進度畫面與橫幅的重試按鈕都要顯示「正在重試…」');
+assertEqual((APP.match(/SqcUploader\.pump\(\{ force: true/g) || []).length >= 3, true,
+  '重試與送出後的踢一次都要用 force（否則還是要等退避結束）');
+// 送出成功後立刻踢一次：照片比紀錄早傳完時第一次回寫必然失敗，不踢就要等 15 秒的輪詢
+assertEqual(/SqcUploader\.pump\(\{ force: true, recordId: recId \}\);/.test(APP), true,
+  '紀錄寫入後端後要立刻踢一次上傳');
+
+// ===== 7. 數字的說法不可以誤導 =====
+//   done 的照片檔案已經在雲端硬碟，只差回寫連結；跟 pending 合稱「未完成／待上傳」會讓人以為傳不上去
+assertEqual(APP.includes('待上傳 <b className="text-red-600">'), false, '不可再用「待上傳」稱呼 pending+done');
+assertEqual(APP.includes('照片未完成 <b>'), false, '橫幅不可再用「照片未完成」合稱');
+assertEqual(APP.includes('已上傳、等寫入連結'), true, 'done 要單獨講清楚');
+assertEqual(APP.includes('postStat.uploaded'), true, '進度條的分子要用「已在雲端硬碟的張數」');
+assertEqual(UP.includes("uploaded: by.done + by.linked + by.orphan"), true,
+  'uploaded 要含 done/linked/orphan（三者的檔案都已在雲端硬碟）');
 
 console.log(failed === 0 ? '\n✅ 全部通過' : `\n❌ ${failed} 項失敗`);
 process.exit(failed === 0 ? 0 : 1);

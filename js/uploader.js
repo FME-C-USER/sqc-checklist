@@ -13,6 +13,7 @@
   const CONCURRENCY = 3;   // 同時進行的 PUT 數（行動網路上不宜過多）
   const BATCH = 6;         // 一次向後端索取幾張的上傳網址（往返次數 = 張數 / BATCH）
   let _running = false;
+  let _again = false;      // 跑到一半又被要求重試 → 跑完再跑一輪，不要直接丟掉
   const _listeners = new Set();
 
   const emit = () => _listeners.forEach((fn) => { try { fn(); } catch (e) {} });
@@ -89,10 +90,7 @@
     }
   }
 
-  async function pump() {
-    if (_running) return;
-    if (!navigator.onLine) return;
-    _running = true;
+  async function pumpOnce() {
     try {
       await pumpRecords();   // 先把紀錄補送成功，照片的連結才有地方可寫
       let pend = await window.SqcDB.pendingPhotos();
@@ -132,9 +130,56 @@
       }
       await reconcileLinks(); // 涵蓋 App 重啟後、上次已全數 done 但尚未回寫連結的紀錄
     } finally {
+      emit();
+    }
+  }
+
+  /**
+   * 對外的 pump。兩件事是原本沒有的：
+   *   1. 正在跑的時候不再直接 return —— 記下 _again，跑完立刻再跑一輪。
+   *      原本的 if (_running) return 讓「立即重試」在最常見的情況（每 15 秒的自動輪詢正在跑）
+   *      變成毫無反應的空操作，使用者只會覺得按鈕壞了。
+   *   2. force：清掉所有退避時間。照片是在紀錄寫入後端「之前」就開始上傳的，所以第一次回寫
+   *      連結常會收到「找不到紀錄」而進入退避；不清掉的話按重試也還是要等退避結束。
+   */
+  async function pump(opts) {
+    if (opts && opts.force) await clearBackoff(opts.recordId);
+    if (!navigator.onLine) { emit(); return; }
+    if (_running) { _again = true; emit(); return; }
+    _running = true;
+    emit();                       // 讓畫面立刻顯示「正在重試…」，按鈕才有回饋
+    try {
+      do { _again = false; await pumpOnce(); } while (_again && navigator.onLine);
+    } finally {
       _running = false;
       emit();
     }
+  }
+
+  /** 清掉退避：上傳重試(nextAt)與連結回寫重試(linkNextAt)都歸零，讓下一輪立刻重試 */
+  async function clearBackoff(recordId) {
+    const all = recordId ? await window.SqcDB.photosOfRecord(recordId) : await window.SqcDB.allPhotos();
+    await Promise.all(all
+      .filter((p) => p.status !== 'linked' && (p.nextAt || p.linkNextAt))
+      .map((p) => window.SqcDB.updatePhoto({ ...p, nextAt: 0, linkNextAt: 0 })));
+  }
+
+  /**
+   * 單一筆紀錄的照片狀態。判斷「這一筆傳完了沒」一定要只看這一筆 ——
+   * 全域數字會被別筆還沒傳完的照片污染，導致永遠等不到完成。
+   * 狀態的意思：pending＝還在傳；done＝檔案已在雲端硬碟、只是連結還沒寫回紀錄；
+   *             linked＝全部完成；orphan＝檔案在雲端硬碟但放棄回寫連結（需人工處理）。
+   */
+  async function countsOfRecord(recordId) {
+    const list = await window.SqcDB.photosOfRecord(recordId);
+    const by = { pending: 0, done: 0, linked: 0, orphan: 0 };
+    list.forEach((p) => { by[p.status] = (by[p.status] || 0) + 1; });
+    return {
+      total: list.length,
+      pending: by.pending, done: by.done, linked: by.linked, orphan: by.orphan,
+      uploaded: by.done + by.linked + by.orphan,   // 檔案已經在雲端硬碟的張數（進度條的分子）
+      settled: by.linked + by.orphan,              // 不會再變動的張數
+    };
   }
 
   // 排入一張壓縮後照片
@@ -201,7 +246,14 @@
       window.SqcDB.countPhotos('orphan'),
     ]);
     const recs = await window.SqcDB.pendingRecords();
-    return { total, pending, done, orphan, unfinished: pending + done, queuedRecords: recs.length };
+    return {
+      total, pending, done, orphan,
+      // unfinished 含 done —— done 的照片其實已經在雲端硬碟，只是連結還沒回寫。
+      // 顯示給使用者時不可以叫「待上傳」，會讓人以為傳不上去。
+      unfinished: pending + done,
+      queuedRecords: recs.length,
+      busy: _running,
+    };
   }
 
   window.addEventListener('online', pump);
@@ -209,5 +261,5 @@
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') pump(); });
   setInterval(pump, 15000); // 週期性嘗試補傳
 
-  window.SqcUploader = { enqueue, pump, pumpRecords, counts, onChange };
+  window.SqcUploader = { enqueue, pump, pumpRecords, counts, countsOfRecord, onChange };
 })();

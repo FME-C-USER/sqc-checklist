@@ -38,7 +38,7 @@
 
   <script type="text/jsx" id="appCode">
     const { useState, useMemo, useEffect, useRef } = React;
-    const APP_VERSION = '20260825-2330'; // 每次部署更新，用來確認瀏覽器跑的是哪一版
+    const APP_VERSION = '20260825-2350'; // 每次部署更新，用來確認瀏覽器跑的是哪一版
     // 這一版前端「至少」需要的後端版本。前後端是各自演進的，版本號本來就不會相等
     // （只改前端時後端不動，反之亦然），所以不能用「兩者相等」當健康指標 ——
     // 要比的是「線上後端有沒有舊到缺少本前端需要的 API」。
@@ -251,6 +251,9 @@
     };
     const IDENTITIES = ['店長', '副店', '正職', 'PT'];
     const PASS_SCORE = 85;
+    // 送出後給照片上傳的緩衝期：這段時間內傳完就不彈進度畫面，只顯示一行成功提示。
+    // 順利的店多數在 2~4 秒內完成，不必每一家都被擋一次。
+    const POST_GRACE_MS = 4000;
     // 點檢時間的時/分下拉選項
     const pad2 = (n) => String(n).padStart(2, '0');
     const HOURS = Array.from({ length: 24 }, (_, i) => pad2(i));
@@ -1099,7 +1102,7 @@
       const [bootAt, setBootAt] = useState(null);   // 目前這份開場資料是何時取得的（供現場判斷名單夠不夠新）
       const [gasVer, setGasVer] = useState('');     // 後端版本；貼上 程式碼.gs 卻沒重新部署時，這裡不會變
       // 背景待處理量：照片沒傳完就關掉 App 會延後上傳，點檢員必須看得到
-      const [pendingUp, setPendingUp] = useState({ unfinished: 0, orphan: 0, queuedRecords: 0 });
+      const [pendingUp, setPendingUp] = useState({ pending: 0, done: 0, unfinished: 0, orphan: 0, queuedRecords: 0, busy: false });
       useEffect(() => {
         if (!window.SqcUploader) return;
         let alive = true;
@@ -1108,9 +1111,43 @@
         const off = SqcUploader.onChange(refresh);   // 每批處理完才觸發，不做輪詢
         return () => { alive = false; off(); };
       }, []);
-      // 送出後的上傳進度畫面（擋住不讓人離開，直到照片真的進雲端硬碟）
+      /**
+       * 送出後的上傳進度畫面。
+       * 順利的店幾秒內就傳完，沒必要每一家都彈一次畫面擋人 —— 先給一段緩衝期，
+       * 真的還沒完成才彈出來（見 doSubmit 的 POST_GRACE_MS）。
+       * 完成與否只能看「這一筆」的照片：全域數字會被別筆還沒傳完的照片污染，
+       * 那樣不但永遠等不到完成，還會出現「本筆 8 張都好了」卻同時顯示「未完成 8 張」的矛盾。
+       */
       const [postSubmit, setPostSubmit] = useState(null);
-      const postDone = !!postSubmit && !((pendingUp.unfinished || 0) + (pendingUp.queuedRecords || 0));
+      const [postStat, setPostStat] = useState(null);
+      const [toast, setToast] = useState('');
+      useEffect(() => {
+        if (!toast) return;
+        const t = setTimeout(() => setToast(''), 4000);
+        return () => clearTimeout(t);
+      }, [toast]);
+      const postRecId = postSubmit && postSubmit.recordId;
+      useEffect(() => {
+        if (!postRecId || !window.SqcUploader) { setPostStat(null); return; }
+        let alive = true;
+        const refresh = () => SqcUploader.countsOfRecord(postRecId)
+          .then(c => { if (alive) setPostStat(c); }).catch(() => { });
+        refresh();
+        const off = SqcUploader.onChange(refresh);
+        return () => { alive = false; off(); };
+      }, [postRecId]);
+      // 完成＝這一筆沒有還在傳的(pending)、也沒有等著回寫連結的(done)。
+      // orphan（檔案在雲端硬碟但放棄回寫連結）算「已結案但要人工處理」，不可當成沒事。
+      const postDone = !!postStat && postStat.pending === 0 && postStat.done === 0;
+      useEffect(() => {
+        // 傳完就自動關閉，不必再按一次「完成」；有需要人工處理的才留著讓人看清楚
+        if (!postDone || !postStat || postStat.orphan) return;
+        const t = setTimeout(() => {
+          setToast(`✅ ${postSubmit.store}　${postStat.total} 張照片已全部完成`);
+          setPostSubmit(null);
+        }, 1200);
+        return () => clearTimeout(t);
+      }, [postDone, postStat && postStat.orphan]);
       // 瀏覽器可能為了回收空間把本站資料清掉（iOS 尤其），照片佇列會跟著消失 →
       // 主動要求「持久化儲存」。要不到也沒關係，只是機率問題。
       useEffect(() => {
@@ -1633,9 +1670,24 @@ ${nm}
           // 照片還沒傳完就放人走，是「報表沒有照片連結」的唯一成因 —— 照片只存在那一台裝置上，
           // 人離開、裝置失聯就再也兌現不了。所以送出後改成擋在上傳進度畫面，傳完才放行。
           if (queue.length) {
-            setPostSubmit({ store: storeName, total, grade: grade.txt, added: queue.length, at: Date.now() });
+            // 紀錄剛寫進後端 → 立刻踢一次上傳，並清掉退避。
+            // 照片是在紀錄寫入「之前」就開始傳的，所以第一次回寫連結常會收到「找不到紀錄」而退避；
+            // 不清掉的話要等下一輪 setInterval（15 秒）才會再試，每一家店都會白等十幾秒。
+            SqcUploader.pump({ force: true, recordId: recId });
+            // 順利的店幾秒就傳完了，先不要彈畫面擋人；緩衝期過後還沒完成才彈出來
+            const info = { recordId: recId, store: storeName, total, grade: grade.txt, added: queue.length };
+            setTimeout(() => {
+              SqcUploader.countsOfRecord(recId)
+                .then(c => {
+                  if (c.pending || c.done) { setPostSubmit(info); return; }
+                  setToast(c.orphan
+                    ? `⚠ ${storeName}　${c.orphan} 張照片需人工處理（維護專區 → 照片連結修復）`
+                    : `✅ ${storeName}　${c.total} 張照片已全部完成`);
+                })
+                .catch(() => setPostSubmit(info));   // 查不到就照舊彈出來，寧可多問一次
+            }, POST_GRACE_MS);
           } else {
-            alert(`✅ ${isEdit ? '已更新' : '已送出'}\n店鋪：${storeName}　得分：${total}/${TOTAL_MAX}（${grade.txt}）`);
+            setToast(`✅ ${isEdit ? '已更新' : '已送出'}　${storeName}　${total}/${TOTAL_MAX}（${grade.txt}）`);
           }
         }).catch(e => alert((isEdit ? '更新' : '送出') + '失敗：' + e.message
           + (isEdit ? '' : '\n\n這筆已存入待送佇列，網路恢復後會自動重送，請保持頁面開啟。')))
@@ -1910,50 +1962,82 @@ ${nm}
                   className="underline hover:text-slate-600">重新載入</button>
               </div>
             )}
+            {/* 一行式提示，取代「每送出一家店就要按一次確定」的 alert */}
+            {toast && (
+              <div className="fixed left-1/2 -translate-x-1/2 bottom-24 z-40 max-w-[92vw]">
+                <div className="bg-slate-800 text-white text-sm rounded-xl shadow-lg px-4 py-2.5 flex items-center gap-3">
+                  <span>{toast}</span>
+                  <button onClick={() => setToast('')} className="text-slate-300 hover:text-white text-xs">✕</button>
+                </div>
+              </div>
+            )}
             {/* 送出後的上傳進度：照片沒進雲端硬碟就不放人走（唯一的出口要留下軌跡） */}
             {postSubmit && (
               <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4">
                 <div className="bg-white rounded-2xl shadow-xl max-w-md w-full p-5">
                   <div className="text-lg font-bold text-slate-800">
-                    {postDone ? '✅ 全部完成' : '📤 照片上傳中，請留在現場'}
+                    {postDone ? (postStat.orphan ? '⚠ 已上傳，但有照片需人工處理' : '✅ 全部完成')
+                      : '📤 照片上傳中，請留在現場'}
                   </div>
                   <div className="text-sm text-slate-600 mt-1">
                     {postSubmit.store}　得分 {postSubmit.total}/{TOTAL_MAX}（{postSubmit.grade}）
                   </div>
                   {postDone ? (
-                    <p className="text-sm text-emerald-700 mt-3">
-                      {postSubmit.added} 張照片都已進入雲端硬碟，報表點得到連結了。
-                    </p>
+                    postStat.orphan ? (
+                      <p className="text-sm text-amber-700 mt-3">
+                        {postStat.total} 張照片都在雲端硬碟了，但其中 <b>{postStat.orphan}</b> 張的連結沒能寫回紀錄，
+                        報表上會點不到。請到「維護專區 → 照片連結修復」跑一次即可補上。
+                      </p>
+                    ) : (
+                      <p className="text-sm text-emerald-700 mt-3">
+                        {postStat.total} 張照片都已進入雲端硬碟，報表點得到連結了。
+                      </p>
+                    )
                   ) : (
                     <>
+                      {/* 進度的分子是「檔案已經在雲端硬碟的張數」。
+                          原本用 unfinished(=pending+done) 當分母扣減，而 done 也算未完成，
+                          所以進度條在最後一刻之前一直是 0%，等於沒有作用。 */}
                       <div className="mt-3 h-2 w-full bg-slate-200 rounded-full overflow-hidden">
                         <div className="h-full bg-emerald-500 rounded-full transition-all"
-                          style={{ width: Math.round(100 * Math.max(0, postSubmit.added - (pendingUp.unfinished || 0)) / Math.max(1, postSubmit.added)) + '%' }} />
+                          style={{ width: Math.round(100 * ((postStat && postStat.uploaded) || 0) / Math.max(1, (postStat && postStat.total) || postSubmit.added)) + '%' }} />
                       </div>
                       <div className="text-sm text-slate-700 mt-2">
-                        待上傳 <b className="text-red-600">{pendingUp.unfinished || 0}</b> 張
-                        <span className="text-slate-500">（本筆新增 {postSubmit.added} 張；數字含之前還沒傳完的）</span>
-                        {pendingUp.queuedRecords > 0 && <span>，另有紀錄 {pendingUp.queuedRecords} 筆待送出</span>}
+                        本筆 {(postStat && postStat.total) || postSubmit.added} 張：
+                        {!!(postStat && postStat.pending) && <span className="ml-1">上傳中 <b className="text-red-600">{postStat.pending}</b> 張</span>}
+                        {!!(postStat && postStat.done) && <span className="ml-1 text-slate-500">已上傳、等寫入連結 <b>{postStat.done}</b> 張</span>}
+                        {!!(postStat && postStat.linked) && <span className="ml-1 text-emerald-700">完成 <b>{postStat.linked}</b> 張</span>}
                       </div>
                       <p className="text-xs text-slate-500 mt-2">
-                        照片目前只存在這支手機上。<b>離開現場前請等它跑完</b> ——
-                        一旦這支手機沒再連上網路開這個 App，這些照片就補不回來，而缺失當下已經被改善、拍不回來。
+                        「已上傳、等寫入連結」的照片<b>檔案已經在雲端硬碟了</b>，只差最後一步把連結寫回紀錄 ——
+                        這一步要整筆一起做，所以會停在這裡幾秒。
+                      </p>
+                      <p className="text-xs text-slate-500 mt-1">
+                        還在上傳中的照片只存在這支手機上。<b>離開現場前請等它跑完</b> ——
+                        一旦這支手機沒再連上網路開這個 App 就補不回來，而缺失當下已經被改善、拍不回來。
                         訊號不好時可以走到店外或連店裡的 Wi-Fi 再按「立即重試」。
                       </p>
                       {!navigator.onLine && <p className="text-xs text-red-600 mt-1">⚠ 目前顯示為離線，恢復連線後會自動繼續。</p>}
+                      {pendingUp.queuedRecords > 0 && <p className="text-xs text-slate-400 mt-1">另有紀錄 {pendingUp.queuedRecords} 筆待送出。</p>}
                     </>
                   )}
                   <div className="flex justify-end gap-2 mt-4">
                     {!postDone && (
                       <>
-                        <button onClick={() => SqcUploader.pump()} className="px-3 py-2 text-sm bg-slate-200 hover:bg-slate-300 text-slate-700 rounded-lg">立即重試</button>
+                        {/* force 會清掉退避時間，否則按了也只是等原本的退避結束；
+                            pendingUp.busy 讓按鈕有回饋 —— 原本正在跑時按下去毫無反應，像壞掉 */}
+                        <button onClick={() => SqcUploader.pump({ force: true, recordId: postSubmit.recordId })}
+                          disabled={pendingUp.busy}
+                          className="px-3 py-2 text-sm bg-slate-200 hover:bg-slate-300 disabled:opacity-60 text-slate-700 rounded-lg">
+                          {pendingUp.busy ? '正在重試…' : '立即重試'}
+                        </button>
                         <button
                           onClick={() => {
-                            const n = pendingUp.unfinished || 0;
-                            if (!confirm(`還有 ${n} 張照片沒有上傳完成。\n\n確定現在離開嗎？離開後必須用「這支手機、這個瀏覽器」再開一次 App 才傳得上去，否則這些照片會永久遺失。\n\n這個決定會記入異動紀錄。`)) return;
+                            const n = (postStat && (postStat.pending + postStat.done)) || postSubmit.added;
+                            if (!confirm(`這一筆還有 ${n} 張照片沒有完成。\n\n確定現在離開嗎？離開後必須用「這支手機、這個瀏覽器」再開一次 App 才傳得上去，否則還在上傳中的照片會永久遺失。\n\n這個決定會記入異動紀錄。`)) return;
                             if (CONFIGURED) {
                               SqcApi.logEvent('leaveWithPendingPhotos',
-                                `${postSubmit.store}：還有 ${n} 張未上傳（共 ${postSubmit.added} 張）`).catch(() => { });
+                                `${postSubmit.store}：還有 ${n} 張未完成（共 ${(postStat && postStat.total) || postSubmit.added} 張）`).catch(() => { });
                             }
                             setPostSubmit(null);
                           }}
@@ -1964,7 +2048,7 @@ ${nm}
                     )}
                     {postDone && (
                       <button onClick={() => { setPostSubmit(null); loadRecords(); }}
-                        className="px-4 py-2 text-sm bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg">完成</button>
+                        className="px-4 py-2 text-sm bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg">關閉</button>
                     )}
                   </div>
                 </div>
@@ -1987,13 +2071,19 @@ ${nm}
               <div className="bg-sky-50 border border-sky-300 text-sky-900 text-sm rounded-lg px-3 py-2 flex items-center justify-between gap-3">
                 <div>
                   <span className="font-bold">📤 背景作業進行中，請保持頁面開啟</span>
+                  {/* 不可以把 pending 與 done 合稱「未完成」—— done 的檔案已經在雲端硬碟，
+                      只差最後一步回寫連結。合起來講會讓人以為照片都傳不上去。 */}
                   <span className="text-xs ml-2">
                     {pendingUp.queuedRecords > 0 && <span className="mr-2">待送出紀錄 <b>{pendingUp.queuedRecords}</b> 筆</span>}
-                    {pendingUp.unfinished > 0 && <span className="mr-2">照片未完成 <b>{pendingUp.unfinished}</b> 張</span>}
+                    {pendingUp.pending > 0 && <span className="mr-2">上傳中 <b>{pendingUp.pending}</b> 張</span>}
+                    {pendingUp.done > 0 && <span className="mr-2">已上傳、等寫入連結 <b>{pendingUp.done}</b> 張</span>}
                     {pendingUp.orphan > 0 && <span className="text-amber-700">需人工處理 <b>{pendingUp.orphan}</b> 張</span>}
                   </span>
                 </div>
-                <button onClick={() => SqcUploader.pump()} className="text-xs underline hover:text-sky-700 whitespace-nowrap">立即重試</button>
+                <button onClick={() => SqcUploader.pump({ force: true })} disabled={pendingUp.busy}
+                  className="text-xs underline hover:text-sky-700 disabled:no-underline disabled:opacity-60 whitespace-nowrap">
+                  {pendingUp.busy ? '正在重試…' : '立即重試'}
+                </button>
               </div>
             )}
             {tab === 'maintain' && sectionMismatch && !hideMismatch && (
