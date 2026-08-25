@@ -71,6 +71,10 @@ assertEqual(setupGs.includes('shared = shareLinkedPhotos(toShare)'), true,
   '補回來的照片也要設成「知道連結就能看」，否則報表收件人還是打不開');
 assertEqual(setupGs.includes("indexOf('[object Object]') >= 0"), true,
   '整月修復要順便把已經寫爛的紙本照片欄還原');
+// 只回報「找不到 N 張」等於沒用 —— 使用者無從知道要找哪家店重拍
+assertEqual(setupGs.includes('missingList.push(where'), true, '找不到的檔案要指名到列號、店名與項目');
+assertEqual(setupGs.includes('以下找不到對應檔案，需請點檢人員重新上傳'), true, '明細要明講該怎麼處理');
+assertEqual(APP.includes('lines.length < 80'), true, '前端明細上限要夠大，否則「找不到」那幾行會被砍掉');
 
 console.log(failed === 0 ? '\n✅ 全部通過' : `\n❌ ${failed} 項失敗`);
 process.exit(failed === 0 ? 0 : 1);

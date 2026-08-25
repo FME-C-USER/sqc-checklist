@@ -323,6 +323,7 @@ function repairPhotoLinks(month, doWrite) {
   var folderCache = {};
   var detail = [], touchedRows = 0, filled = 0, missing = 0, scannedRows = 0;
   var toShare = {}, paperFixed = 0;
+  var missingList = [];   // 找不到的要指名到「哪一列、哪家店、哪個項目」，才知道要找誰重拍
 
   for (var i = 1; i < data.length; i++) {
     if (touchedRows >= REPAIR_MAX_ROWS) {
@@ -348,9 +349,10 @@ function repairPhotoLinks(month, doWrite) {
           folderId = folderIdOfPath_(key);
           folderCache[key] = folderId;
         }
-        if (!folderId) { missing++; continue; }
+        var where = '第' + (i + 1) + '列 ' + (storeCol >= 0 ? data[i][storeCol] : '') + '｜' + key;
+        if (!folderId) { missing++; missingList.push(where + ' → 找不到資料夾（' + name + '）'); continue; }
         var fid = fileIdByNameNotTrashed_(folderId, name);
-        if (!fid) { missing++; continue; }
+        if (!fid) { missing++; missingList.push(where + ' → Drive 沒有這個檔案（' + name + '）'); continue; }
         arr[j] = { name: name, fileId: fid };
         if (!toShare[key]) toShare[key] = [];
         toShare[key].push({ name: name, fileId: fid });   // 補回來的照片也要設成「知道連結就能看」
@@ -372,6 +374,12 @@ function repairPhotoLinks(month, doWrite) {
       paperFixed++;
       if (doWrite === true) sh.getRange(i + 1, paperCol + 1).setValue(names);
     }
+  }
+
+  if (missingList.length) {
+    detail.push('--- 以下找不到對應檔案，需請點檢人員重新上傳 ---');
+    missingList.slice(0, 40).forEach(function (m) { detail.push(m); });
+    if (missingList.length > 40) detail.push('（另有 ' + (missingList.length - 40) + ' 筆未列出）');
   }
 
   // 分享要在迴圈外一次做完：迴圈內逐張呼叫 Drive 很容易撞到 6 分鐘逾時
