@@ -29,6 +29,9 @@ ctx.Utilities.formatDate = (date, tz, fmt) => {
   }
   return '2026-08-24 10:00';
 };
+// 跨週密碼有嘗試次數限制，需要 CacheService
+const cache = {};
+ctx.CacheService = { getScriptCache: () => ({ put: (k, v) => { cache[k] = String(v); }, get: (k) => (k in cache ? cache[k] : null), remove: (k) => { delete cache[k]; } }) };
 vm.runInContext(fs.readFileSync(GS_PATH, 'utf8'), ctx, { filename: GS_PATH });
 ctx.ensureSheetNamed('設定', ['參數', '值']);
 ctx.ensureMonth('11508');
@@ -94,6 +97,18 @@ assertEqual(ctx.queryRecords('11508', {}).some(r => r.id === 'LAST_WEEK'), true,
 assertEqual(ctx.deleteRecord('11508', 'THIS_WEEK', '').ok, true, '當週刪除不需密碼');
 assertEqual(ctx.deleteRecord('11508', 'LAST_WEEK', '2468').ok, true, '密碼正確可刪跨週紀錄');
 assertEqual(ctx.queryRecords('11508', {}).some(r => r.id === 'LAST_WEEK'), false, '確實已刪除');
+
+// ===== 8. 密碼只有四位數：不可以無限次猜 =====
+//   checkEditPass 與 updateRecord/deleteRecord 都收密碼，任一支都能被拿來窮舉，
+//   所以計次要放在共用的驗證點，而不是只擋 checkEditPass。
+for (let i = 0; i < ctx.EDITPASS_MAX_FAILS; i++) ctx.checkEditPass('0000', 'u1');
+assertEqual(ctx.checkEditPass('2468', 'u1').ok, false, '連錯達上限後，連正確密碼也一併擋下');
+assertEqual(ctx.checkEditPass('2468', 'u1').code, 'THROTTLED', '應明確告知是被鎖定而非密碼錯');
+assertEqual(ctx.updateRecord('11508', 'THIS_WEEK', rec('THIS_WEEK', '2026-08-21 15:00', '000001', 'X'), '2468', 'u1').ok,
+  false, '鎖定期間也不能改走 updateRecord 這條路徑');
+assertEqual(ctx.checkEditPass('2468', 'u2').ok, true, '鎖定只針對該使用者，不影響其他人');
+ctx.checkEditPass('0000', 'u3');
+assertEqual(ctx.checkEditPass('2468', 'u3').ok, true, '中途輸入正確密碼即可，錯誤次數會歸零');
 
 console.log(failed === 0 ? '\n✅ 全部通過' : `\n❌ ${failed} 項失敗`);
 process.exit(failed === 0 ? 0 : 1);

