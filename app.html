@@ -25,12 +25,12 @@
 
   <script type="text/jsx" id="appCode">
     const { useState, useMemo, useEffect, useRef } = React;
-    const APP_VERSION = '20260824-1620'; // 每次部署更新，用來確認瀏覽器跑的是哪一版
+    const APP_VERSION = '20260824-1700'; // 每次部署更新，用來確認瀏覽器跑的是哪一版
     // 這一版前端「至少」需要的後端版本。前後端是各自演進的，版本號本來就不會相等
     // （只改前端時後端不動，反之亦然），所以不能用「兩者相等」當健康指標 ——
     // 要比的是「線上後端有沒有舊到缺少本前端需要的 API」。
     // 規則：改了 程式碼.gs 且前端會用到那個改動時，才把這個值提到該後端版本。
-    const NEEDS_GAS = '20260824-1500';   // 需要：店鋪名單型態統計、缺失子項只輸出人工填寫的名稱
+    const NEEDS_GAS = '20260824-1700';   // 需要：店鋪名單型態統計、缺失子項只輸出人工填寫的名稱
 
     // 全域錯誤攔截：任何未預期錯誤（含 async 事件處理器的未捕捉 rejection）都要顯示出來，
     // 否則按鈕會「按了沒反應」而完全查不到原因
@@ -542,6 +542,7 @@
       const batchOf = (v) => String(v || '').trim();
       const batches = [];
       roster.forEach(s => { const b = batchOf(s.預排梯次); if (b && batches.indexOf(b) < 0) batches.push(b); });
+      rows.forEach(r => { const b = batchOf(r.實際梯次); if (b && batches.indexOf(b) < 0) batches.push(b); });
       batches.sort();
       if (!batches.length) return [];
       const deptOfSection = sectionDeptMap(report); // 含零點檢課別，順序才會與KPI表一致
@@ -551,7 +552,8 @@
       const plan = {}, actual = {};
       const bump = (obj, key, b) => { if (!obj[key]) obj[key] = {}; obj[key][b] = (obj[key][b] || 0) + 1; };
       roster.forEach(s => { const b = batchOf(s.預排梯次); if (b) bump(plan, s.課別 || '(未分類)', b); });
-      rows.forEach(r => { const b = batchOf(r.預排梯次); if (b) bump(actual, r.主責課 || '(未分類)', b); });
+      // 實際側用「實際點檢日期落在哪一梯」；預計側維持名單的原預排，兩者並列才看得出脫期
+      rows.forEach(r => { const b = batchOf(r.實際梯次 || r.預排梯次); if (b) bump(actual, r.主責課 || '(未分類)', b); });
 
       const head1 = ['期間'], head2 = [periodLabel];
       batches.forEach(b => { head1.push(b, ''); head2.push('預計點檢店數', '實際點檢店數'); });
@@ -655,10 +657,13 @@
         const common = [i + 1, padStoreCode(s.店號), s.店名, s.營業部, s.課別, s.營業擔當, s.地址, s.店鋪型態 === '隨盤點點檢店' ? 'V' : ''];
         const tail = rec ? [mmdd(rec.點檢時間), '已點檢'] : ['', '未點檢'];
         return customerFacing
-          ? [...common, s.預排梯次 || '', ...tail]
+          ? [...common, (rec ? rec.預排梯次 : s.預排梯次) || '', ...tail]
           // 「主責課」一律取店鋪名單的課別（該店本月的盤點責任歸屬，未點檢也該有值）；
           // 「實際點檢課/人員/梯次」才是有點檢才填
-          : [...common, rec ? rec.主責課 : '', rec ? rec.點檢人員 : '', rec ? s.預排梯次 : '', s.課別 || '', s.預排梯次 || '', ...tail];
+          // 梯次一律以實際點檢日期反推（後端 rec.預排梯次 已是實際值，算不出來才退回名單的預排）；
+          // 未點檢的店沒有實際日期，只能顯示名單的預排。
+          : [...common, rec ? rec.主責課 : '', rec ? rec.點檢人員 : '', rec ? (rec.實際梯次 || '') : '',
+            s.課別 || '', (rec ? rec.預排梯次 : s.預排梯次) || '', ...tail];
       });
       // 期間文字：0801-0819（不含斜線）
       const mmddPlain = (ymd) => String(ymd || '').slice(5, 7) + String(ymd || '').slice(8, 10);
@@ -2231,6 +2236,31 @@ ${nm}
       return items;
     }
 
+    // 名單檔右側常附一張兩欄小表：「梯次 / 評核日期區間」（每月不同），例如
+    //   第一梯  8/1-8/15
+    //   第二梯  8/16-8/31
+    // 有了期間，報表才能用「實際點檢日期」反推實際梯次，而不是照抄預排。
+    function rosterBatchPeriods(sheets) {
+      const clean = (v) => String(v == null ? '' : v).replace(/[\r\n\s]/g, '').trim();
+      for (const sh of (sheets || [])) {
+        const head = (sh.aoa[0] || []).map(clean);
+        const rangeIdx = head.findIndex(h => h.indexOf('評核日期區間') >= 0 || h.indexOf('日期區間') >= 0);
+        if (rangeIdx < 0) continue;
+        // 梯次名稱欄：優先取區間左邊那一欄叫「梯次」的，找不到就取緊鄰左邊一欄
+        let nameIdx = head.findIndex((h, i) => i < rangeIdx && h === '梯次');
+        if (nameIdx < 0) nameIdx = rangeIdx - 1;
+        const out = [];
+        for (let i = 1; i < sh.aoa.length; i++) {
+          const r = sh.aoa[i] || [];
+          const name = String(r[nameIdx] == null ? '' : r[nameIdx]).trim();
+          const range = String(r[rangeIdx] == null ? '' : r[rangeIdx]).trim();
+          if (name && range) out.push({ 梯次: name, 區間: range });
+        }
+        if (out.length) return out;
+      }
+      return null;
+    }
+
     // 官方委外名單(多分頁) → 標準店鋪名單列。找含「店號＋主責課」的分頁；非此格式回 null。
     function rosterToRows(sheets) {
       if (!sheets || !sheets.length) return null;
@@ -2375,11 +2405,15 @@ ${nm}
             if (c) { data = c; convMsg = '\n（偵測到官方評核表，已自動轉題庫；13題機台等客製子項請單筆補上）'; }
           }
           // 店鋪名單：官方委外名單(多分頁)自動轉（主責課→課別、隨盤點→店鋪型態）
+          let batches = null;
           if (sub === 'roster') {
             const c = rosterToRows(parsed.sheets);
             if (c) { data = c; convMsg = '\n（偵測到官方委外名單，已自動轉：主責課→課別、隨盤點→店鋪型態）'; }
+            batches = rosterBatchPeriods(parsed.sheets);
+            if (batches) convMsg += '\n（同時轉入梯次期間 ' + batches.length + ' 筆：'
+              + batches.map(b => b.梯次 + ' ' + b.區間).join('、') + '）';
           }
-          const r = await SqcApi.importMaster(area.importKind, month, data, f.name);
+          const r = await SqcApi.importMaster(area.importKind, month, data, f.name, batches);
           setUploaded({ ...uploaded, [sub]: f.name });
           load(); await onReload();
           alert(`✅ 已匯入「${f.name}」${r.count} 筆（同名覆蓋，以最新為主）` + convMsg);

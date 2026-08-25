@@ -100,7 +100,8 @@
     checkEditPass: (pass) => call('checkEditPass', { pass }),
     getSummary: (month, filter) => call('getSummary', { month, filter }),
     buildMonthlyReport: (month, filter) => call('buildMonthlyReport', { month, filter }),
-    importMaster: (kind, month, rows, fileName) => call('importMaster', { kind, month, rows, fileName }),
+    // batches：店鋪名單檔右側的「梯次/評核日期區間」小表（每月不同）
+    importMaster: (kind, month, rows, fileName, batches) => call('importMaster', { kind, month, rows, fileName, batches }),
     upsertItem: (month, item) => call('upsertItem', { month, item }),
     deleteItem: (month, id) => call('deleteItem', { month, id }),
     upsertRow: (kind, month, row) => call('upsertRow', { kind, month, row }),

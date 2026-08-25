@@ -10,7 +10,7 @@
 // 後端版本：每次修改本檔就更新，並於前端「資料更新時間」旁顯示。
 // 用途：貼上程式碼後若忘記「部署 → 管理部署作業 → 新版本」，畫面上的後端版本就不會變，
 //       可立即分辨是「沒貼上」「貼了但沒部署」還是「已生效」。
-var GAS_VERSION = '20260824-1500';
+var GAS_VERSION = '20260824-1700';
 
 var SPREADSHEET_ID = '1GRZZsZRgakMGENspOxmlx96NfckC8UYOe0ipuNNEoh0';
 var DRIVE_ROOT_ID  = '122nQjldImn5Zh5AUguxZF0YzobThgdc9';
@@ -54,7 +54,7 @@ function doPost(e) {
       checkEditPass: function () { return checkEditPass(p.pass); },
       getSummary: function () { return getSummary(p.month, p.filter); },
       buildMonthlyReport: function () { return buildMonthlyReport(p.month, p.filter, sess && sess.role === '管理者'); },
-      importMaster: function () { return importMaster(p.kind, p.month, p.rows, p.fileName); },
+      importMaster: function () { return importMaster(p.kind, p.month, p.rows, p.fileName, p.batches); },
       upsertItem: function () { return upsertItem(p.month, p.item); },
       deleteItem: function () { return deleteItem(p.month, p.id); },
       upsertRow: function () { return upsertRow(p.kind, p.month, p.row); },
@@ -655,6 +655,7 @@ function buildMonthlyReport(month, filter, isManager) {
     catItems[it.cat].push(it);
   });
 
+  var batchPeriods = getBatchPeriods(month);   // 每月不同，隨名單匯入；沒有就退回舊行為
   var rows = records.map(function (rec, idx) {
     var code = normCode(rec.storeCode);
     var sm = findMaster(rec.storeCode, rec.storeName);
@@ -701,7 +702,12 @@ function buildMonthlyReport(month, filter, isManager) {
       主責部: rec.dept || '', 主責課: rec.section || '',
       點檢人員: rec.staffName, 在店人數: rec.staffCount, 身分別: rec.identity,
       備註: rec.note || '', 店型態: ro['店鋪型態'] || '一般店', 拍照類型: rec.storeType,
-      遠程店: ro['遠程店'] || '否', 假日店: ro['假日店'] || '否', 預排梯次: ro['預排梯次'] || '',
+      遠程店: ro['遠程店'] || '否', 假日店: ro['假日店'] || '否',
+      // 梯次一律以實際點檢日期落在哪一段區間為準；算不出來(沒有梯次表)才退回名單的預排。
+      // 原本的預排另存 原預排梯次，梯次表的「預計」側仍用它，才看得出脫期。
+      預排梯次: batchOfDate(batchPeriods, toYmd(rec.time)) || ro['預排梯次'] || '',
+      原預排梯次: ro['預排梯次'] || '',
+      實際梯次: batchOfDate(batchPeriods, toYmd(rec.time)),
       觀察: rec.observation || {}, photoGroups: photoGroups,
     };
   });
@@ -739,6 +745,7 @@ function buildMonthlyReport(month, filter, isManager) {
     catOrder: catOrder,
     rows: rows,
     kpi: kpi,
+    batchPeriods: batchPeriods,
     roster: roster.map(function (r) {
       var sm = findMaster(r['店號'], r['店名']);
       return {
@@ -753,7 +760,7 @@ function buildMonthlyReport(month, filter, isManager) {
 // ============================================================
 // 維護專區：匯入（前端解析檔案後傳 rows；同名覆蓋＝整表以最新取代）
 // ============================================================
-function importMaster(kind, month, rows, fileName) {
+function importMaster(kind, month, rows, fileName, batches) {
   var lock = LockService.getScriptLock();
   lock.waitLock(30000);
   try {
@@ -773,7 +780,9 @@ function importMaster(kind, month, rows, fileName) {
       rng.setValues(out);
     }
     setSetting('匯入_' + kind, (fileName || '') + ' @ ' + nowStr());
-    return { ok: true, count: out.length };
+    // 店鋪名單檔右側附帶「梯次/評核日期區間」小表時一併存下，供依實際日期反推梯次
+    var batchCount = (kind === 'roster' && batches && batches.length) ? saveBatchPeriods(month, batches) : 0;
+    return { ok: true, count: out.length, batchCount: batchCount };
   } finally {
     SpreadsheetApp.flush();
     lock.releaseLock();
@@ -836,6 +845,7 @@ var HEADERS_MAP = {
   stores: ['序號', '店號', '店名', '營業本部名稱', '營業部名稱', '營業課名稱', '營業擔當', '縣市', '鄉鎮', '地址'],
   record: ['紀錄ID', '點檢時間', '部別', '課別', '員編', '點檢人員', '店號', '店名', '店鋪型態', '備註', '題庫版本', '合計得分', '等第', '在店店員人數', '簽名身分別', '明細JSON', '觀察JSON', '照片JSON', '紙本照片', '照片資料夾', '同步狀態', '建立時間', '更新時間'],
   log: ['時間', '操作人', '動作', '對象', '說明'],
+  batch: ['梯次', '評核日期區間', '起日', '迄日'],
 };
 // 異動紀錄（維護區的編輯修改軌跡；單獨活頁）
 function logChange(user, action, target, detail) {
@@ -934,6 +944,68 @@ function getPricing() {
     文件處理費: pick('文件處理費', 6500),
     稅率: pick('稅率', 0.05),
   };
+}
+
+// ============================================================
+// 梯次期間（每月不同，隨店鋪名單一起轉入）
+//   名單檔右側有兩欄小表：「梯次 / 評核日期區間」，例如
+//     第一梯  8/1-8/15
+//     第二梯  8/16-8/31
+//   有了期間就能用「實際點檢日期」反推實際梯次；實際與預排不符時，
+//   報表一律以實際為準（見 buildMonthlyReport 的 實際梯次）。
+// ============================================================
+
+/** 存入某月的梯次期間（隨名單匯入寫入，覆蓋舊的） */
+function saveBatchPeriods(month, list) {
+  var name = '梯次_' + month;
+  var sh = ensureSheetNamed(name, HEADERS_MAP.batch);
+  if (sh.getLastRow() > 1) sh.getRange(2, 1, sh.getLastRow() - 1, HEADERS_MAP.batch.length).clearContent();
+  var rows = (list || []).map(function (b) {
+    var p = parseBatchRange(b.區間, month);
+    return [String(b.梯次 || ''), String(b.區間 || ''), p.from, p.to];
+  }).filter(function (r) { return r[0]; });
+  if (rows.length) {
+    var rng = sh.getRange(2, 1, rows.length, HEADERS_MAP.batch.length);
+    rng.setNumberFormat('@');
+    rng.setValues(rows);
+  }
+  return rows.length;
+}
+
+/** 讀某月的梯次期間 → [{name, from, to}]；沒有這張表就回空陣列（呼叫端要能退回舊行為） */
+function getBatchPeriods(month) {
+  var sh = ssBook().getSheetByName('梯次_' + month);
+  if (!sh || sh.getLastRow() < 2) return [];
+  return readSheet('梯次_' + month).map(function (r) {
+    return { name: String(r['梯次'] || '').trim(), from: toYmd(r['起日']), to: toYmd(r['迄日']) };
+  }).filter(function (b) { return b.name && b.from && b.to; });
+}
+
+/**
+ * 把「8/1-8/15」這種區間轉成該月份的實際日期。
+ * month 為民國年月（如 11508）→ 西元 2026 年 8 月。
+ * 若起月大於迄月（如 12/16-1/15），視為跨年，迄日的年份 +1。
+ */
+function parseBatchRange(raw, month) {
+  var s = String(raw == null ? '' : raw).replace(/\s/g, '');
+  var m = s.match(/^(\d{1,2})[\/\-\.](\d{1,2})\s*[~\-—–]\s*(\d{1,2})[\/\-\.](\d{1,2})$/);
+  if (!m) return { from: '', to: '' };
+  var year = 1911 + Number(String(month).slice(0, 3));
+  var m1 = Number(m[1]), d1 = Number(m[2]), m2 = Number(m[3]), d2 = Number(m[4]);
+  var y2 = m2 < m1 ? year + 1 : year;                    // 跨年區間
+  var pad = function (n) { return (n < 10 ? '0' : '') + n; };
+  return { from: year + '-' + pad(m1) + '-' + pad(d1), to: y2 + '-' + pad(m2) + '-' + pad(d2) };
+}
+
+/** 該日期落在哪一個梯次；找不到回空字串 */
+function batchOfDate(periods, ymd) {
+  var d = String(ymd || '').slice(0, 10);
+  if (!d) return '';
+  for (var i = 0; i < (periods || []).length; i++) {
+    var b = periods[i];
+    if (d >= b.from && d <= b.to) return b.name;
+  }
+  return '';
 }
 
 // ============================================================
