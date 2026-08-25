@@ -115,5 +115,7 @@
     trashPhotos: (fileIds, note) => call('trashPhotos', { fileIds, note }),
     // 照片上傳完成但連結沒回寫成功時（網路中斷／頁面被關掉），依檔名把 fileId 找回來
     repairRecordPhotos: (month, recordId) => call('repairRecordPhotos', { month, recordId }),
+    // 整月補回（維護專區）：write=false 只試算不寫入；一次最多 40 筆，回傳結果會說還要不要再跑
+    repairPhotoLinks: (month, write) => call('repairPhotoLinks', { month, write: write === true }),
   };
 })();

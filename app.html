@@ -25,12 +25,12 @@
 
   <script type="text/jsx" id="appCode">
     const { useState, useMemo, useEffect, useRef } = React;
-    const APP_VERSION = '20260825-1500'; // 每次部署更新，用來確認瀏覽器跑的是哪一版
+    const APP_VERSION = '20260825-1730'; // 每次部署更新，用來確認瀏覽器跑的是哪一版
     // 這一版前端「至少」需要的後端版本。前後端是各自演進的，版本號本來就不會相等
     // （只改前端時後端不動，反之亦然），所以不能用「兩者相等」當健康指標 ——
     // 要比的是「線上後端有沒有舊到缺少本前端需要的 API」。
     // 規則：改了 程式碼.gs 且前端會用到那個改動時，才把這個值提到該後端版本。
-    const NEEDS_GAS = '20260825-1500';   // 需要：照片連結修復(repairRecordPhotos)、匯入回報梯次筆數
+    const NEEDS_GAS = '20260825-1730';   // 需要：整月照片連結修復、紙本照片欄取檔名
 
     // 全域錯誤攔截：任何未預期錯誤（含 async 事件處理器的未捕捉 rejection）都要顯示出來，
     // 否則按鈕會「按了沒反應」而完全查不到原因
@@ -1488,7 +1488,11 @@ ${nm}
           storeCode, storeName, storeType: canPhoto ? '可拍照' : '不可拍照',
           total, grade: grade.txt, staffCount: sign.count, identity: sign.identity,
           note: [noPhotoReasonText, sign.remark.trim() ? '｜備註：' + sign.remark.trim() : ''].join(''),
-          detail, observation, photos: photosJson, paperPhotos: (photosJson[[monthFolder, 'SQC點檢表完成照片'].join('/')] || []),
+          detail, observation, photos: photosJson,
+          // 紙本照片欄存的是「檔名清單」。編輯既有紀錄時 photosJson 的項目是 {name, fileId} 物件，
+          // 直接丟過去後端會 join 成 "[object Object]" 把這一欄寫爛，所以一律取出檔名。
+          paperPhotos: (photosJson[[monthFolder, 'SQC點檢表完成照片'].join('/')] || [])
+            .map(e => (e && typeof e === 'object') ? e.name : e).filter(Boolean),
         };
 
         queue.forEach(q => SqcUploader.enqueue({ ...q, recordId: recId, month: workMonth }));
@@ -2427,6 +2431,39 @@ ${nm}
       const [loadErr, setLoadErr] = useState('');
       const isLog = sub === 'log';
       const area = MAINT_AREAS.find(a => a.kind === sub);
+      // 照片連結修復（獨立於各分頁，自己一個月份選單）
+      const [repairMonth, setRepairMonth] = useState(curMonth);
+      const [repairing, setRepairing] = useState(false);
+      const [repairMsg, setRepairMsg] = useState('');
+      const runRepair = async (write) => {
+        if (write && !confirm(`確定要修復 ${monthFolderOf(repairMonth)} 的照片連結？\n會直接寫入點檢紀錄的「照片JSON」，並把補回來的照片設為「知道連結就能看」。`)) return;
+        setRepairing(true); setRepairMsg('');
+        try {
+          // 後端一次最多處理 40 筆紀錄（避免 Apps Script 6 分鐘逾時），這裡自動接續跑完
+          let filled = 0, missing = 0, scanned = 0, paperFixed = 0, shared = 0, rounds = 0;
+          const lines = [];
+          while (rounds < 30) {
+            rounds++;
+            const r = await SqcApi.repairPhotoLinks(repairMonth, write);
+            if (r.error) { setRepairMsg('⚠ ' + r.error); return; }
+            filled += r.filled || 0; missing += r.missing || 0; scanned = r.scannedRows || scanned;
+            paperFixed += r.paperFixed || 0; shared += r.shared || 0;
+            (r.detail || []).forEach(d => { if (lines.length < 30) lines.push(d); });
+            if (!write || !(r.touchedRows || 0)) break;   // 試算不必重跑；寫入到沒東西可補就結束
+          }
+          setRepairMsg([
+            (write ? '✅ 已修復' : '（僅試算，未寫入）') + `　月份 ${monthFolderOf(repairMonth)}`,
+            `檢查紀錄 ${scanned} 筆｜補回連結 ${filled} 張｜Drive 找不到對應檔案 ${missing} 張`,
+            paperFixed ? `紙本照片欄修正 ${paperFixed} 筆` : '',
+            write && shared ? `已設為「知道連結就能看」${shared} 張` : '',
+            missing ? '※ 找不到的通常是當時根本沒上傳成功，需請點檢人員重新上傳該張照片。' : '',
+            !filled && !missing ? '所有照片都已經有連結，不需修復。' : '',
+            lines.length ? '\n' + lines.join('\n') : '',
+          ].filter(Boolean).join('\n'));
+          if (write && filled) onReload();
+        } catch (e) { setRepairMsg('⚠ 修復失敗：' + e.message); }
+        finally { setRepairing(false); }
+      };
 
       // 請求序號防呆：分頁切換太快時，較早但較慢回來的請求不可覆蓋較新分頁的資料
       const reqSeq = useRef(0);
@@ -2559,6 +2596,36 @@ ${nm}
                   </tbody>
                 </table>
               </div>
+            </div>
+          )}
+
+          {/* 照片連結修復：照片已在 Drive 但紀錄裡只有檔名時，報表點不到照片 */}
+          {!isLog && (
+            <div className="bg-white rounded-xl shadow-sm p-5 mb-4">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <h3 className="font-bold text-slate-700">🔗 照片連結修復</h3>
+                  <p className="text-xs text-slate-400">
+                    照片上傳完成後要回寫連結，若當下網路中斷或頁面被關掉，照片其實已在雲端硬碟、
+                    紀錄裡卻只剩檔名 → 報表的照片欄會是空白、編輯時顯示「無雲端連結」。
+                    這裡依檔名把連結補回去，並一併設為「知道連結就能看」。一次處理 40 筆，會自動接續。
+                  </p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <select value={repairMonth} onChange={e => setRepairMonth(e.target.value)} className="px-3 py-1.5 border border-slate-300 rounded-lg text-sm">
+                    {monthOptions(curMonth).map(m => <option key={m} value={m}>{monthFolderOf(m)}</option>)}
+                  </select>
+                  <button onClick={() => runRepair(false)} disabled={repairing || !configured}
+                    className="text-sm px-3 py-1.5 bg-slate-200 text-slate-700 rounded-lg hover:bg-slate-300 disabled:opacity-50">
+                    {repairing ? '處理中…' : '先試算'}
+                  </button>
+                  <button onClick={() => runRepair(true)} disabled={repairing || !configured}
+                    className="text-sm px-3 py-1.5 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 disabled:opacity-50">
+                    {repairing ? '處理中…' : '修復並寫入'}
+                  </button>
+                </div>
+              </div>
+              {repairMsg && <div className="mt-3 text-sm whitespace-pre-wrap bg-slate-50 border border-slate-200 rounded-lg p-3 text-slate-700">{repairMsg}</div>}
             </div>
           )}
 

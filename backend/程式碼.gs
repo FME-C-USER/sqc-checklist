@@ -10,7 +10,7 @@
 // 後端版本：每次修改本檔就更新，並於前端「資料更新時間」旁顯示。
 // 用途：貼上程式碼後若忘記「部署 → 管理部署作業 → 新版本」，畫面上的後端版本就不會變，
 //       可立即分辨是「沒貼上」「貼了但沒部署」還是「已生效」。
-var GAS_VERSION = '20260825-1500';
+var GAS_VERSION = '20260825-1730';
 
 var SPREADSHEET_ID = '1GRZZsZRgakMGENspOxmlx96NfckC8UYOe0ipuNNEoh0';
 var DRIVE_ROOT_ID  = '122nQjldImn5Zh5AUguxZF0YzobThgdc9';
@@ -34,7 +34,7 @@ function doPost(e) {
     var OPEN = { login: 1 };
     // buildMonthlyReport 不列管理者專屬：課長版/客戶版所有登入者皆可產出。
     // 請款金額雖同樣取這份資料，但單價僅回傳給管理者(見 buildMonthlyReport)，且按鈕限管理者顯示。
-    var ADMIN_ONLY = { importMaster: 1, upsertItem: 1, deleteItem: 1, upsertRow: 1, deleteRow: 1, getMaster: 1, getChangeLog: 1 };
+    var ADMIN_ONLY = { importMaster: 1, upsertItem: 1, deleteItem: 1, upsertRow: 1, deleteRow: 1, getMaster: 1, getChangeLog: 1, repairPhotoLinks: 1 };
     var sess = null;
     if (!OPEN[action]) {
       sess = getSession(req.token);
@@ -73,6 +73,8 @@ function doPost(e) {
       getPhotoImage: function () { return photoImage(p.fileId); },
       trashPhotos: function () { return trashPhotos(p.fileIds); },
       repairRecordPhotos: function () { return repairRecordPhotos(p.month, p.recordId); },
+      // 整月補回照片連結（維護專區用；write=false 只試算）。定義在 setup.gs，同專案可直接呼叫
+      repairPhotoLinks: function () { return repairPhotoLinks(p.month, p.write === true); },
     };
     if (!routes[action]) return json({ ok: false, error: '未知動作：' + action });
     var result = routes[action]();
@@ -1147,6 +1149,13 @@ function photoUrlsOf(arr) { return (arr || []).map(photoUrlOf).filter(Boolean); 
  * 前置一個單引號即強制為文字；Sheet 讀回時不含這個單引號，所以資料本身不變。
  * （用 setNumberFormat('@') 的寫入點已經是文字格式，不需要再過這裡。）
  */
+/** 照片項目清單 → 逗號分隔的檔名字串（項目可能是字串或 {name, fileId} 物件） */
+function photoNamesOf(list) {
+  return (list || []).map(function (e) {
+    return (e && typeof e === 'object') ? String(e.name || '') : String(e == null ? '' : e);
+  }).filter(function (n) { return n; }).join(',');
+}
+
 function safeCell_(v) {
   if (typeof v !== 'string' || !v) return v;
   return /^[=+\-@\t\r]/.test(v) ? "'" + v : v;
@@ -1162,7 +1171,9 @@ function recordToRow(sh, rec) {
     '店鋪型態': rec.storeType, '備註': rec.note || '', '題庫版本': rec.month, '合計得分': rec.total, '等第': rec.grade,
     '在店店員人數': rec.staffCount, '簽名身分別': rec.identity,
     '明細JSON': JSON.stringify(rec.detail || {}), '觀察JSON': JSON.stringify(rec.observation || {}),
-    '照片JSON': JSON.stringify(rec.photos || {}), '紙本照片': (rec.paperPhotos || []).join(','),
+    // 紙本照片存檔名清單。前端若送來 {name, fileId} 物件（編輯既有紀錄時會這樣），
+    // 直接 join 會寫成 "[object Object]" 把整欄寫爛，所以在這裡也取一次檔名。
+    '照片JSON': JSON.stringify(rec.photos || {}), '紙本照片': photoNamesOf(rec.paperPhotos),
     '照片資料夾': rec.folderUrl || '', '同步狀態': '已同步',
     '建立時間': rec.createdAt, '更新時間': rec.updatedAt,
   };

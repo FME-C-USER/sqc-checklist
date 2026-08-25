@@ -317,10 +317,12 @@ function repairPhotoLinks(month, doWrite) {
   var photoCol = head.indexOf('照片JSON');
   var idCol = head.indexOf('紀錄ID');
   var storeCol = head.indexOf('店名');
+  var paperCol = head.indexOf('紙本照片');   // 編輯時曾被寫成 [object Object]，可從照片JSON還原
   if (photoCol < 0) { Logger.log('找不到「照片JSON」欄'); return { error: '找不到欄位' }; }
 
   var folderCache = {};
   var detail = [], touchedRows = 0, filled = 0, missing = 0, scannedRows = 0;
+  var toShare = {}, paperFixed = 0;
 
   for (var i = 1; i < data.length; i++) {
     if (touchedRows >= REPAIR_MAX_ROWS) {
@@ -350,6 +352,8 @@ function repairPhotoLinks(month, doWrite) {
         var fid = fileIdByNameNotTrashed_(folderId, name);
         if (!fid) { missing++; continue; }
         arr[j] = { name: name, fileId: fid };
+        if (!toShare[key]) toShare[key] = [];
+        toShare[key].push({ name: name, fileId: fid });   // 補回來的照片也要設成「知道連結就能看」
         changed = true; filled++;
       }
       obj[key] = arr;
@@ -360,14 +364,28 @@ function repairPhotoLinks(month, doWrite) {
       detail.push('第' + (i + 1) + '列 ' + (storeCol >= 0 ? data[i][storeCol] : '') + '（' + (idCol >= 0 ? data[i][idCol] : '') + '）→ 補上連結');
       if (doWrite === true) sh.getRange(i + 1, photoCol + 1).setValue(JSON.stringify(obj));
     }
+    // 紙本照片欄若被寫成 [object Object]，用照片JSON 裡的檔名還原（報表不吃這欄，但重新編輯時會用到）
+    if (paperCol >= 0 && String(data[i][paperCol] || '').indexOf('[object Object]') >= 0) {
+      var paperKey = Object.keys(obj).filter(function (k) { return k.indexOf('SQC點檢表完成照片') >= 0; })[0];
+      var names = paperKey ? photoNamesOf(obj[paperKey]) : '';
+      detail.push('第' + (i + 1) + '列 紙本照片欄修正為：' + (names || '(空)'));
+      paperFixed++;
+      if (doWrite === true) sh.getRange(i + 1, paperCol + 1).setValue(names);
+    }
   }
+
+  // 分享要在迴圈外一次做完：迴圈內逐張呼叫 Drive 很容易撞到 6 分鐘逾時
+  var shared = { ok: 0, failed: 0 };
+  if (doWrite === true && filled) shared = shareLinkedPhotos(toShare);
 
   Logger.log((doWrite === true ? '【已寫入】' : '【僅試算，未寫入】')
     + ' 月份 ' + month
     + '｜檢查紀錄 ' + scannedRows + ' 筆｜可補連結 ' + filled + ' 張｜需異動 ' + touchedRows + ' 筆'
     + '｜Drive 找不到對應檔案 ' + missing + ' 張'
+    + '｜紙本照片欄修正 ' + paperFixed + ' 筆｜已設為知道連結可看 ' + shared.ok + ' 張'
     + (detail.length ? '\n' + detail.join('\n') : '\n（沒有需要補的項目）'));
-  return { scannedRows: scannedRows, filled: filled, touchedRows: touchedRows, missing: missing, detail: detail };
+  return { scannedRows: scannedRows, filled: filled, touchedRows: touchedRows, missing: missing,
+    paperFixed: paperFixed, shared: shared.ok, shareFailed: shared.failed, detail: detail };
 }
 
 /** 由「115年08月/題目/缺失」這種相對路徑找出資料夾 ID；找不到回空字串（不建立新資料夾） */
