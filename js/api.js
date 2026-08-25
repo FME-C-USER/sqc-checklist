@@ -117,5 +117,7 @@
     repairRecordPhotos: (month, recordId) => call('repairRecordPhotos', { month, recordId }),
     // 整月補回（維護專區）：write=false 只試算不寫入；一次最多 40 筆，回傳結果會說還要不要再跑
     repairPhotoLinks: (month, write) => call('repairPhotoLinks', { month, write: write === true }),
+    // 前端主動留下的軌跡（事件名稱由後端白名單管控），目前用於「照片未傳完就離開」
+    logEvent: (event, detail) => call('logEvent', { event, detail }),
   };
 })();

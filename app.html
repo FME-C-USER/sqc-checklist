@@ -25,12 +25,12 @@
 
   <script type="text/jsx" id="appCode">
     const { useState, useMemo, useEffect, useRef } = React;
-    const APP_VERSION = '20260825-1830'; // 每次部署更新，用來確認瀏覽器跑的是哪一版
+    const APP_VERSION = '20260826-1030'; // 每次部署更新，用來確認瀏覽器跑的是哪一版
     // 這一版前端「至少」需要的後端版本。前後端是各自演進的，版本號本來就不會相等
     // （只改前端時後端不動，反之亦然），所以不能用「兩者相等」當健康指標 ——
     // 要比的是「線上後端有沒有舊到缺少本前端需要的 API」。
     // 規則：改了 程式碼.gs 且前端會用到那個改動時，才把這個值提到該後端版本。
-    const NEEDS_GAS = '20260825-1830';   // 需要：整月照片連結修復、紙本照片欄取檔名
+    const NEEDS_GAS = '20260826-1030';   // 需要：照片未齊狀態(pendingPhotos)、logEvent
 
     // 全域錯誤攔截：任何未預期錯誤（含 async 事件處理器的未捕捉 rejection）都要顯示出來，
     // 否則按鈕會「按了沒反應」而完全查不到原因
@@ -1089,6 +1089,16 @@
         const off = SqcUploader.onChange(refresh);   // 每批處理完才觸發，不做輪詢
         return () => { alive = false; off(); };
       }, []);
+      // 送出後的上傳進度畫面（擋住不讓人離開，直到照片真的進雲端硬碟）
+      const [postSubmit, setPostSubmit] = useState(null);
+      const postDone = !!postSubmit && !((pendingUp.unfinished || 0) + (pendingUp.queuedRecords || 0));
+      // 瀏覽器可能為了回收空間把本站資料清掉（iOS 尤其），照片佇列會跟著消失 →
+      // 主動要求「持久化儲存」。要不到也沒關係，只是機率問題。
+      useEffect(() => {
+        if (navigator.storage && navigator.storage.persist) {
+          navigator.storage.persisted().then(ok => { if (!ok) navigator.storage.persist().catch(() => { }); }).catch(() => { });
+        }
+      }, []);
       // 還有東西沒送完就提醒，避免關掉分頁後照片停在佇列裡沒人知道
       useEffect(() => {
         if (!((pendingUp.unfinished || 0) + (pendingUp.queuedRecords || 0))) return;
@@ -1265,7 +1275,8 @@ ${nm}
             const all = results.flatMap(r => (r && r.records) || []);
             setRecords(all.map(x => ({
               id: x.id, date: String(x.time).slice(0, 10), store: x.storeName, section: x.section,
-              staff: x.staffName, version: x.month, total: Number(x.total), grade: x.grade, _raw: x,
+              staff: x.staffName, version: x.month, total: Number(x.total), grade: x.grade,
+              pendingPhotos: Number(x.pendingPhotos) || 0, _raw: x,
             })));
           }).catch(e => alert('查詢失敗：' + e.message)).finally(() => setQueryLoading(false));
       };
@@ -1528,9 +1539,15 @@ ${nm}
             SqcApi.trashPhotos(removedPhotos.map(x => x.fileId), storeName + ' ' + basic.time.slice(0, 10))
               .catch(e => alert('紀錄已更新，但刪除舊照片失敗：' + e.message + '。照片仍在 Drive，可再編輯一次重試。'));
           }
-          alert(`✅ ${isEdit ? '已更新' : '已送出'}\n店鋪：${storeName}　得分：${total}/${TOTAL_MAX}（${grade.txt}）` + (queue.length ? `\n新增照片 ${queue.length} 張背景上傳中` : ''));
           if (!isEdit) setInspectedCodes(prev => ({ ...prev, [normCode(storeCode)]: true }));
           resetWork(); setTab('records'); loadRecords();
+          // 照片還沒傳完就放人走，是「報表沒有照片連結」的唯一成因 —— 照片只存在那一台裝置上，
+          // 人離開、裝置失聯就再也兌現不了。所以送出後改成擋在上傳進度畫面，傳完才放行。
+          if (queue.length) {
+            setPostSubmit({ store: storeName, total, grade: grade.txt, added: queue.length, at: Date.now() });
+          } else {
+            alert(`✅ ${isEdit ? '已更新' : '已送出'}\n店鋪：${storeName}　得分：${total}/${TOTAL_MAX}（${grade.txt}）`);
+          }
         }).catch(e => alert((isEdit ? '更新' : '送出') + '失敗：' + e.message
           + (isEdit ? '' : '\n\n這筆已存入待送佇列，網路恢復後會自動重送，請保持頁面開啟。')))
           .finally(() => setSubmitting(false));
@@ -1559,7 +1576,11 @@ ${nm}
         const p = (n) => String(n).padStart(2, '0');
         setFilter(f => ({ ...f, from: `${y}-${p(m)}-01`, to: `${y}-${p(m)}-${p(lastDay)}` }));
       };
-      const filtered = records.filter(r => (!filter.from || r.date >= filter.from) && (!filter.to || r.date <= filter.to) && (!filter.section || r.section === filter.section));
+      // 「只看照片未齊」：照片還在點檢人員手機裡時要當天就追，越晚越救不回來
+      const [onlyPending, setOnlyPending] = useState(false);
+      const filtered = records.filter(r => (!filter.from || r.date >= filter.from) && (!filter.to || r.date <= filter.to) && (!filter.section || r.section === filter.section)
+        && (!onlyPending || r.pendingPhotos > 0));
+      const pendingCount = records.filter(r => r.pendingPhotos > 0).length;
       // 正式模式：進查詢/彙總頁或改條件時，重新向後端查當月
       // 只在切換進「查詢紀錄/彙總」分頁時自動查一次；改變日期/課別後需按「查詢」才會重新查詢
       useEffect(() => { if (CONFIGURED && (tab === 'records' || tab === 'summary')) loadRecords(); }, [tab]);
@@ -1794,6 +1815,66 @@ ${nm}
                   {gasVer && gasVer < NEEDS_GAS && <span className="ml-1">⚠ 需 {NEEDS_GAS} 以上</span>}
                 </span>
                 <button onClick={() => { setLoading(true); reloadBoot(workMonth).catch(e => setBootWarn('連線不穩，目前顯示上次載入的資料（' + (e.message || '載入失敗') + '）')).finally(() => setLoading(false)); }} className="underline hover:text-slate-600">重新載入</button>
+              </div>
+            )}
+            {/* 送出後的上傳進度：照片沒進雲端硬碟就不放人走（唯一的出口要留下軌跡） */}
+            {postSubmit && (
+              <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4">
+                <div className="bg-white rounded-2xl shadow-xl max-w-md w-full p-5">
+                  <div className="text-lg font-bold text-slate-800">
+                    {postDone ? '✅ 全部完成' : '📤 照片上傳中，請留在現場'}
+                  </div>
+                  <div className="text-sm text-slate-600 mt-1">
+                    {postSubmit.store}　得分 {postSubmit.total}/{TOTAL_MAX}（{postSubmit.grade}）
+                  </div>
+                  {postDone ? (
+                    <p className="text-sm text-emerald-700 mt-3">
+                      {postSubmit.added} 張照片都已進入雲端硬碟，報表點得到連結了。
+                    </p>
+                  ) : (
+                    <>
+                      <div className="mt-3 h-2 w-full bg-slate-200 rounded-full overflow-hidden">
+                        <div className="h-full bg-emerald-500 rounded-full transition-all"
+                          style={{ width: Math.round(100 * Math.max(0, postSubmit.added - (pendingUp.unfinished || 0)) / Math.max(1, postSubmit.added)) + '%' }} />
+                      </div>
+                      <div className="text-sm text-slate-700 mt-2">
+                        待上傳 <b className="text-red-600">{pendingUp.unfinished || 0}</b> 張
+                        <span className="text-slate-500">（本筆新增 {postSubmit.added} 張；數字含之前還沒傳完的）</span>
+                        {pendingUp.queuedRecords > 0 && <span>，另有紀錄 {pendingUp.queuedRecords} 筆待送出</span>}
+                      </div>
+                      <p className="text-xs text-slate-500 mt-2">
+                        照片目前只存在這支手機上。<b>離開現場前請等它跑完</b> ——
+                        一旦這支手機沒再連上網路開這個 App，這些照片就補不回來，而缺失當下已經被改善、拍不回來。
+                        訊號不好時可以走到店外或連店裡的 Wi-Fi 再按「立即重試」。
+                      </p>
+                      {!navigator.onLine && <p className="text-xs text-red-600 mt-1">⚠ 目前顯示為離線，恢復連線後會自動繼續。</p>}
+                    </>
+                  )}
+                  <div className="flex justify-end gap-2 mt-4">
+                    {!postDone && (
+                      <>
+                        <button onClick={() => SqcUploader.pump()} className="px-3 py-2 text-sm bg-slate-200 hover:bg-slate-300 text-slate-700 rounded-lg">立即重試</button>
+                        <button
+                          onClick={() => {
+                            const n = pendingUp.unfinished || 0;
+                            if (!confirm(`還有 ${n} 張照片沒有上傳完成。\n\n確定現在離開嗎？離開後必須用「這支手機、這個瀏覽器」再開一次 App 才傳得上去，否則這些照片會永久遺失。\n\n這個決定會記入異動紀錄。`)) return;
+                            if (CONFIGURED) {
+                              SqcApi.logEvent('leaveWithPendingPhotos',
+                                `${postSubmit.store}：還有 ${n} 張未上傳（共 ${postSubmit.added} 張）`).catch(() => { });
+                            }
+                            setPostSubmit(null);
+                          }}
+                          className="px-3 py-2 text-sm bg-white border border-red-300 text-red-700 hover:bg-red-50 rounded-lg">
+                          我知道風險，稍後再傳
+                        </button>
+                      </>
+                    )}
+                    {postDone && (
+                      <button onClick={() => { setPostSubmit(null); loadRecords(); }}
+                        className="px-4 py-2 text-sm bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg">完成</button>
+                    )}
+                  </div>
+                </div>
               </div>
             )}
             {lightbox && (
@@ -2093,7 +2174,22 @@ ${nm}
                     <button onClick={() => setMonthRange(0)} className="px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs">本月</button>
                   </div>
                   <button onClick={loadRecords} disabled={queryLoading} className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white rounded-lg">{queryLoading ? '查詢中…' : '🔍 查詢'}</button>
+                  <label className={"flex items-center gap-1.5 px-3 py-2 rounded-lg cursor-pointer " + (pendingCount ? "bg-red-50 text-red-700 border border-red-200" : "text-slate-500")}>
+                    <input type="checkbox" checked={onlyPending} onChange={e => setOnlyPending(e.target.checked)} />
+                    <span className="text-xs whitespace-nowrap">只看照片未齊{pendingCount ? `（${pendingCount} 筆）` : ''}</span>
+                  </label>
                 </div>
+                {/* 照片還在點檢人員手機的佇列裡時，當天就要追 —— 隔幾天手機資料被清掉就只能重拍 */}
+                {pendingCount > 0 && (
+                  <div className="bg-red-50 border border-red-300 text-red-800 text-sm rounded-lg px-3 py-2">
+                    <span className="font-bold">⚠ 有 {pendingCount} 筆紀錄的照片還沒上傳完成</span>
+                    <div className="text-xs mt-1">
+                      照片可能還在點檢人員的手機裡（關掉 App 不會弄丟）。<b>請當天就聯絡他，用原本那支手機、原本那個瀏覽器開一次 App</b>，
+                      佇列會自動傳完並補上連結。放久了手機資料被清掉就只能請人重拍缺失照片，而缺失當下已經被改善、拍不回來。
+                      若已經確定傳不回來，可到「維護專區 → 照片連結修復」試算，看是哪幾張真的不在雲端硬碟。
+                    </div>
+                  </div>
+                )}
                 {queryLoading && (
                   <div className="bg-white rounded-xl shadow-sm p-3">
                     <div className="h-1 w-full bg-slate-200 rounded-full overflow-hidden">
@@ -2109,7 +2205,12 @@ ${nm}
                     <tbody>
                       {filtered.map(r => (
                         <tr key={r.id} className="border-b border-slate-100">
-                          <td className="py-2 px-3 text-slate-500">{r.date}</td><td className="font-medium text-slate-800">{r.store}</td><td className="text-slate-500">{r.section}</td><td className="text-slate-500">{r.staff}</td>
+                          <td className="py-2 px-3 text-slate-500">{r.date}</td>
+                          <td className="font-medium text-slate-800">
+                            {r.store}
+                            {r.pendingPhotos > 0 && <span className="ml-2 text-[10px] bg-red-100 text-red-700 border border-red-300 px-1.5 py-0.5 rounded whitespace-nowrap" title="照片還沒上傳完成，報表點不到這些照片">📷 缺 {r.pendingPhotos} 張</span>}
+                          </td>
+                          <td className="text-slate-500">{r.section}</td><td className="text-slate-500">{r.staff}</td>
                           <td className="font-bold">{r.total}</td><td><span className={"text-xs px-2 py-0.5 rounded " + gradeOf(r.total).bg}>{r.grade}</span></td>
                           <td className="px-3 whitespace-nowrap"><button onClick={() => openEdit(r)} className="text-xs text-blue-600 mr-2">編輯</button><button onClick={() => delRecord(r.id, r.version, r.time)} className="text-xs text-red-600">刪除</button></td>
                         </tr>

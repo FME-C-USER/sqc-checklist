@@ -10,7 +10,7 @@
 // 後端版本：每次修改本檔就更新，並於前端「資料更新時間」旁顯示。
 // 用途：貼上程式碼後若忘記「部署 → 管理部署作業 → 新版本」，畫面上的後端版本就不會變，
 //       可立即分辨是「沒貼上」「貼了但沒部署」還是「已生效」。
-var GAS_VERSION = '20260825-1830';
+var GAS_VERSION = '20260826-1030';
 
 var SPREADSHEET_ID = '1GRZZsZRgakMGENspOxmlx96NfckC8UYOe0ipuNNEoh0';
 var DRIVE_ROOT_ID  = '122nQjldImn5Zh5AUguxZF0YzobThgdc9';
@@ -73,6 +73,7 @@ function doPost(e) {
       getPhotoImage: function () { return photoImage(p.fileId); },
       trashPhotos: function () { return trashPhotos(p.fileIds); },
       repairRecordPhotos: function () { return repairRecordPhotos(p.month, p.recordId); },
+      logEvent: function () { return logEvent(p.event, p.detail, sess && (sess.name || sess.ad)); },
       // 整月補回照片連結（維護專區用；write=false 只試算）。定義在 setup.gs，同專案可直接呼叫
       repairPhotoLinks: function () { return repairPhotoLinks(p.month, p.write === true); },
     };
@@ -103,6 +104,20 @@ function doPost(e) {
   } catch (err) {
     return json({ ok: false, error: String(err && err.message || err) });
   }
+}
+
+/**
+ * 前端主動記錄的事件。目前只有一種：照片還沒傳完就選擇離開 ——
+ * 訊號差的門市硬擋住不讓送出會讓人做不完事情，所以留了出口，
+ * 但要把「知情的決定」記進異動紀錄，事後才追得出是哪一筆、誰做的決定。
+ * 事件名稱走白名單：否則任何登入者都能往異動紀錄塞任意文字。
+ */
+var CLIENT_EVENTS = { leaveWithPendingPhotos: '照片未傳完即離開' };
+function logEvent(event, detail, who) {
+  var label = CLIENT_EVENTS[String(event || '')];
+  if (!label) return { ok: false, message: '未知事件' };
+  logChange(who || '', label, '點檢紀錄', String(detail || '').slice(0, 500));
+  return { ok: true };
 }
 
 /** 依「店鋪型態」統計筆數（供店鋪名單顯示「總店數x店(一般店x店，隨盤點點檢店x店)」）。
@@ -520,9 +535,12 @@ function attachPhotoLinks(month, recordId, links) {
         photos[key] = arr;
       });
       sh.getRange(i + 1, photoCol + 1).setValue(JSON.stringify(photos));
+      // 同步狀態要跟著更新，否則補齊了還一直顯示「照片未齊」，主管就不會再信這個欄位
+      var syncCol = head.indexOf('同步狀態');
+      if (syncCol >= 0) sh.getRange(i + 1, syncCol + 1).setValue(syncStateOf(photos));
       // 報表(含客戶版)裡的照片連結要讓沒有 Google 帳號的人也能開 → 逐檔設為「知道連結可檢視」
       var share = shareLinkedPhotos(links);
-      return { ok: true, shared: share.ok, shareFailed: share.failed };
+      return { ok: true, shared: share.ok, shareFailed: share.failed, pending: photoPendingCount(photos) };
     }
     return { ok: false, message: '找不到紀錄' };
   } finally {
@@ -1149,6 +1167,30 @@ function photoUrlsOf(arr) { return (arr || []).map(photoUrlOf).filter(Boolean); 
  * 前置一個單引號即強制為文字；Sheet 讀回時不含這個單引號，所以資料本身不變。
  * （用 setNumberFormat('@') 的寫入點已經是文字格式，不需要再過這裡。）
  */
+/**
+ * 這筆紀錄還有幾張照片沒有雲端連結。
+ * 送出時「照片JSON」只寫檔名，要等照片真的上傳完成才會回寫 fileId。
+ * 只有檔名沒有 fileId ＝ 照片還在點檢人員的手機佇列裡（或當時根本沒傳成功），
+ * 報表點不到、編輯時顯示「無雲端連結」。這個數字要讓主管當天就看得到 ——
+ * 越早發現，照片還在人家手機上，救回的機會越大。
+ */
+function photoPendingCount(photos) {
+  var n = 0;
+  Object.keys(photos || {}).forEach(function (key) {
+    (photos[key] || []).forEach(function (e) {
+      var name = (typeof e === 'string') ? e : (e && e.name);
+      var hasId = e && typeof e === 'object' && e.fileId;
+      if (name && !hasId) n++;
+    });
+  });
+  return n;
+}
+/** 同步狀態欄的文字（寫死「已同步」等於騙人，要反映照片是否齊了） */
+function syncStateOf(photos) {
+  var n = photoPendingCount(photos);
+  return n ? ('照片未齊（缺' + n + '張）') : '已同步';
+}
+
 /** 照片項目清單 → 逗號分隔的檔名字串（項目可能是字串或 {name, fileId} 物件） */
 function photoNamesOf(list) {
   return (list || []).map(function (e) {
@@ -1174,19 +1216,22 @@ function recordToRow(sh, rec) {
     // 紙本照片存檔名清單。前端若送來 {name, fileId} 物件（編輯既有紀錄時會這樣），
     // 直接 join 會寫成 "[object Object]" 把整欄寫爛，所以在這裡也取一次檔名。
     '照片JSON': JSON.stringify(rec.photos || {}), '紙本照片': photoNamesOf(rec.paperPhotos),
-    '照片資料夾': rec.folderUrl || '', '同步狀態': '已同步',
+    '照片資料夾': rec.folderUrl || '', '同步狀態': syncStateOf(rec.photos),
     '建立時間': rec.createdAt, '更新時間': rec.updatedAt,
   };
   return head.map(function (h) { return safeCell_(map[h] != null ? map[h] : ''); });
 }
 
 function rowToRecord(r) {
+  var photos = safeJson(r['照片JSON']);
   return {
+    // 現算而不是讀「同步狀態」欄：舊紀錄那一欄寫死「已同步」，直接沿用會漏掉全部既有問題
+    pendingPhotos: photoPendingCount(photos),
     id: r['紀錄ID'], time: toDateTimeStr(r['點檢時間']), dept: r['部別'], section: r['課別'], empId: r['員編'],
     staffName: r['點檢人員'], storeCode: r['店號'], storeName: r['店名'], storeType: r['店鋪型態'], note: r['備註'],
     month: r['題庫版本'], total: r['合計得分'], grade: r['等第'], staffCount: r['在店店員人數'],
     identity: r['簽名身分別'], detail: safeJson(r['明細JSON']), observation: safeJson(r['觀察JSON']),
-    photos: safeJson(r['照片JSON']), paperPhotos: String(r['紙本照片'] || '').split(',').filter(Boolean),
+    photos: photos, paperPhotos: String(r['紙本照片'] || '').split(',').filter(Boolean),
     // 建立/更新時間必須轉成台北時間字串：Sheet 會把它存成 Date 型別，
     // 直接回傳會被序列化成 UTC 的 ISO 格式（2026-08-10T07:34:00.000Z），報表的時間戳記就會差8小時
     folderUrl: r['照片資料夾'], createdAt: toDateTimeStr(r['建立時間']), updatedAt: toDateTimeStr(r['更新時間']),

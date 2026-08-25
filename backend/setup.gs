@@ -317,7 +317,8 @@ function repairPhotoLinks(month, doWrite) {
   var photoCol = head.indexOf('照片JSON');
   var idCol = head.indexOf('紀錄ID');
   var storeCol = head.indexOf('店名');
-  var paperCol = head.indexOf('紙本照片');   // 編輯時曾被寫成 [object Object]，可從照片JSON還原
+  var paperCol = head.indexOf('紙本照片');
+  var syncCol = head.indexOf('同步狀態');   // 補齊後要把「照片未齊」改回「已同步」   // 編輯時曾被寫成 [object Object]，可從照片JSON還原
   if (photoCol < 0) { Logger.log('找不到「照片JSON」欄'); return { error: '找不到欄位' }; }
 
   var folderCache = {};
@@ -365,6 +366,7 @@ function repairPhotoLinks(month, doWrite) {
       touchedRows++;
       detail.push('第' + (i + 1) + '列 ' + (storeCol >= 0 ? data[i][storeCol] : '') + '（' + (idCol >= 0 ? data[i][idCol] : '') + '）→ 補上連結');
       if (doWrite === true) sh.getRange(i + 1, photoCol + 1).setValue(JSON.stringify(obj));
+      if (doWrite === true && syncCol >= 0) sh.getRange(i + 1, syncCol + 1).setValue(syncStateOf(obj));
     }
     // 紙本照片欄若被寫成 [object Object]，用照片JSON 裡的檔名還原（報表不吃這欄，但重新編輯時會用到）
     if (paperCol >= 0 && String(data[i][paperCol] || '').indexOf('[object Object]') >= 0) {
