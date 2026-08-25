@@ -25,7 +25,7 @@
 
   <script type="text/jsx" id="appCode">
     const { useState, useMemo, useEffect, useRef } = React;
-    const APP_VERSION = '20260825-2130'; // 每次部署更新，用來確認瀏覽器跑的是哪一版
+    const APP_VERSION = '20260825-2230'; // 每次部署更新，用來確認瀏覽器跑的是哪一版
     // 這一版前端「至少」需要的後端版本。前後端是各自演進的，版本號本來就不會相等
     // （只改前端時後端不動，反之亦然），所以不能用「兩者相等」當健康指標 ——
     // 要比的是「線上後端有沒有舊到缺少本前端需要的 API」。
@@ -1242,11 +1242,26 @@ ${nm}
        */
       const setTimePart = (which, v) => {
         const d = basic.time.slice(0, 10);
-        if (!v) { setBasic({ ...basic, time: d }); return; }   // 選回「--時 / --分」＝清掉時間，回到必填未填狀態
+        if (!v) { setBasic({ ...basic, time: d }); return; }   // 清掉＝回到必填未填狀態
         const cur = basic.time.length > 10 ? basic.time.slice(11, 16) : '';
         const h = which === 'h' ? v : (cur.slice(0, 2) || '00');
         const m = which === 'm' ? v : (cur.slice(3, 5) || '00');
         setBasic({ ...basic, time: d + 'T' + h + ':' + m });
+      };
+      // 時/分可以直接打數字（datalist 同時提供下拉）。打字途中會出現「1」這種還沒補零的
+      // 中間狀態，所以顯示值先用暫存的原字串，離開欄位才補零 —— 否則打「16」的第一下就會
+      // 被補成「01」，第二下變成「016」而打不出想要的時間。
+      const [timeRaw, setTimeRaw] = useState(null);   // { which, text }；只在打字期間存在
+      const timeShown = (which) => {
+        if (timeRaw && timeRaw.which === which) return timeRaw.text;
+        return which === 'h' ? basic.time.slice(11, 13) : basic.time.slice(14, 16);
+      };
+      const onTimeText = (which, raw) => {
+        const text = String(raw).replace(/\D/g, '').slice(0, 2);
+        const max = which === 'h' ? 23 : 59;
+        if (text !== '' && Number(text) > max) return;         // 超出範圍就不接受這一鍵
+        setTimeRaw({ which, text });
+        setTimePart(which, text === '' ? '' : pad2(Number(text)));
       };
       const [showDoneStores, setShowDoneStores] = useState(false);
       // 店鋪挑選清單：標記已點檢（不可重複點檢）、依搜尋字串過濾。
@@ -1588,10 +1603,20 @@ ${nm}
               .catch(e => alert('紀錄已更新，但刪除舊照片失敗：' + e.message + '。照片仍在 Drive，可再編輯一次重試。'));
           }
           if (!isEdit) setInspectedCodes(prev => ({ ...prev, [normCode(storeCode)]: true }));
-          // 清掉店鋪選擇：這家店已經變成「已點檢」，留著只會被自己的重複點檢警告攔下來。
-          // 部別/課別/點檢人員保留 —— 同一個人接著點下一家店。
-          setBasic(b => ({ ...b, storeCode: '', customStore: '', customInfo: null, storeType: '', noPhotoReason: '', noPhotoOther: '' }));
+          // 為下一家店重設基本資料：
+          //   店鋪與拍照類型清掉（這家已變成「已點檢」，留著只會被自己的警告攔下來）
+          //   時間只保留日期、清掉時分 —— 一整天連續點好幾家時日期不必重選，但時分一定要
+          //   重新填。留著上一家的時分是實際的資料錯誤風險（點檢時間會寫錯，還會影響梯次判定）。
+          //   部別/課別/點檢人員保留：同一個人接著點下一家。
+          setBasic(b => ({
+            ...b, time: b.time.slice(0, 10),
+            storeCode: '', customStore: '', customInfo: null, storeType: '', noPhotoReason: '', noPhotoOther: '',
+          }));
+          setTimeRaw(null);
           resetWork(); setTab('records'); loadRecords();
+          // 已點檢清單要向後端重查，不能只靠上面那行本機樂觀更新 ——
+          // 同一時間別人也在送出，只加自己這一筆的話，同事剛點完的店在這台裝置上仍是可選的。
+          loadInspected(workMonth);
           // 照片還沒傳完就放人走，是「報表沒有照片連結」的唯一成因 —— 照片只存在那一台裝置上，
           // 人離開、裝置失聯就再也兌現不了。所以送出後改成擋在上傳進度畫面，傳完才放行。
           if (queue.length) {
@@ -1865,7 +1890,11 @@ ${nm}
                   後端 {gasVer || '—'}
                   {gasVer && gasVer < NEEDS_GAS && <span className="ml-1">⚠ 需 {NEEDS_GAS} 以上</span>}
                 </span>
-                <button onClick={() => { setLoading(true); reloadBoot(workMonth).catch(e => setBootWarn('連線不穩，目前顯示上次載入的資料（' + (e.message || '載入失敗') + '）')).finally(() => setLoading(false)); }} className="underline hover:text-slate-600">重新載入</button>
+                {/* 店鋪名單、人員與「本月已點檢」都只在開 App 時載入一次；
+                    主管中途重新匯入名單、或同事剛點完別的店時，要有辦法手動更新 */}
+                <button title="重新向後端取店鋪名單、人員與「本月已點檢」清單"
+                  onClick={() => { setLoading(true); reloadBoot(workMonth).catch(e => setBootWarn('連線不穩，目前顯示上次載入的資料（' + (e.message || '載入失敗') + '）')).finally(() => setLoading(false)); loadInspected(workMonth); }}
+                  className="underline hover:text-slate-600">重新載入</button>
               </div>
             )}
             {/* 送出後的上傳進度：照片沒進雲端硬碟就不放人走（唯一的出口要留下軌跡） */}
@@ -1979,18 +2008,16 @@ ${nm}
                       <input type="date" value={basic.time.slice(0, 10)}
                         onChange={e => setBasic({ ...basic, time: e.target.value + (basic.time.slice(10, 16) || '') })}
                         className="flex-1 px-3 py-2 border border-slate-300 rounded-lg" />
-                      {/* 時、分改為下拉：手機上的 time 輸入各家鍵盤行為不一，選單比較不會打錯 */}
-                      <select value={basic.time.slice(11, 13)} onChange={e => setTimePart('h', e.target.value)}
-                        className={"px-2 py-2 border rounded-lg " + (basic.time.length > 10 ? "border-slate-300" : "border-red-300 bg-red-50")}>
-                        <option value="">--時</option>
-                        {HOURS.map(h => <option key={h} value={h}>{h}時</option>)}
-                      </select>
+                      {/* 時、分：datalist 提供下拉，同時允許直接打數字（手機用數字鍵盤） */}
+                      <input list="sqc-hours" value={timeShown('h')} inputMode="numeric" placeholder="時" aria-label="時"
+                        onChange={e => onTimeText('h', e.target.value)} onBlur={() => setTimeRaw(null)}
+                        className={"w-16 px-2 py-2 border rounded-lg text-center tabular-nums " + (basic.time.length > 10 ? "border-slate-300" : "border-red-300 bg-red-50")} />
+                      <datalist id="sqc-hours">{HOURS.map(h => <option key={h} value={h} />)}</datalist>
                       <span className="text-slate-400">:</span>
-                      <select value={basic.time.slice(14, 16)} onChange={e => setTimePart('m', e.target.value)}
-                        className={"px-2 py-2 border rounded-lg " + (basic.time.length > 10 ? "border-slate-300" : "border-red-300 bg-red-50")}>
-                        <option value="">--分</option>
-                        {MINUTES.map(m => <option key={m} value={m}>{m}分</option>)}
-                      </select>
+                      <input list="sqc-minutes" value={timeShown('m')} inputMode="numeric" placeholder="分" aria-label="分"
+                        onChange={e => onTimeText('m', e.target.value)} onBlur={() => setTimeRaw(null)}
+                        className={"w-16 px-2 py-2 border rounded-lg text-center tabular-nums " + (basic.time.length > 10 ? "border-slate-300" : "border-red-300 bg-red-50")} />
+                      <datalist id="sqc-minutes">{MINUTES.map(m => <option key={m} value={m} />)}</datalist>
                     </div>
                     {basic.time.length <= 10 && <div className="text-xs text-red-500 mt-1">請填寫點檢時間（必填）</div>}</div>
                   <div><label className="block text-xs text-slate-500 mb-1">部別</label>

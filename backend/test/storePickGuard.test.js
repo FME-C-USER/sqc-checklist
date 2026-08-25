@@ -46,10 +46,18 @@ assertEqual(APP.includes("setBasic(b => ({ ...b, storeCode: '', customStore: '',
   '真的要把選擇清掉，不能只是提示');
 assertEqual(APP.includes('請到「查詢紀錄」找到它按「編輯」'), true, '要指出正確的做法');
 
-// ===== 4. 送出成功後清掉店鋪選擇 =====
-//   否則剛送出的店馬上變成「已點檢」，會被自己的警告攔下來
-assertEqual(/setBasic\(b => \(\{ \.\.\.b, storeCode: '', customStore: '', customInfo: null, storeType: ''/.test(APP), true,
-  '送出後清掉店鋪與拍照類型（部別/課別/點檢人員保留，接著點下一家）');
+// ===== 4. 送出成功後為下一家店重設基本資料 =====
+assertEqual(/\.\.\.b, time: b\.time\.slice\(0, 10\),\s*\n\s*storeCode: '', customStore: '', customInfo: null, storeType: ''/.test(APP), true,
+  '送出後清掉店鋪與拍照類型，時間只留日期（時分必須重填，否則會沿用上一家的時間）');
+assertEqual(/setBasic\(b => \(\{[\s\S]{0,200}\}\)\);\s*\n\s*setTimeRaw\(null\);/.test(APP), true,
+  '打字暫存也要清掉，否則下一家會顯示上一家的時分');
+assertEqual(APP.includes('dept:') && !/\.\.\.b, time: b\.time\.slice\(0, 10\),[\s\S]{0,200}(dept|section|staffId): ''/.test(APP), true,
+  '部別/課別/點檢人員不可清掉：同一個人接著點下一家店');
+// 已點檢清單要向後端重查（別人同時送出的店，本機樂觀更新看不到）
+assertEqual(/loadRecords\(\);\s*\n(\s*\/\/[^\n]*\n)*\s*loadInspected\(workMonth\);/.test(APP), true,
+  '送出後要重查已點檢清單，不能只靠本機樂觀更新');
+assertEqual(APP.includes('重新向後端取店鋪名單、人員與「本月已點檢」清單'), true,
+  '要有隨時可按的「重新載入」：名單與人員只在開 App 時載入一次');
 
 // ===== 5. 點檢時間的時／分下拉 =====
 assertEqual(/const HOURS = Array\.from\(\{ length: 24 \}/.test(APP), true, '時為 00~23');
@@ -76,6 +84,41 @@ assertEqual(sb.basic.time, '2026-08-25T00:05', '只選分：時先給 00');
 // 送出時的必填檢查是看長度 > 10，上面每個結果都要能被它正確判斷
 assertEqual('2026-08-25'.length <= 10, true, '沒選時間時長度為 10 → 會被必填檢查擋下');
 assertEqual('2026-08-25T16:27'.length > 10, true, '選了時間就通過必填檢查');
+
+// ===== 5b. 直接打數字：datalist 給下拉，input 允許輸入 =====
+assertEqual(APP.includes('<datalist id="sqc-hours">') && APP.includes('<datalist id="sqc-minutes">'), true,
+  '時/分要用 datalist（同時提供下拉與自行輸入）');
+assertEqual((APP.match(/inputMode="numeric"/g) || []).length >= 2, true, '手機要跳數字鍵盤');
+const t = /const onTimeText = \(which, raw\) => \{[\s\S]*?\n      \};/.exec(APP);
+const sh = /const timeShown = \(which\) => \{[\s\S]*?\n      \};/.exec(APP);
+assertEqual(!!t && !!sh, true, '應能找到 onTimeText 與 timeShown');
+const sb3 = { basic: { time: '2026-08-25' }, timeRaw: null, String, Number, pad2: (n) => String(n).padStart(2, '0') };
+sb3.setBasic = (o) => { sb3.basic = o; };
+sb3.setTimeRaw = (o) => { sb3.timeRaw = o; };
+vm.createContext(sb3);
+vm.runInContext(m[0] + '\n' + t[0] + '\n' + sh[0] + '; this.api = { onTimeText, timeShown };', sb3);
+const { onTimeText, timeShown } = sb3.api;
+// 逐鍵輸入「16」：第一下不可以被補零成 01，否則第二下會變成 016 而打不出來
+onTimeText('h', '1');
+assertEqual([timeShown('h'), sb3.basic.time], ['1', '2026-08-25T01:00'], '打第一個字時顯示原字串（時間先暫定 01）');
+onTimeText('h', '16');
+assertEqual([timeShown('h'), sb3.basic.time], ['16', '2026-08-25T16:00'], '打完第二個字才是想要的 16 時');
+sb3.setTimeRaw(null);   // 離開欄位
+assertEqual(timeShown('h'), '16', '離開欄位後顯示補零後的值');
+onTimeText('m', '7');
+assertEqual(sb3.basic.time, '2026-08-25T16:07', '分只打一位要補零成 07');
+sb3.setTimeRaw(null);
+assertEqual(timeShown('m'), '07', '顯示 07');
+// 超出範圍的一鍵要被擋掉，不可讓時間變成 25 時
+const before = sb3.basic.time;
+onTimeText('h', '25');
+assertEqual(sb3.basic.time, before, '25 時不可被接受（時上限 23）');
+onTimeText('m', '60');
+assertEqual(sb3.basic.time, before, '60 分不可被接受（分上限 59）');
+onTimeText('h', 'a9');
+assertEqual(sb3.basic.time, '2026-08-25T09:07', '非數字要被濾掉，只留數字');
+onTimeText('h', '');
+assertEqual(sb3.basic.time, '2026-08-25', '清空＝回到必填未填狀態');
 
 // ===== 6. 查詢紀錄與彙總專區不再有「結果」欄，不及格分數改紅字 =====
 assertEqual(APP.includes('<th>結果</th>'), false, '兩個表格都不再有「結果」欄');
