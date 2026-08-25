@@ -25,7 +25,7 @@
 
   <script type="text/jsx" id="appCode">
     const { useState, useMemo, useEffect, useRef } = React;
-    const APP_VERSION = '20260825-1930'; // 每次部署更新，用來確認瀏覽器跑的是哪一版
+    const APP_VERSION = '20260825-2130'; // 每次部署更新，用來確認瀏覽器跑的是哪一版
     // 這一版前端「至少」需要的後端版本。前後端是各自演進的，版本號本來就不會相等
     // （只改前端時後端不動，反之亦然），所以不能用「兩者相等」當健康指標 ——
     // 要比的是「線上後端有沒有舊到缺少本前端需要的 API」。
@@ -238,6 +238,10 @@
     };
     const IDENTITIES = ['店長', '副店', '正職', 'PT'];
     const PASS_SCORE = 85;
+    // 點檢時間的時/分下拉選項
+    const pad2 = (n) => String(n).padStart(2, '0');
+    const HOURS = Array.from({ length: 24 }, (_, i) => pad2(i));
+    const MINUTES = Array.from({ length: 60 }, (_, i) => pad2(i));
 
     // 報表用的觀察題定義備援：該月「觀察題」活頁未匯入時後端會回空陣列，
     // 但 App 點檢時是用 DEFAULT_OBS 進行(照片資料夾也用這些名稱)，報表必須用同一份定義才對得上
@@ -1073,6 +1077,8 @@
       // ---- 開場資料（依 workMonth 由後端載入；載入前為空）----
       const [boot, setBoot] = useState({ checklist: buildChecklist([], MONTH), stores: [], staffs: [], depts: [] });
       const [inspectedCodes, setInspectedCodes] = useState({}); // 當月已有點檢紀錄的店號
+      // loaded＝已確認過（可以放心讓人選店）；err＝這次查詢失敗（防重複機制目前是失效的）
+      const [inspectedState, setInspectedState] = useState({ loaded: false, err: '' });
       const [custResults, setCustResults] = useState([]);
       const [loading, setLoading] = useState(CONFIGURED);
       const [bootErr, setBootErr] = useState('');
@@ -1129,12 +1135,23 @@
         setGasVer(b.gasVersion || '(舊版後端)');
         return b;
       }); };
+      /**
+       * 載入「本月已點檢的店號」。
+       * 這支的狀態必須外顯，因為它同時是防重複點檢的唯一依據：
+       *   1. 還沒回來之前，店鋪名單不可以看起來像是可選 —— 店鋪名單走 localStorage 快取、
+       *      開 App 就立刻畫出來，而這支要等一趟後端往返，中間那幾秒每家店都會顯示成沒點過。
+       *      2026-08-25 現場就是這樣誤選了昨天已點檢的店，填完整份表才在送出時被擋下。
+       *   2. 失敗時不可以靜音 —— 原本 catch 是空的，只要這一次查詢失敗（權杖過期、
+       *      Google 轉送層不穩），整個 session 的防重複機制就靜靜失效，畫面上完全看不出來。
+       */
       const loadInspected = (m) => {
-        if (!CONFIGURED) return Promise.resolve();
+        if (!CONFIGURED) { setInspectedState({ loaded: true, err: '' }); return Promise.resolve(); }
+        setInspectedState({ loaded: false, err: '' });
         return SqcApi.queryRecords(m || workMonth, {}).then(r => {
           const map = {}; (r.records || []).forEach(x => { map[normCode(x.storeCode)] = true; });
           setInspectedCodes(map);
-        }).catch(() => { });
+          setInspectedState({ loaded: true, err: '' });
+        }).catch(e => setInspectedState({ loaded: false, err: e.message || '查詢失敗' }));
       };
       useEffect(() => {
         if (!CONFIGURED) return;
@@ -1218,6 +1235,19 @@ ${nm}
       // （ReferenceError: Cannot access 'editingRecordId' before initialization）。
       const sectionStores = STORE_ROSTER.filter(s => !basic.section || s.section === basic.section);
       const [storeQuery, setStoreQuery] = useState('');
+      /**
+       * 改時或改分。basic.time 仍是單一字串（'YYYY-MM-DD' 或 'YYYY-MM-DDTHH:mm'），
+       * 兩個選單都必須有值才算填了時間 —— 只選了「時」就湊一個 00 分會變成沒選也算填。
+       * 所以另一半還空著時，先給它 00 當預設，使用者一定看得到並可再改。
+       */
+      const setTimePart = (which, v) => {
+        const d = basic.time.slice(0, 10);
+        if (!v) { setBasic({ ...basic, time: d }); return; }   // 選回「--時 / --分」＝清掉時間，回到必填未填狀態
+        const cur = basic.time.length > 10 ? basic.time.slice(11, 16) : '';
+        const h = which === 'h' ? v : (cur.slice(0, 2) || '00');
+        const m = which === 'm' ? v : (cur.slice(3, 5) || '00');
+        setBasic({ ...basic, time: d + 'T' + h + ':' + m });
+      };
       const [showDoneStores, setShowDoneStores] = useState(false);
       // 店鋪挑選清單：標記已點檢（不可重複點檢）、依搜尋字串過濾。
       // 「已完成」數量算的是整個課別，不受搜尋與顯示開關影響，才能當作進度看。
@@ -1232,6 +1262,24 @@ ${nm}
           .filter(s => !q || String(s.code).toLowerCase().includes(q) || String(s.name).toLowerCase().includes(q));
         return { total: all.length, doneCount: all.filter(s => s.done).length, list };
       }, [sectionStores, storeQuery, showDoneStores, inspectedCodes, editingRecordId, basic.storeCode]);
+      // 「已點檢」還沒確認完就不可以選店：名單看起來完整、其實每家都顯示成沒點過
+      const pickReady = inspectedState.loaded || !!editingRecordId;
+      /**
+       * 確認結果回來後，若目前選的店其實已經點過，立刻取消選擇並說明原因。
+       * 沒有這一段的話：使用者在空窗期選的店會一路留著（過濾條件刻意保留「目前選中的店」），
+       * 畫面同時顯示「✓ 已點檢」與選中狀態卻不吭聲，一直到按送出才被擋 —— 整份表都白填了。
+       */
+      useEffect(() => {
+        if (!inspectedState.loaded || editingRecordId) return;
+        const code = basic.storeCode;
+        if (!code || code === '__custom') return;
+        if (!inspectedCodes[normCode(code)]) return;
+        const hit = STORE_ROSTER.find(s => String(s.code) === String(code));
+        alert(`「${(hit && hit.name) || code}」本月已有點檢紀錄，已為你取消選擇。\n\n`
+          + '（剛開啟 App 時「已點檢」還在確認中，所以它一度出現在可選名單裡。）\n'
+          + '如需修正該筆，請到「查詢紀錄」找到它按「編輯」。');
+        setBasic(b => ({ ...b, storeCode: '', customStore: '', customInfo: null }));
+      }, [inspectedState.loaded, inspectedCodes]);
       const [removedPhotos, setRemovedPhotos] = useState([]);        // 編輯中被標記刪除的原照片（完成編輯後才移入垃圾桶）
       const [lightbox, setLightbox] = useState(null);                // 照片放大檢視
       useEffect(() => {
@@ -1540,6 +1588,9 @@ ${nm}
               .catch(e => alert('紀錄已更新，但刪除舊照片失敗：' + e.message + '。照片仍在 Drive，可再編輯一次重試。'));
           }
           if (!isEdit) setInspectedCodes(prev => ({ ...prev, [normCode(storeCode)]: true }));
+          // 清掉店鋪選擇：這家店已經變成「已點檢」，留著只會被自己的重複點檢警告攔下來。
+          // 部別/課別/點檢人員保留 —— 同一個人接著點下一家店。
+          setBasic(b => ({ ...b, storeCode: '', customStore: '', customInfo: null, storeType: '', noPhotoReason: '', noPhotoOther: '' }));
           resetWork(); setTab('records'); loadRecords();
           // 照片還沒傳完就放人走，是「報表沒有照片連結」的唯一成因 —— 照片只存在那一台裝置上，
           // 人離開、裝置失聯就再也兌現不了。所以送出後改成擋在上傳進度畫面，傳完才放行。
@@ -1924,13 +1975,22 @@ ${nm}
                   <div><label className="block text-xs text-slate-500 mb-1">點檢時間</label>
                     {/* 日期預設當天、時間預設空白且必填：datetime-local 做不到「只有日期」，故拆成兩個欄位。
                         basic.time 仍是單一來源（'YYYY-MM-DD' 或 'YYYY-MM-DDTHH:mm'），其餘程式不必改。 */}
-                    <div className="flex gap-2">
+                    <div className="flex items-center gap-2">
                       <input type="date" value={basic.time.slice(0, 10)}
                         onChange={e => setBasic({ ...basic, time: e.target.value + (basic.time.slice(10, 16) || '') })}
                         className="flex-1 px-3 py-2 border border-slate-300 rounded-lg" />
-                      <input type="time" value={basic.time.slice(11, 16)} required
-                        onChange={e => setBasic({ ...basic, time: basic.time.slice(0, 10) + (e.target.value ? 'T' + e.target.value : '') })}
-                        className={"w-32 px-3 py-2 border rounded-lg " + (basic.time.length > 10 ? "border-slate-300" : "border-red-300 bg-red-50")} />
+                      {/* 時、分改為下拉：手機上的 time 輸入各家鍵盤行為不一，選單比較不會打錯 */}
+                      <select value={basic.time.slice(11, 13)} onChange={e => setTimePart('h', e.target.value)}
+                        className={"px-2 py-2 border rounded-lg " + (basic.time.length > 10 ? "border-slate-300" : "border-red-300 bg-red-50")}>
+                        <option value="">--時</option>
+                        {HOURS.map(h => <option key={h} value={h}>{h}時</option>)}
+                      </select>
+                      <span className="text-slate-400">:</span>
+                      <select value={basic.time.slice(14, 16)} onChange={e => setTimePart('m', e.target.value)}
+                        className={"px-2 py-2 border rounded-lg " + (basic.time.length > 10 ? "border-slate-300" : "border-red-300 bg-red-50")}>
+                        <option value="">--分</option>
+                        {MINUTES.map(m => <option key={m} value={m}>{m}分</option>)}
+                      </select>
                     </div>
                     {basic.time.length <= 10 && <div className="text-xs text-red-500 mt-1">請填寫點檢時間（必填）</div>}</div>
                   <div><label className="block text-xs text-slate-500 mb-1">部別</label>
@@ -1950,7 +2010,7 @@ ${nm}
                   <div className="border border-emerald-200 rounded-xl bg-emerald-50/40 overflow-hidden">
                     <div className="flex flex-wrap items-center gap-2 px-3 py-2 border-b border-emerald-100">
                       <span className="text-sm font-bold text-emerald-800 whitespace-nowrap">
-                        共 {storePick.total} 間 · 已完成 {storePick.doneCount}
+                        共 {storePick.total} 間 · {inspectedState.err ? <span className="text-red-600">已點檢確認失敗</span> : pickReady ? <span>已完成 {storePick.doneCount}</span> : <span className="text-amber-600">確認已點檢中…</span>}
                       </span>
                       <input value={storeQuery} onChange={e => setStoreQuery(e.target.value)} placeholder="搜尋店號或店名"
                         className="flex-1 min-w-[8rem] px-3 py-1.5 border border-slate-300 rounded-full text-sm" />
@@ -1959,13 +2019,26 @@ ${nm}
                         顯示已完成
                       </label>
                     </div>
+                    {/* 「已點檢」還沒確認完（或確認失敗）就不可以選店 —— 名單看起來完整，
+                        其實每家都會顯示成沒點過，2026-08-25 就是這樣誤選了已點檢的店 */}
+                    {!pickReady && !inspectedState.err && (
+                      <div className="px-3 py-2 text-xs bg-amber-50 text-amber-800 border-b border-amber-200">
+                        正在確認本月哪些店已經點檢過，確認完才能選店（避免重複點檢整份表白填）…
+                      </div>
+                    )}
+                    {inspectedState.err && (
+                      <div className="px-3 py-2 text-xs bg-red-50 text-red-700 border-b border-red-200 flex items-center justify-between gap-2">
+                        <span>無法確認本月已點檢的店（{inspectedState.err}）→ 為避免重複點檢，暫時不開放選店。</span>
+                        <button type="button" onClick={() => loadInspected(workMonth)} className="underline whitespace-nowrap">重試</button>
+                      </div>
+                    )}
                     <div className="max-h-72 overflow-y-auto divide-y divide-slate-100 bg-white">
                       {storePick.list.map(s => {
                         const sel = String(basic.storeCode) === String(s.code);
                         return (
-                          <button type="button" key={s.code} disabled={s.done}
+                          <button type="button" key={s.code} disabled={s.done || !pickReady}
                             onClick={() => setBasic({ ...basic, storeCode: s.code, customStore: '', customInfo: null })}
-                            className={"w-full text-left px-3 py-2.5 flex items-center gap-3 " + (s.done ? "bg-slate-50 cursor-not-allowed" : (sel ? "bg-emerald-50" : "hover:bg-emerald-50/60"))}>
+                            className={"w-full text-left px-3 py-2.5 flex items-center gap-3 " + ((s.done || !pickReady) ? "bg-slate-50 cursor-not-allowed" : (sel ? "bg-emerald-50" : "hover:bg-emerald-50/60"))}>
                             <span className={"w-5 h-5 rounded-full border-2 shrink-0 flex items-center justify-center " + (sel ? "border-emerald-600 bg-emerald-600" : "border-emerald-300")}>
                               {sel && <span className="w-2 h-2 rounded-full bg-white" />}
                             </span>
@@ -2201,7 +2274,7 @@ ${nm}
                 )}
                 <div className="bg-white rounded-xl shadow-sm overflow-hidden">
                   <table className="w-full text-sm">
-                    <thead><tr className="text-left text-slate-500 border-b bg-slate-50"><th className="py-2 px-3">日期</th><th>店鋪</th><th>課別</th><th>點檢人員</th><th>得分</th><th>結果</th><th className="px-3">操作</th></tr></thead>
+                    <thead><tr className="text-left text-slate-500 border-b bg-slate-50"><th className="py-2 px-3">日期</th><th>店鋪</th><th>課別</th><th>點檢人員</th><th>得分</th><th className="px-3">操作</th></tr></thead>
                     <tbody>
                       {filtered.map(r => (
                         <tr key={r.id} className="border-b border-slate-100">
@@ -2211,11 +2284,11 @@ ${nm}
                             {r.pendingPhotos > 0 && <span className="ml-2 text-[10px] bg-red-100 text-red-700 border border-red-300 px-1.5 py-0.5 rounded whitespace-nowrap" title="照片還沒上傳完成，報表點不到這些照片">📷 缺 {r.pendingPhotos} 張</span>}
                           </td>
                           <td className="text-slate-500">{r.section}</td><td className="text-slate-500">{r.staff}</td>
-                          <td className="font-bold">{r.total}</td><td><span className={"text-xs px-2 py-0.5 rounded " + gradeOf(r.total).bg}>{r.grade}</span></td>
+                          <td className={"font-bold " + (r.total < PASS_SCORE ? "text-red-600" : "")}>{r.total}</td>
                           <td className="px-3 whitespace-nowrap"><button onClick={() => openEdit(r)} className="text-xs text-blue-600 mr-2">編輯</button><button onClick={() => delRecord(r.id, r.version, r.time)} className="text-xs text-red-600">刪除</button></td>
                         </tr>
                       ))}
-                      {filtered.length === 0 && <tr><td colSpan="7" className="py-8 text-center text-slate-400">無符合條件的紀錄</td></tr>}
+                      {filtered.length === 0 && <tr><td colSpan="6" className="py-8 text-center text-slate-400">無符合條件的紀錄</td></tr>}
                     </tbody>
                   </table>
                 </div>
@@ -2257,8 +2330,8 @@ ${nm}
                 </div>
                 <div className="bg-white rounded-xl shadow-sm overflow-hidden">
                   <table className="w-full text-sm">
-                    <thead><tr className="text-left text-slate-500 border-b bg-slate-50"><th className="py-2 px-3">日期</th><th>店鋪</th><th>課別</th><th>點檢人員</th><th>得分</th><th>結果</th></tr></thead>
-                    <tbody>{filtered.map(r => <tr key={r.id} className="border-b border-slate-100"><td className="py-2 px-3 text-slate-500">{r.date}</td><td className="font-medium text-slate-800">{r.store}</td><td className="text-slate-500">{r.section}</td><td className="text-slate-500">{r.staff}</td><td className="font-bold">{r.total}</td><td><span className={"text-xs px-2 py-0.5 rounded " + gradeOf(r.total).bg}>{r.grade}</span></td></tr>)}</tbody>
+                    <thead><tr className="text-left text-slate-500 border-b bg-slate-50"><th className="py-2 px-3">日期</th><th>店鋪</th><th>課別</th><th>點檢人員</th><th>得分</th></tr></thead>
+                    <tbody>{filtered.map(r => <tr key={r.id} className="border-b border-slate-100"><td className="py-2 px-3 text-slate-500">{r.date}</td><td className="font-medium text-slate-800">{r.store}</td><td className="text-slate-500">{r.section}</td><td className="text-slate-500">{r.staff}</td><td className={"font-bold " + (r.total < PASS_SCORE ? "text-red-600" : "")}>{r.total}</td></tr>)}</tbody>
                   </table>
                 </div>
               </div>
