@@ -15,7 +15,20 @@
   <script src="js/db.js"></script>
   <script src="js/uploader.js"></script>
   <script src="js/billing.js"></script>
-  <style>body { font-family: "Noto Sans TC", system-ui, "Microsoft JhengHei", sans-serif; }</style>
+  <style>
+    body { font-family: "Noto Sans TC", system-ui, "Microsoft JhengHei", sans-serif; }
+    /* 點檢時間的時/分：骨子裡是可輸入的欄位（可打數字、可選 datalist），
+       但補上「時／分」後綴與下拉箭頭，外觀跟原生下拉選單一致。
+       箭頭與後綴不可吃掉點擊，否則點到它們就無法聚焦欄位。 */
+    .sqc-combo { position: relative; display: inline-flex; align-items: center; }
+    .sqc-combo > input { padding-right: 2.2rem; }
+    .sqc-combo > .sqc-unit { position: absolute; right: 1.25rem; font-size: .85rem; color: #64748b; pointer-events: none; }
+    .sqc-combo > .sqc-chev { position: absolute; right: .45rem; width: 0; height: 0;
+      border-left: 4px solid transparent; border-right: 4px solid transparent; border-top: 5px solid #64748b; pointer-events: none; }
+    /* 瀏覽器自帶的清除鈕/下拉鈕會跟自訂箭頭疊在一起 */
+    .sqc-combo > input::-webkit-calendar-picker-indicator { display: none; }
+    .sqc-combo > input::-webkit-search-cancel-button { display: none; }
+  </style>
 </head>
 <body class="bg-slate-100">
   <div id="root"></div>
@@ -25,7 +38,7 @@
 
   <script type="text/jsx" id="appCode">
     const { useState, useMemo, useEffect, useRef } = React;
-    const APP_VERSION = '20260825-2230'; // 每次部署更新，用來確認瀏覽器跑的是哪一版
+    const APP_VERSION = '20260825-2330'; // 每次部署更新，用來確認瀏覽器跑的是哪一版
     // 這一版前端「至少」需要的後端版本。前後端是各自演進的，版本號本來就不會相等
     // （只改前端時後端不動，反之亦然），所以不能用「兩者相等」當健康指標 ——
     // 要比的是「線上後端有沒有舊到缺少本前端需要的 API」。
@@ -2008,16 +2021,23 @@ ${nm}
                       <input type="date" value={basic.time.slice(0, 10)}
                         onChange={e => setBasic({ ...basic, time: e.target.value + (basic.time.slice(10, 16) || '') })}
                         className="flex-1 px-3 py-2 border border-slate-300 rounded-lg" />
-                      {/* 時、分：datalist 提供下拉，同時允許直接打數字（手機用數字鍵盤） */}
-                      <input list="sqc-hours" value={timeShown('h')} inputMode="numeric" placeholder="時" aria-label="時"
-                        onChange={e => onTimeText('h', e.target.value)} onBlur={() => setTimeRaw(null)}
-                        className={"w-16 px-2 py-2 border rounded-lg text-center tabular-nums " + (basic.time.length > 10 ? "border-slate-300" : "border-red-300 bg-red-50")} />
-                      <datalist id="sqc-hours">{HOURS.map(h => <option key={h} value={h} />)}</datalist>
+                      {/* 時、分：看起來是下拉選單（後綴＋箭頭），實際是可輸入欄位 ——
+                          點箭頭出現 datalist 清單（第一列空白＝清掉時間），也可以直接打數字 */}
+                      <span className="sqc-combo">
+                        <input list="sqc-hours" value={timeShown('h')} inputMode="numeric" aria-label="時"
+                          onChange={e => onTimeText('h', e.target.value)} onBlur={() => setTimeRaw(null)}
+                          className={"w-[5.5rem] pl-2.5 py-2 border rounded-lg tabular-nums " + (basic.time.length > 10 ? "border-slate-300" : "border-red-300 bg-red-50")} />
+                        <span className="sqc-unit">時</span><span className="sqc-chev" />
+                      </span>
+                      <datalist id="sqc-hours"><option value="" />{HOURS.map(h => <option key={h} value={h} />)}</datalist>
                       <span className="text-slate-400">:</span>
-                      <input list="sqc-minutes" value={timeShown('m')} inputMode="numeric" placeholder="分" aria-label="分"
-                        onChange={e => onTimeText('m', e.target.value)} onBlur={() => setTimeRaw(null)}
-                        className={"w-16 px-2 py-2 border rounded-lg text-center tabular-nums " + (basic.time.length > 10 ? "border-slate-300" : "border-red-300 bg-red-50")} />
-                      <datalist id="sqc-minutes">{MINUTES.map(m => <option key={m} value={m} />)}</datalist>
+                      <span className="sqc-combo">
+                        <input list="sqc-minutes" value={timeShown('m')} inputMode="numeric" aria-label="分"
+                          onChange={e => onTimeText('m', e.target.value)} onBlur={() => setTimeRaw(null)}
+                          className={"w-[5.5rem] pl-2.5 py-2 border rounded-lg tabular-nums " + (basic.time.length > 10 ? "border-slate-300" : "border-red-300 bg-red-50")} />
+                        <span className="sqc-unit">分</span><span className="sqc-chev" />
+                      </span>
+                      <datalist id="sqc-minutes"><option value="" />{MINUTES.map(m => <option key={m} value={m} />)}</datalist>
                     </div>
                     {basic.time.length <= 10 && <div className="text-xs text-red-500 mt-1">請填寫點檢時間（必填）</div>}</div>
                   <div><label className="block text-xs text-slate-500 mb-1">部別</label>

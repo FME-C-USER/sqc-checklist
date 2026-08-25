@@ -85,10 +85,22 @@ assertEqual(sb.basic.time, '2026-08-25T00:05', '只選分：時先給 00');
 assertEqual('2026-08-25'.length <= 10, true, '沒選時間時長度為 10 → 會被必填檢查擋下');
 assertEqual('2026-08-25T16:27'.length > 10, true, '選了時間就通過必填檢查');
 
-// ===== 5b. 直接打數字：datalist 給下拉，input 允許輸入 =====
+// ===== 5b. 下拉的外觀 ＋ 可打字（使用者 2026-08-25 在四案預覽中選 D）=====
 assertEqual(APP.includes('<datalist id="sqc-hours">') && APP.includes('<datalist id="sqc-minutes">'), true,
   '時/分要用 datalist（同時提供下拉與自行輸入）');
 assertEqual((APP.match(/inputMode="numeric"/g) || []).length >= 2, true, '手機要跳數字鍵盤');
+// 外觀要像下拉：「時／分」後綴＋箭頭，包在 .sqc-combo 裡
+assertEqual((APP.match(/<span className="sqc-combo">/g) || []).length, 2, '時與分各包一層 sqc-combo');
+assertEqual(APP.includes('<span className="sqc-unit">時</span><span className="sqc-chev" />'), true, '時要有單位後綴與箭頭');
+assertEqual(APP.includes('<span className="sqc-unit">分</span><span className="sqc-chev" />'), true, '分要有單位後綴與箭頭');
+assertEqual(/\.sqc-unit \{[^}]*pointer-events: none/.test(APP) && /\.sqc-chev \{[^}]*pointer-events: none/.test(APP), true,
+  '後綴與箭頭不可吃掉點擊，否則點到它們就無法聚焦欄位');
+// 清單第一列是空白＝可以把時間清掉（使用者要的「空白欄」）
+assertEqual(APP.includes('<datalist id="sqc-hours"><option value="" />'), true, '時的清單第一列是空白');
+assertEqual(APP.includes('<datalist id="sqc-minutes"><option value="" />'), true, '分的清單第一列是空白');
+// 欄位寬度：後綴與箭頭佔掉右邊 2.2rem，寬度不足會把兩位數字裁掉（實測 4.6rem 只看得到「1」）
+assertEqual((APP.match(/w-\[5\.5rem\] pl-2\.5 py-2 border rounded-lg tabular-nums/g) || []).length, 2,
+  '欄位寬度要留得夠，否則「16」會被裁成「1」');
 const t = /const onTimeText = \(which, raw\) => \{[\s\S]*?\n      \};/.exec(APP);
 const sh = /const timeShown = \(which\) => \{[\s\S]*?\n      \};/.exec(APP);
 assertEqual(!!t && !!sh, true, '應能找到 onTimeText 與 timeShown');
