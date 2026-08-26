@@ -20,6 +20,9 @@ function assertEqual(actual, expected, label) {
 }
 
 const { ctx } = loadGasFile(GS_PATH);
+// logEvent 有每小時次數限制，需要 CacheService
+const _cache = {};
+ctx.CacheService = { getScriptCache: () => ({ put: (k, v) => { _cache[k] = String(v); }, get: (k) => (k in _cache ? _cache[k] : null), remove: (k) => { delete _cache[k]; } }) };
 ctx.ensureMonth('11508');
 
 // ===== 1. 計算未齊張數 =====
@@ -77,6 +80,16 @@ assertEqual(ctx.logEvent('anythingElse', 'x', '測試員').ok, false,
 const log = ctx.getChangeLog(10).rows;
 assertEqual(log.some(r => r.action === '照片未傳完即離開'), true, '離開的決定要留在異動紀錄裡');
 assertEqual(log.some(r => r.action === 'anythingElse'), false, '被拒絕的事件不可寫入');
+// 這是前端可任意呼叫的寫入點，沒有上限就能把異動紀錄淹掉（2026-08-26 掃描發現）
+const before = ctx.getChangeLog(500).rows.length;
+for (let i = 0; i < ctx.LOGEVENT_MAX_PER_HOUR + 5; i++) ctx.logEvent('leaveWithPendingPhotos', 'spam' + i, 'flooder');
+const after = ctx.getChangeLog(500).rows.length;
+assertEqual(after - before, ctx.LOGEVENT_MAX_PER_HOUR, '同一使用者每小時最多寫入上限筆數，超過的略過');
+assertEqual(ctx.logEvent('leaveWithPendingPhotos', 'x', 'flooder').ok, false, '超過上限後回 ok:false');
+assertEqual(ctx.logEvent('leaveWithPendingPhotos', 'x', '另一個人').ok, true, '上限只針對該使用者，不影響其他人');
+// 長度要截斷，避免單筆塞進超長內容
+ctx.logEvent('leaveWithPendingPhotos', 'A'.repeat(900), '長度測試');
+assertEqual(ctx.getChangeLog(1).rows[0].note.length, 500, '說明欄截到 500 字');
 
 // ===== 5. 前端：標記、篩選、上傳進度畫面、持久化儲存 =====
 assertEqual(APP.includes('pendingPhotos: Number(x.pendingPhotos) || 0'), true, '查詢結果要帶入未齊張數');
