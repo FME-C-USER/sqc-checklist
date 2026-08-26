@@ -33,7 +33,7 @@
     const { useState, useMemo, useEffect, useRef } = React;
     // 版本字串一律用「台灣時間」的 YYYYMMDD-HHMM。與部署關卡無關 ——
     // 那道關卡看的是資安報告的檔名日期，而 GitHub runner 跑 UTC，兩者不要混在一起。
-    const APP_VERSION = '20260826-1213'; // 每次部署更新，用來確認瀏覽器跑的是哪一版（台灣時間）
+    const APP_VERSION = '20260826-1316'; // 每次部署更新，用來確認瀏覽器跑的是哪一版（台灣時間）
     // 這一版前端「至少」需要的後端版本。前後端是各自演進的，版本號本來就不會相等
     // （只改前端時後端不動，反之亦然），所以不能用「兩者相等」當健康指標 ——
     // 要比的是「線上後端有沒有舊到缺少本前端需要的 API」。
@@ -1166,6 +1166,7 @@
         const t = setTimeout(() => {
           setToast(`✅ ${postSubmit.store}　${postStat.total} 張照片已全部完成`);
           setPostSubmit(null);
+          loadRecords(true);   // 連結已寫回 → 順手刷新清單，「缺 N 張」才不會留在畫面上
         }, 1200);
         return () => clearTimeout(t);
       }, [postDone, postStat && postStat.orphan]);
@@ -1396,15 +1397,22 @@ ${nm}
         return window.SqcApi.onRetry(info => setRetryInfo(info && !info.done ? info : null));
       }, []);
       const busyText = retryInfo ? `連線不穩，自動重試中（第 ${retryInfo.attempt}/${retryInfo.maxAttempts} 次）…` : '';
-      const loadRecords = () => {
+      // 目前畫面上這份清單是用哪組條件查出來的。背景自動刷新要沿用它 ——
+      // 直接讀 filter 會把「使用者改了日期但還沒按查詢」的新條件偷偷套上去。
+      const appliedFilter = useRef(null);
+      const loadRecords = (useApplied) => {
         if (!CONFIGURED) return;
         // 查詢紀錄：所有登入者皆可查全部（不依登入者工號過濾）。
         // 因為名冊多數人未填 AD、登入後取不到工號，用工號過濾會失效或誤擋；
         // 權限差異僅在「維護專區」與報表/請款產出限管理者。
-        const f = { from: filter.from, to: filter.to, section: filter.section };
-        const months = queryMonthsOf(filter.from, filter.to);
-        setQueryLoading(true);
-        Promise.all(months.map(m => SqcApi.queryRecords(m, f).catch(() => ({ records: [] }))))
+        const src = (useApplied && appliedFilter.current) || filter;
+        const f = { from: src.from, to: src.to, section: src.section };
+        appliedFilter.current = f;
+        const months = queryMonthsOf(f.from, f.to);
+        // 背景自動刷新不顯示進度條、失敗也不彈視窗 —— 使用者沒有按查詢，
+        // 跳出「查詢失敗」只會讓人以為自己做錯了什麼。下一次刷新或手動查詢會再試。
+        if (!useApplied) setQueryLoading(true);
+        return Promise.all(months.map(m => SqcApi.queryRecords(m, f).catch(() => ({ records: [] }))))
           .then(results => {
             const all = results.flatMap(r => (r && r.records) || []);
             setRecords(all.map(x => ({
@@ -1412,7 +1420,9 @@ ${nm}
               staff: x.staffName, version: x.month, total: Number(x.total), grade: x.grade,
               pendingPhotos: Number(x.pendingPhotos) || 0, _raw: x,
             })));
-          }).catch(e => alert('查詢失敗：' + e.message)).finally(() => setQueryLoading(false));
+          })
+          .catch(e => { if (!useApplied) alert('查詢失敗：' + e.message); })
+          .finally(() => { if (!useApplied) setQueryLoading(false); });
       };
 
       const total = useMemo(() => {
@@ -1743,6 +1753,27 @@ ${nm}
       const filtered = records.filter(r => (!filter.from || r.date >= filter.from) && (!filter.to || r.date <= filter.to) && (!filter.section || r.section === filter.section)
         && (!onlyPending || r.pendingPhotos > 0));
       const pendingCount = records.filter(r => r.pendingPhotos > 0).length;
+      /**
+       * 照片傳完後，「📷 缺 N 張」要自己消失。
+       * 那個數字是後端從照片JSON 現算的，連結回寫成功的瞬間伺服器就已經是對的，
+       * 但前端手上的清單是上一次查詢的快照 —— 不重查就會一直掛著紅字，
+       * 使用者會以為照片還沒傳上去（現場就是這樣回報的）。
+       * 觸發點選「佇列變少」而不是「佇列歸零」：一次回寫只會讓某一筆的照片轉成
+       * linked 而離開佇列，其他筆可能還在傳，等歸零會等太久。
+       * 沿用上一次查詢的條件（不是當下的 filter），否則使用者改了日期還沒按查詢時，
+       * 背景刷新會把新條件偷偷套上去。
+       */
+      const prevUnfinished = useRef(null);
+      useEffect(() => {
+        const cur = pendingUp.unfinished || 0;
+        const prev = prevUnfinished.current;
+        prevUnfinished.current = cur;
+        if (prev === null || cur >= prev) return;      // 只在變少時才刷新
+        if (!pendingCount) return;                     // 畫面上沒有紅字就不必打擾後端
+        // 稍等一下再查：回寫成功與佇列狀態更新幾乎同時，留點餘裕給後端寫完
+        const t = setTimeout(() => loadRecords(true), 1500);
+        return () => clearTimeout(t);
+      }, [pendingUp.unfinished]);
       // 正式模式：進查詢/彙總頁或改條件時，重新向後端查當月
       // 只在切換進「查詢紀錄/彙總」分頁時自動查一次；改變日期/課別後需按「查詢」才會重新查詢
       useEffect(() => { if (CONFIGURED && (tab === 'records' || tab === 'summary')) loadRecords(); }, [tab]);

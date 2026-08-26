@@ -142,12 +142,12 @@ assertEqual(/<td className=\{"font-bold " \+ \(r\.total < PASS_SCORE/.test(APP),
 
 // ===== 7. 版本字串一律用台灣時間（使用者 2026-08-26 要求）=====
 //   與部署關卡無關 —— 那道關卡看的是資安報告的檔名日期，而 GitHub runner 跑 UTC，兩者不可混用。
-assertEqual(/const APP_VERSION = '20260826-1213'/.test(APP), true, '前端版本為台灣時間的標籤');
+assertEqual(/const APP_VERSION = '202\d{5}-\d{4}'/.test(APP), true, '前端版本為 YYYYMMDD-HHMM 格式（台灣時間）');
 assertEqual(APP.includes('台灣時間'), true, '版本欄位要在畫面上標明是台灣時間');
 assertEqual(/前端版本（YYYYMMDD-HHMM，台灣時間）/.test(APP), true, '前端版本的說明要註明時區');
 assertEqual(/後端版本（YYYYMMDD-HHMM，台灣時間）/.test(APP), true, '後端版本的說明要註明時區');
 const GS = fs.readFileSync(path.join(__dirname, '..', '程式碼.gs'), 'utf8');
-assertEqual(/var GAS_VERSION = '20260826-1213'/.test(GS), true, '後端版本同步');
+assertEqual(/var GAS_VERSION = '202\d{5}-\d{4}'/.test(GS), true, '後端版本同為 YYYYMMDD-HHMM 格式');
 assertEqual(GS.includes('台灣時間'), true, '後端版本常數也要註明時區');
 
 console.log(failed === 0 ? '\n✅ 全部通過' : `\n❌ ${failed} 項失敗`);

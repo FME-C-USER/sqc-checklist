@@ -129,6 +129,25 @@ assertEqual((APP.match(/SqcUploader\.pump\(\{ force: true/g) || []).length >= 3,
 assertEqual(/SqcUploader\.pump\(\{ force: true, recordId: recId \}\);/.test(APP), true,
   '紀錄寫入後端後要立刻踢一次上傳');
 
+// ===== 6b. 照片傳完後「缺 N 張」要自己消失（現場 2026-08-26 回報）=====
+//   那個數字是後端從照片JSON 現算的；回寫連結成功的瞬間伺服器就已經是對的，
+//   但前端手上的清單是上一次查詢的快照，不重查就會一直掛著紅字。
+assertEqual(APP.includes('const prevUnfinished = useRef(null);'), true, '要記住上一次的待處理張數才知道有沒有變少');
+assertEqual(/if \(prev === null \|\| cur >= prev\) return;/.test(APP), true,
+  '只在佇列「變少」時刷新（歸零才刷會等太久：其他筆可能還在傳）');
+assertEqual(/if \(!pendingCount\) return;/.test(APP), true, '畫面上沒有紅字就不必打擾後端');
+assertEqual(/setTimeout\(\(\) => loadRecords\(true\), 1500\)/.test(APP), true, '稍等一下再查，留餘裕給後端寫完');
+// 背景刷新必須沿用上一次查詢的條件，否則使用者改了日期還沒按查詢時會被偷偷換掉
+assertEqual(APP.includes('const appliedFilter = useRef(null);'), true, '要記住這份清單是用哪組條件查的');
+assertEqual(APP.includes('const src = (useApplied && appliedFilter.current) || filter;'), true,
+  '背景刷新用已套用的條件，手動查詢用當下的條件');
+// 背景刷新不可彈視窗、不可閃進度條 —— 使用者沒按查詢，跳「查詢失敗」只會讓人以為自己做錯事
+assertEqual(APP.includes("if (!useApplied) setQueryLoading(true);"), true, '背景刷新不顯示進度條');
+assertEqual(APP.includes("catch(e => { if (!useApplied) alert('查詢失敗：' + e.message); })"), true,
+  '背景刷新失敗不彈視窗');
+// 送出後自動關閉那條路徑也要刷新（原本只有手動按「關閉」才刷）
+assertEqual(/setPostSubmit\(null\);\s*\n\s*loadRecords\(true\);/.test(APP), true, '自動關閉時順手刷新清單');
+
 // ===== 7. 數字的說法不可以誤導 =====
 //   done 的照片檔案已經在雲端硬碟，只差回寫連結；跟 pending 合稱「未完成／待上傳」會讓人以為傳不上去
 assertEqual(APP.includes('待上傳 <b className="text-red-600">'), false, '不可再用「待上傳」稱呼 pending+done');
