@@ -11,15 +11,39 @@
   // Google 的 Web App 轉送層偶發會慢或回 404（實測後端本身都 1~2 秒完成，但回應可能 17 秒才回 404），
   // 且通常下一次就恢復 → 設較短逾時、多retry幾次，並對外通報重試狀態讓畫面不會看起來像卡住
   const TIMEOUT_MS = 12000;
+  /**
+   * 逾時要按動作分。開場的 getBootstrap 要搬全部門市名單（實測 1500+ 家）＋題庫＋觀察題＋
+   * 人員，伺服器端有六次完整活頁讀取，本來就可能十幾秒；用 12 秒的通用逾時等於每次都在
+   * 逾時邊緣，訊號差一點就必然失敗 —— 而失敗後畫面只會說「連線不穩」，數據其實是快取的。
+   * 相反地，輕量的動作（送出、查詢單筆）維持短逾時才能快速跳過偶發的轉送層 404。
+   */
+  const TIMEOUT_BY_ACTION = {
+    getBootstrap: 45000,
+    buildMonthlyReport: 60000,
+    importMaster: 60000,
+    repairPhotoLinks: 60000,
+    getMaster: 30000,
+    queryRecords: 30000,
+  };
   const RETRY_DELAYS = [700, 1500, 3000];
+  /**
+   * 每次嘗試各自的逾時。重的動作不是「一律給 45 秒」——
+   * 那會讓真的失敗時要等 45×4＝三分鐘才看到訊息。
+   * 改成第一次仍用 12 秒（正常回應遠低於此，可快速跳過轉送層偶發的 404），
+   * 第二次才給足時間讓真的比較慢的請求跑完；重的動作只嘗試兩次，總等待與原本相近。
+   */
+  const timeoutsOf = (action) => {
+    const heavy = TIMEOUT_BY_ACTION[action];
+    return heavy ? [TIMEOUT_MS, heavy] : [TIMEOUT_MS, TIMEOUT_MS, TIMEOUT_MS, TIMEOUT_MS];
+  };
   const _retryListeners = new Set();
   const onRetry = (fn) => { _retryListeners.add(fn); return () => _retryListeners.delete(fn); };
   const emitRetry = (info) => _retryListeners.forEach((fn) => { try { fn(info); } catch (e) {} });
 
-  async function attempt(action, payload) {
+  async function attempt(action, payload, ms) {
     let text;
     const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
+    const timer = setTimeout(() => ctrl.abort(), ms);
     try {
       const res = await fetch(window.SQC_CONFIG.GAS_URL, {
         method: 'POST',
@@ -33,7 +57,7 @@
       // fetch 拋錯＝網路層失敗(訊號瞬斷)或逾時被中止，兩者都標記為可重試，不是後端邏輯問題
       const aborted = e && e.name === 'AbortError';
       const err = new Error(aborted
-        ? '伺服器逾時未回應（' + (TIMEOUT_MS / 1000) + ' 秒）'
+        ? '伺服器逾時未回應（' + Math.round(ms / 1000) + ' 秒）'
         : '網路連線中斷，請稍後再試（' + (e && e.message || '') + '）');
       err.transient = true;
       throw err;
@@ -64,19 +88,22 @@
 
   // 網路層失敗 / 逾時 / 非 JSON 回應皆視為暫時性，重試數次(間隔漸增)再放棄
   async function call(action, payload) {
-    const maxAttempts = RETRY_DELAYS.length + 1;
+    const timeouts = timeoutsOf(action);
+    const maxAttempts = timeouts.length;
     let lastErr;
     for (let i = 0; i < maxAttempts; i++) {
       try {
-        const out = await attempt(action, payload);
+        const out = await attempt(action, payload, timeouts[i]);
         if (i > 0) emitRetry({ action, attempt: 0, maxAttempts, done: true }); // 通報已恢復
         return out;
       } catch (e) {
         lastErr = e;
         if (!e.transient) throw e;
-        if (i < RETRY_DELAYS.length) {
+        // 以「還有沒有下一次嘗試」為準，不能用 RETRY_DELAYS 的長度 ——
+        // 重的動作只嘗試兩次，用長度判斷會在最後一次失敗後還多睡一輪
+        if (i + 1 < maxAttempts) {
           emitRetry({ action, attempt: i + 2, maxAttempts, done: false });
-          await sleep(RETRY_DELAYS[i]);
+          await sleep(RETRY_DELAYS[Math.min(i, RETRY_DELAYS.length - 1)]);
         }
       }
     }

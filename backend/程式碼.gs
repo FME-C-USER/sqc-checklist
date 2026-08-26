@@ -10,7 +10,7 @@
 // 後端版本：每次修改本檔就更新，並於前端「資料更新時間」旁顯示。
 // 用途：貼上程式碼後若忘記「部署 → 管理部署作業 → 新版本」，畫面上的後端版本就不會變，
 //       可立即分辨是「沒貼上」「貼了但沒部署」還是「已生效」。
-var GAS_VERSION = '20260826-1213';   // 台灣時間 YYYYMMDD-HHMM
+var GAS_VERSION = '20260826-1455';   // 台灣時間 YYYYMMDD-HHMM
 
 var SPREADSHEET_ID = '1GRZZsZRgakMGENspOxmlx96NfckC8UYOe0ipuNNEoh0';
 var DRIVE_ROOT_ID  = '122nQjldImn5Zh5AUguxZF0YzobThgdc9';
@@ -278,6 +278,9 @@ function findStaffByAd(ad) {
 // ============================================================
 function getBootstrap(month, section) {
   ensureMonth(month); // 開啟某月即自動建齊該月所有活頁
+  // 「點檢人員」只讀一次：原本 staffs 與 distinctDepts() 各讀一次整張活頁，
+  // 而這支是開場的關鍵路徑（前端等它才能用），每一次多餘的整表讀取都直接加在等待時間上。
+  var people = readSheet('點檢人員');
   return {
     month: month,
     gasVersion: GAS_VERSION,   // 供前端顯示，用來確認後端是否已部署到最新版
@@ -286,12 +289,12 @@ function getBootstrap(month, section) {
     observations: getObservations(month),
     stores: getStores(month, section),
     // 點檢人員下拉：只帶「有填部別或課別」的人員（純管理者未填部/課者不列入下拉，但仍可登入）
-    staffs: readSheet('點檢人員').filter(function (r) {
+    staffs: people.filter(function (r) {
       return String(r['部別'] || '').trim() !== '' || String(r['課別'] || '').trim() !== '';
     }).map(function (r) {
       return { empId: r['工號'], name: r['姓名'], dept: r['部別'], section: r['課別'], title: r['職稱'] };
     }),
-    depts: distinctDepts(),
+    depts: distinctDepts(people),
   };
 }
 
@@ -1150,8 +1153,10 @@ function setSetting(key, val) {
   sh.appendRow([key, val]);
 }
 
-function distinctDepts() {
-  var rows = readSheet('點檢人員'); var m = {};
+/** 部課對照。rows 可由呼叫端傳入已讀好的「點檢人員」，避免同一次請求重複讀整張活頁 */
+function distinctDepts(rows) {
+  rows = rows || readSheet('點檢人員');
+  var m = {};
   rows.forEach(function (r) { if (r['部別']) { m[r['部別']] = m[r['部別']] || {}; if (r['課別']) m[r['部別']][r['課別']] = 1; } });
   return Object.keys(m).map(function (d) { return { dept: d, sections: Object.keys(m[d]) }; });
 }

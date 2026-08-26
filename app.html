@@ -33,12 +33,12 @@
     const { useState, useMemo, useEffect, useRef } = React;
     // 版本字串一律用「台灣時間」的 YYYYMMDD-HHMM。與部署關卡無關 ——
     // 那道關卡看的是資安報告的檔名日期，而 GitHub runner 跑 UTC，兩者不要混在一起。
-    const APP_VERSION = '20260826-1316'; // 每次部署更新，用來確認瀏覽器跑的是哪一版（台灣時間）
+    const APP_VERSION = '20260826-1455'; // 每次部署更新，用來確認瀏覽器跑的是哪一版（台灣時間）
     // 這一版前端「至少」需要的後端版本。前後端是各自演進的，版本號本來就不會相等
     // （只改前端時後端不動，反之亦然），所以不能用「兩者相等」當健康指標 ——
     // 要比的是「線上後端有沒有舊到缺少本前端需要的 API」。
     // 規則：改了 程式碼.gs 且前端會用到那個改動時，才把這個值提到該後端版本。
-    const NEEDS_GAS = '20260826-1213';   // 需要：roster 帶出營業課、logEvent 次數限制
+    const NEEDS_GAS = '20260826-1455';   // 需要：roster 帶出營業課、logEvent 次數限制
 
     // 全域錯誤攔截：任何未預期錯誤（含 async 事件處理器的未捕捉 rejection）都要顯示出來，
     // 否則按鈕會「按了沒反應」而完全查不到原因
@@ -1191,6 +1191,19 @@
       };
       // 開場資料快取：Google 轉送層偶發不穩時，用上次成功的資料先讓 App 可用，
       // 避免整頁卡在「載入失敗」，也避免題庫為空導致分數被算成 0
+      /**
+       * 載入失敗的說法要對得上原因。原本一律叫「連線不穩」，等於把四種完全不同的狀況
+       * 混在一起（逾時、Google 轉送層異常、登入逾時、後端版本太舊），使用者只會去檢查
+       * 自己的網路 —— 而實測 2026-08-26 那次的成因是 Google 服務回應過慢，網路沒問題。
+       */
+      const bootFailMsg = (e) => {
+        const raw = (e && e.message) || '載入失敗';
+        const head = /逾時|忙碌|非 JSON/.test(raw) ? 'Google 服務回應過慢（不是你的網路問題）'
+          : /網路連線中斷/.test(raw) ? '網路連線中斷'
+            : /重新部署|未回傳資料/.test(raw) ? '線上後端版本過舊'
+              : '載入失敗';
+        return head + '，目前顯示上次載入的資料（' + raw + '）';
+      };
       const bootCacheKey = (m) => 'sqc_boot_' + m;
       const readBootCache = (m) => { try { const raw = localStorage.getItem(bootCacheKey(m)); return raw ? JSON.parse(raw) : null; } catch (e) { return null; } };
       const writeBootCache = (m, b) => { try { localStorage.setItem(bootCacheKey(m), JSON.stringify({ at: Date.now(), b })); } catch (e) { /* 空間不足就算了 */ } };
@@ -1232,7 +1245,7 @@
         else { setBootAt(null); setLoading(true); }
         reloadBoot(workMonth)
           .catch(e => {
-            if (cached && cached.b) setBootWarn('連線不穩，目前顯示上次載入的資料（' + (e.message || '載入失敗') + '）');
+            if (cached && cached.b) setBootWarn(bootFailMsg(e));
             else setBootErr(e.message || '載入失敗');
           })
           .finally(() => setLoading(false))
@@ -1396,7 +1409,7 @@ ${nm}
         if (!window.SqcApi || !window.SqcApi.onRetry) return; // api.js 未載入時不可讓整頁掛掉
         return window.SqcApi.onRetry(info => setRetryInfo(info && !info.done ? info : null));
       }, []);
-      const busyText = retryInfo ? `連線不穩，自動重試中（第 ${retryInfo.attempt}/${retryInfo.maxAttempts} 次）…` : '';
+      const busyText = retryInfo ? `回應較慢，自動重試中（第 ${retryInfo.attempt}/${retryInfo.maxAttempts} 次）…` : '';
       // 目前畫面上這份清單是用哪組條件查出來的。背景自動刷新要沿用它 ——
       // 直接讀 filter 會把「使用者改了日期但還沒按查詢」的新條件偷偷套上去。
       const appliedFilter = useRef(null);
@@ -2000,17 +2013,22 @@ ${nm}
                 <span className="text-slate-300">|</span>
                 <span title="前端版本（YYYYMMDD-HHMM，台灣時間）。回報問題時請一併提供">前端 {APP_VERSION}</span>
                 <span className="text-slate-300">|</span>
-                <span title={gasVer && gasVer < NEEDS_GAS
-                  ? '線上後端比本前端需要的版本舊（需 ' + NEEDS_GAS + '）：請貼上 程式碼.gs 並「部署→管理部署作業→新版本」'
-                  : '後端版本（YYYYMMDD-HHMM，台灣時間）。前後端各自演進，版本號不需相同；只要不低於 ' + NEEDS_GAS + ' 就是正常'}
-                  className={gasVer && gasVer < NEEDS_GAS ? 'text-amber-600 font-semibold' : ''}>
-                  後端 {gasVer || '—'}
-                  {gasVer && gasVer < NEEDS_GAS && <span className="ml-1">⚠ 需 {NEEDS_GAS} 以上</span>}
+                {/* 載入失敗時整份開場資料是 localStorage 的快取，這個版本號也是 ——
+                    不標示的話會被當成線上的即時值，使用者會以為後端沒貼成功而白忙。 */}
+                <span title={bootWarn
+                  ? '這是「上次成功載入時」看到的後端版本，不是現在線上的版本 —— 因為這次載入失敗，畫面顯示的是快取。請先按「重新載入」成功後再看這個數字。'
+                  : (gasVer && gasVer < NEEDS_GAS
+                    ? '線上後端比本前端需要的版本舊（需 ' + NEEDS_GAS + '）：請貼上 程式碼.gs 並「部署→管理部署作業→新版本」'
+                    : '後端版本（YYYYMMDD-HHMM，台灣時間）。前後端各自演進，版本號不需相同；只要不低於 ' + NEEDS_GAS + ' 就是正常')}
+                  className={bootWarn ? 'text-slate-400' : (gasVer && gasVer < NEEDS_GAS ? 'text-amber-600 font-semibold' : '')}>
+                  後端 {gasVer || '—'}{bootWarn ? '（上次載入時）' : ''}
+                  {/* 載入失敗時 gasVer 是快取值，拿它去比對會叫使用者去貼一份其實已經貼好的後端 */}
+                  {!bootWarn && gasVer && gasVer < NEEDS_GAS && <span className="ml-1">⚠ 需 {NEEDS_GAS} 以上</span>}
                 </span>
                 {/* 店鋪名單、人員與「本月已點檢」都只在開 App 時載入一次；
                     主管中途重新匯入名單、或同事剛點完別的店時，要有辦法手動更新 */}
                 <button title="重新向後端取店鋪名單、人員與「本月已點檢」清單"
-                  onClick={() => { setLoading(true); reloadBoot(workMonth).catch(e => setBootWarn('連線不穩，目前顯示上次載入的資料（' + (e.message || '載入失敗') + '）')).finally(() => setLoading(false)); loadInspected(workMonth); }}
+                  onClick={() => { setLoading(true); reloadBoot(workMonth).catch(e => setBootWarn(bootFailMsg(e))).finally(() => setLoading(false)); loadInspected(workMonth); }}
                   className="underline hover:text-slate-600">重新載入</button>
               </div>
             )}
@@ -2149,7 +2167,7 @@ ${nm}
                 <button onClick={() => setHideMismatch(true)} className="text-amber-500 shrink-0">✕</button>
               </div>
             )}
-            {bootWarn && <div className="bg-amber-50 border border-amber-200 text-amber-700 text-sm rounded-lg px-3 py-2 flex justify-between items-center gap-3"><span>⚠ {bootWarn}</span><span className="flex items-center gap-2 shrink-0"><button onClick={() => { setLoading(true); reloadBoot(workMonth).catch(e => setBootWarn('連線不穩，目前顯示上次載入的資料（' + (e.message || '載入失敗') + '）')).finally(() => setLoading(false)); }} className="text-amber-700 underline">重新載入</button><button onClick={() => setBootWarn('')} className="text-amber-400">✕</button></span></div>}
+            {bootWarn && <div className="bg-amber-50 border border-amber-200 text-amber-700 text-sm rounded-lg px-3 py-2 flex justify-between items-center gap-3"><span>⚠ {bootWarn}</span><span className="flex items-center gap-2 shrink-0"><button onClick={() => { setLoading(true); reloadBoot(workMonth).catch(e => setBootWarn(bootFailMsg(e))).finally(() => setLoading(false)); }} className="text-amber-700 underline">重新載入</button><button onClick={() => setBootWarn('')} className="text-amber-400">✕</button></span></div>}
             {bootErr && <div className="bg-red-50 border border-red-200 text-red-700 text-sm rounded-lg px-3 py-2 flex justify-between items-center gap-3"><span>載入當月資料失敗：{bootErr}（可能連線逾時，請重新登入或稍後再試）</span><span className="flex items-center gap-2 shrink-0"><button onClick={() => { setLoading(true); reloadBoot(workMonth).catch(e => setBootErr(e.message || '載入失敗')).finally(() => setLoading(false)); }} className="text-red-700 underline">重試</button><button onClick={() => setBootErr('')} className="text-red-400">✕</button></span></div>}
             {/* ========== 基本資料 ========== */}
             {tab === 'basic' && (
