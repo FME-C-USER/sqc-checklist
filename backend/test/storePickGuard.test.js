@@ -85,22 +85,23 @@ assertEqual(sb.basic.time, '2026-08-25T00:05', '只選分：時先給 00');
 assertEqual('2026-08-25'.length <= 10, true, '沒選時間時長度為 10 → 會被必填檢查擋下');
 assertEqual('2026-08-25T16:27'.length > 10, true, '選了時間就通過必填檢查');
 
-// ===== 5b. 下拉的外觀 ＋ 可打字（使用者 2026-08-25 在四案預覽中選 D）=====
+// ===== 5b. 可打字的欄位＋datalist 清單（使用者 2026-08-26 改回方案 C）=====
 assertEqual(APP.includes('<datalist id="sqc-hours">') && APP.includes('<datalist id="sqc-minutes">'), true,
   '時/分要用 datalist（同時提供下拉與自行輸入）');
 assertEqual((APP.match(/inputMode="numeric"/g) || []).length >= 2, true, '手機要跳數字鍵盤');
-// 外觀要像下拉：「時／分」後綴＋箭頭，包在 .sqc-combo 裡
-assertEqual((APP.match(/<span className="sqc-combo">/g) || []).length, 2, '時與分各包一層 sqc-combo');
-assertEqual(APP.includes('<span className="sqc-unit">時</span><span className="sqc-chev" />'), true, '時要有單位後綴與箭頭');
-assertEqual(APP.includes('<span className="sqc-unit">分</span><span className="sqc-chev" />'), true, '分要有單位後綴與箭頭');
-assertEqual(/\.sqc-unit \{[^}]*pointer-events: none/.test(APP) && /\.sqc-chev \{[^}]*pointer-events: none/.test(APP), true,
-  '後綴與箭頭不可吃掉點擊，否則點到它們就無法聚焦欄位');
-// 清單第一列是空白＝可以把時間清掉（使用者要的「空白欄」）
+// 使用者 2026-08-26 選定：單純的可輸入欄位（方案 C），不加單位後綴與自畫的箭頭 ——
+// 後綴會佔掉右側寬度，且在 iPhone 上的手感與原生下拉選單不同，反而更容易誤會。
+assertEqual(APP.includes('sqc-combo'), false, '不可再有 sqc-combo（含 CSS 也要一併移除，不留死碼）');
+assertEqual(APP.includes('sqc-unit') || APP.includes('sqc-chev'), false, '不可再有單位後綴與箭頭');
+assertEqual((APP.match(/placeholder="時"/g) || []).length, 1, '時欄位用 placeholder 標示');
+assertEqual((APP.match(/placeholder="分"/g) || []).length, 1, '分欄位用 placeholder 標示');
+// 清單第一列是空白＝可以把時間清掉（使用者要的「空白欄」，方案 C 也保留）
 assertEqual(APP.includes('<datalist id="sqc-hours"><option value="" />'), true, '時的清單第一列是空白');
 assertEqual(APP.includes('<datalist id="sqc-minutes"><option value="" />'), true, '分的清單第一列是空白');
-// 欄位寬度：後綴與箭頭佔掉右邊 2.2rem，寬度不足會把兩位數字裁掉（實測 4.6rem 只看得到「1」）
-assertEqual((APP.match(/w-\[5\.5rem\] pl-2\.5 py-2 border rounded-lg tabular-nums/g) || []).length, 2,
-  '欄位寬度要留得夠，否則「16」會被裁成「1」');
+// 沒有後綴佔位，w-16 的內容區足夠容納兩位數字（實測 D 案的 4.6rem 會把「16」裁成「1」）
+assertEqual((APP.match(/w-16 px-2 py-2 border rounded-lg text-center tabular-nums/g) || []).length, 2,
+  '兩個欄位都用同一組寬度與置中樣式');
+
 const t = /const onTimeText = \(which, raw\) => \{[\s\S]*?\n      \};/.exec(APP);
 const sh = /const timeShown = \(which\) => \{[\s\S]*?\n      \};/.exec(APP);
 assertEqual(!!t && !!sh, true, '應能找到 onTimeText 與 timeShown');
@@ -138,6 +139,16 @@ assertEqual((APP.match(/r\.total < PASS_SCORE \? "text-red-600" : ""/g) || []).l
   '查詢紀錄與彙總專區各一處：不及格分數以粗體紅字呈現');
 assertEqual(APP.includes('colSpan="6"'), true, '查詢紀錄少一欄，空狀態的 colSpan 要跟著改');
 assertEqual(/<td className=\{"font-bold " \+ \(r\.total < PASS_SCORE/.test(APP), true, '分數本來就是粗體，只加紅色');
+
+// ===== 7. 版本字串一律用台灣時間（使用者 2026-08-26 要求）=====
+//   與部署關卡無關 —— 那道關卡看的是資安報告的檔名日期，而 GitHub runner 跑 UTC，兩者不可混用。
+assertEqual(/const APP_VERSION = '20260826-1213'/.test(APP), true, '前端版本為台灣時間的標籤');
+assertEqual(APP.includes('台灣時間'), true, '版本欄位要在畫面上標明是台灣時間');
+assertEqual(/前端版本（YYYYMMDD-HHMM，台灣時間）/.test(APP), true, '前端版本的說明要註明時區');
+assertEqual(/後端版本（YYYYMMDD-HHMM，台灣時間）/.test(APP), true, '後端版本的說明要註明時區');
+const GS = fs.readFileSync(path.join(__dirname, '..', '程式碼.gs'), 'utf8');
+assertEqual(/var GAS_VERSION = '20260826-1213'/.test(GS), true, '後端版本同步');
+assertEqual(GS.includes('台灣時間'), true, '後端版本常數也要註明時區');
 
 console.log(failed === 0 ? '\n✅ 全部通過' : `\n❌ ${failed} 項失敗`);
 process.exit(failed === 0 ? 0 : 1);
