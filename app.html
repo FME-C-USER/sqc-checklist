@@ -36,14 +36,18 @@
     if ('serviceWorker' in navigator) window.addEventListener('load', () => navigator.serviceWorker.register('service-worker.js').catch(() => {}));
   </script>
 
-  <script type="text/jsx" id="appCode">
+  <!-- type 必須是 Babel 不認得的（text/plain）：Babel Standalone 會自動掃描並執行
+       type="text/jsx" 的 script，而下面又手動 Babel.transform + eval 了一次 ——
+       結果整份三千行 JSX 被編譯與執行兩次、createRoot 被呼叫兩次、開場 API 也打兩輪。
+       實測（2026-08-26）：改成 text/plain 後求值次數由 2 降為 1。 -->
+  <script type="text/plain" id="appCode">
     const { useState, useMemo, useEffect, useRef } = React;
-    const APP_VERSION = '20260826-0140'; // 每次部署更新，用來確認瀏覽器跑的是哪一版
+    const APP_VERSION = '20260826-0230'; // 每次部署更新，用來確認瀏覽器跑的是哪一版
     // 這一版前端「至少」需要的後端版本。前後端是各自演進的，版本號本來就不會相等
     // （只改前端時後端不動，反之亦然），所以不能用「兩者相等」當健康指標 ——
     // 要比的是「線上後端有沒有舊到缺少本前端需要的 API」。
     // 規則：改了 程式碼.gs 且前端會用到那個改動時，才把這個值提到該後端版本。
-    const NEEDS_GAS = '20260826-0140';   // 需要：logEvent 次數限制、照片未齊狀態、整月照片連結修復
+    const NEEDS_GAS = '20260826-0230';   // 需要：roster 帶出營業課、logEvent 次數限制
 
     // 全域錯誤攔截：任何未預期錯誤（含 async 事件處理器的未捕捉 rejection）都要顯示出來，
     // 否則按鈕會「按了沒反應」而完全查不到原因
@@ -510,6 +514,22 @@
       return map;
     }
 
+    /**
+     * 每家店的「有效課別」：實際由哪一課點的就算那一課，沒點過的才用名單的預排。
+     * 與梯次同一個規則 —— 實際與預排不符時一律以實際為準，否則原課永遠掛著未點檢、
+     * 新課出現已點檢大於應點檢，兩邊的完成率都到不了 100%。
+     * 回傳 (店號, 名單課別) => 課別 的查詢函式（先建索引，避免每家店都掃一次紀錄）。
+     */
+    function effSectionOf(report) {
+      const recOf = {};
+      (report.rows || []).forEach(r => { const c = normCode(r.店號); if (c) recOf[c] = r; });
+      return (code, planned) => {
+        const c = normCode(code);
+        const rec = c ? recOf[c] : null;
+        return (rec && rec.主責課) || planned || '(未分類)';
+      };
+    }
+
     // ===== 課別KPI表：合計 → 各部的各課 → 該部小計（比照人工版含小計列）=====
     function buildKpiBlock(report, periodLabel) {
       const pass = Number(report.passScore) || 85;
@@ -520,8 +540,14 @@
       rows.forEach(r => { if (r.主責課 && sections.indexOf(r.主責課) < 0) sections.push(r.主責課); });
       sections.sort(cmpSection);
 
-      const planBySec = {}; roster.forEach(s => { planBySec[s.課別] = (planBySec[s.課別] || 0) + 1; });
+      // 應點檢的歸屬要跟著「實際由哪一課點的」走（與主責課、梯次同一個規則）。
+      // 否則實際換課點的那家店會在原課永遠掛著未點檢、在新課出現已點檢>應點檢，兩邊都到不了 100%。
+      const eff = effSectionOf(report);
+      const planBySec = {}; roster.forEach(s => { const k = eff(s.店號, s.課別); planBySec[k] = (planBySec[k] || 0) + 1; });
       const doneBySec = {}; rows.forEach(r => { (doneBySec[r.主責課] = doneBySec[r.主責課] || []).push(r); });
+      // 名單外自行新增的店：名單裡沒有它，應點檢也要補上，否則已點檢會大於應點檢
+      const inRoster = {}; roster.forEach(s => { const c = normCode(s.店號); if (c) inRoster[c] = true; });
+      rows.forEach(r => { if (!inRoster[normCode(r.店號)]) { const k = r.主責課 || '(未分類)'; planBySec[k] = (planBySec[k] || 0) + 1; } });
 
       // withFails：只有「課別」列要列出不及格店；合計列與部小計列留空，避免同一家店重複出現
       const stat = (secList, withFails) => {
@@ -586,7 +612,10 @@
       sections.sort(cmpSection);
       const plan = {}, actual = {};
       const bump = (obj, key, b) => { if (!obj[key]) obj[key] = {}; obj[key][b] = (obj[key][b] || 0) + 1; };
-      roster.forEach(s => bump(plan, s.課別 || '(未分類)', effOf(s.店號, s.預排梯次)));
+      // 課別也要用「有效課別」（實際點的那一課），否則實際換課點的店會算在原課的預計裡，
+      // 跟 KPI 表的應點檢對不起來
+      const effSec = effSectionOf(report);
+      roster.forEach(s => bump(plan, effSec(s.店號, s.課別), effOf(s.店號, s.預排梯次)));
       rows.forEach(r => {
         const b = effOf(r.店號, '');
         bump(actual, r.主責課 || '(未分類)', b);
@@ -688,21 +717,22 @@
     function buildRosterCheckSheet(wb, report, customerFacing, filter) {
       const ws = wb.addWorksheet('查核店鋪名單');
       const byCode = {}; report.rows.forEach(r => { byCode[normCode(r.店號)] = r; });
+      // D/E/F 是「營業組織」（部/課/擔當，取自店鋪主檔），與 SQC 的「主責課」是兩回事 ——
+      // 原本 E 欄誤用店鋪名單的課別，導致它與後面的「主責課」欄完全重複，而真正的營業課反而沒出現。
       const head = customerFacing
-        ? ['序', '既存店號', '店舖名稱', '部別', '課別', '擔當', '地址', '隨盤點', '預排梯次', '日期', '是(否)點檢']
-        : ['序', '既存店號', '店舖名稱', '部別', '課別', '擔當', '地址', '隨盤點', '實際點檢課', '實際點檢人員', '實際點檢梯次', '主責課', '預排梯次', '日期', '是(否)點檢'];
+        ? ['序', '既存店號', '店舖名稱', '部別', '營業課', '擔當', '地址', '隨盤點', '預排梯次', '日期', '是(否)點檢']
+        : ['序', '既存店號', '店舖名稱', '部別', '營業課', '擔當', '地址', '隨盤點', '實際點檢課', '實際點檢人員', '實際點檢梯次', '主責課', '預排梯次', '日期', '是(否)點檢'];
       const rosterRows = report.roster.map((s, i) => {
         const rec = byCode[normCode(s.店號)];
-        const common = [i + 1, padStoreCode(s.店號), s.店名, s.營業部, s.課別, s.營業擔當, s.地址, s.店鋪型態 === '隨盤點點檢店' ? 'V' : ''];
+        const common = [i + 1, padStoreCode(s.店號), s.店名, s.營業部, s.營業課, s.營業擔當, s.地址, s.店鋪型態 === '隨盤點點檢店' ? 'V' : ''];
         const tail = rec ? [mmdd(rec.點檢時間), '已點檢'] : ['', '未點檢'];
         return customerFacing
           ? [...common, (rec ? rec.預排梯次 : s.預排梯次) || '', ...tail]
-          // 「主責課」一律取店鋪名單的課別（該店本月的盤點責任歸屬，未點檢也該有值）；
-          // 「實際點檢課/人員/梯次」才是有點檢才填
-          // 梯次一律以實際點檢日期反推（後端 rec.預排梯次 已是實際值，算不出來才退回名單的預排）；
-          // 未點檢的店沒有實際日期，只能顯示名單的預排。
+          // 主責課與梯次都以「實際」為準（跟梯次同一個規則）：這家店實際由哪一課點的，
+          // 主責課就改成那一課；沒點檢的店才沿用名單的預排值。
+          // 兩個「實際點檢」欄位只有點過才填，未點檢留空。
           : [...common, rec ? rec.主責課 : '', rec ? rec.點檢人員 : '', rec ? (rec.實際梯次 || '') : '',
-            s.課別 || '', (rec ? rec.預排梯次 : s.預排梯次) || '', ...tail];
+            (rec ? rec.主責課 : s.課別) || '', (rec ? rec.預排梯次 : s.預排梯次) || '', ...tail];
       });
       // 期間文字：0801-0819（不含斜線）
       const mmddPlain = (ymd) => String(ymd || '').slice(5, 7) + String(ymd || '').slice(8, 10);
