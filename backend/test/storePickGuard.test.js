@@ -52,8 +52,8 @@ assertEqual(APP.includes('請到「查詢紀錄」找到它按「編輯」'), tr
 // ===== 4. 送出成功後為下一家店重設基本資料 =====
 assertEqual(/\.\.\.b, time: b\.time\.slice\(0, 10\),\s*\n\s*storeCode: '', customStore: '', customInfo: null, storeType: ''/.test(APP), true,
   '送出後清掉店鋪與拍照類型，時間只留日期（時分必須重填，否則會沿用上一家的時間）');
-assertEqual(/setBasic\(b => \(\{[\s\S]{0,200}\}\)\);\s*\n\s*setTimeRaw\(null\);/.test(APP), true,
-  '打字暫存也要清掉，否則下一家會顯示上一家的時分');
+assertEqual(/setBasic\(b => \(\{[\s\S]{0,300}\}\)\);\s*\n\s*setTimeParts\(\{ h: '', m: '' \}\);/.test(APP), true,
+  '時分欄位的狀態也要清掉，否則下一家會顯示上一家的時分');
 assertEqual(APP.includes('dept:') && !/\.\.\.b, time: b\.time\.slice\(0, 10\),[\s\S]{0,200}(dept|section|staffId): ''/.test(APP), true,
   '部別/課別/點檢人員不可清掉：同一個人接著點下一家店');
 // 已點檢清單要向後端重查（別人同時送出的店，本機樂觀更新看不到）
@@ -62,79 +62,99 @@ assertEqual(/loadRecords\(\);\s*\n(\s*\/\/[^\n]*\n)*\s*loadInspected\(workMonth\
 assertEqual(APP.includes('重新向後端取店鋪名單、人員與「本月已點檢」清單'), true,
   '要有隨時可按的「重新載入」：名單與人員只在開 App 時載入一次');
 
-// ===== 5. 點檢時間的時／分下拉 =====
+// ===== 5. 點檢時間：時與分各自獨立（使用者 2026-08-26 回報的兩個問題）=====
+//   問題一：只填了「時」會被硬湊成 00 分
+//   問題二：把「分」清掉會連帶把「時」也清掉
+//   成因：basic.time 的格式（'YYYY-MM-DD' 或 'YYYY-MM-DDTHH:mm'）沒有「有時、沒分」這個狀態。
+//   對策：timeParts 保存使用者實際填的內容，兩邊都填了才組成 basic.time。
 assertEqual(/const HOURS = Array\.from\(\{ length: 24 \}/.test(APP), true, '時為 00~23');
 assertEqual(/const MINUTES = Array\.from\(\{ length: 60 \}/.test(APP), true, '分為 00~59');
-const m = /const setTimePart = \(which, v\) => \{[\s\S]*?\n      \};/.exec(APP);
-assertEqual(!!m, true, '應能找到 setTimePart');
-const sb = { basic: { time: '2026-08-25' }, out: null };
-sb.setBasic = (o) => { sb.out = o; sb.basic = o; };
-vm.createContext(sb);
-vm.runInContext(m[0] + '; this.fn = setTimePart;', sb);
-const setTimePart = sb.fn;
-sb.basic = { time: '2026-08-25' };
-setTimePart('h', '16');
-assertEqual(sb.basic.time, '2026-08-25T16:00', '只選時：分先給 00（使用者看得到可再改）');
-setTimePart('m', '27');
-assertEqual(sb.basic.time, '2026-08-25T16:27', '再選分');
-setTimePart('h', '09');
-assertEqual(sb.basic.time, '2026-08-25T09:27', '改時不影響分');
-setTimePart('h', '');
-assertEqual(sb.basic.time, '2026-08-25', '選回「--時」＝清掉時間，回到必填未填狀態');
-sb.basic = { time: '2026-08-25' };
-setTimePart('m', '05');
-assertEqual(sb.basic.time, '2026-08-25T00:05', '只選分：時先給 00');
-// 送出時的必填檢查是看長度 > 10，上面每個結果都要能被它正確判斷
-assertEqual('2026-08-25'.length <= 10, true, '沒選時間時長度為 10 → 會被必填檢查擋下');
-assertEqual('2026-08-25T16:27'.length > 10, true, '選了時間就通過必填檢查');
+assertEqual(APP.includes("const [timeParts, setTimeParts] = useState({ h: '', m: '' });"), true,
+  '時與分要有各自的狀態');
+assertEqual(APP.includes('const timeShown'), false, '舊的 timeShown 已被取代，不可留死碼');
+assertEqual(APP.includes('setTimeRaw'), false, '舊的 timeRaw 已被取代，不可留死碼');
+assertEqual(APP.includes('const setTimePart ='), false, '舊的 setTimePart 已被取代，不可留死碼');
 
-// ===== 5b. 可打字的欄位＋datalist 清單（使用者 2026-08-26 改回方案 C）=====
+const grabFn = (name, arg) => {
+  const re = new RegExp('const ' + name + ' = \\(' + arg + '\\) => \\{[\\s\\S]*?\\n      \\};');
+  const hit = re.exec(APP);
+  if (!hit) throw new Error('找不到 ' + name);
+  return hit[0];
+};
+const srcSync = grabFn('syncTime', 'parts, dateStr');
+const srcText = grabFn('onTimeText', 'which, raw');
+const srcBlur = grabFn('onTimeBlur', 'which');
+const sb = {
+  basic: { time: '2026-08-25' }, timeParts: { h: '', m: '' },
+  String, Number, pad2: (n) => String(n).padStart(2, '0'),
+};
+sb.setBasic = (fn) => { sb.basic = typeof fn === 'function' ? fn(sb.basic) : fn; };
+sb.setTimeParts = (o) => { sb.timeParts = o; };
+vm.createContext(sb);
+vm.runInContext(srcSync + '\n' + srcText + '\n' + srcBlur + '; this.api = { onTimeText, onTimeBlur };', sb);
+const { onTimeText, onTimeBlur } = sb.api;
+const state = () => [sb.timeParts.h, sb.timeParts.m, sb.basic.time];
+
+// 只填「時」→ 不可幫「分」湊 00，而且時間尚未成立（必填檢查要擋下）
+onTimeText('h', '16');
+assertEqual(state(), ['16', '', '2026-08-25'], '只填時：分維持空白，basic.time 只有日期');
+assertEqual(sb.basic.time.length <= 10, true, '只填一邊時必填檢查要擋下');
+// 補上「分」才成立
+onTimeText('m', '27');
+assertEqual(state(), ['16', '27', '2026-08-25T16:27'], '兩邊都填才組成時間');
+// 把「分」清掉：時必須留著（這就是現場回報的 bug）
+onTimeText('m', '');
+assertEqual(state(), ['16', '', '2026-08-25'], '清掉分不可連帶清掉時');
+// 把「時」清掉：分留著
+onTimeText('m', '27');
+onTimeText('h', '');
+assertEqual(state(), ['', '27', '2026-08-25'], '清掉時不可連帶清掉分');
+
+// 打字途中不補零（打「16」的第一下若變成 01，第二下會成為 016）
+sb.timeParts = { h: '', m: '' }; sb.basic = { time: '2026-08-25' };
+onTimeText('h', '1');
+assertEqual(sb.timeParts.h, '1', '打第一個字時顯示原字串');
+onTimeText('h', '16');
+assertEqual(sb.timeParts.h, '16', '打完第二個字');
+// 離開欄位才補零，而且只補自己那一邊
+sb.timeParts = { h: '9', m: '' }; sb.basic = { time: '2026-08-25' };
+onTimeBlur('h');
+assertEqual(state(), ['09', '', '2026-08-25'], '離開欄位補零；沒填的分維持空白');
+onTimeText('m', '5');
+onTimeBlur('m');
+assertEqual(state(), ['09', '05', '2026-08-25T09:05'], '兩邊都補零後組成時間');
+onTimeBlur('h');
+assertEqual(state(), ['09', '05', '2026-08-25T09:05'], '已是兩位數時 blur 不改變任何東西');
+
+// 超出範圍的那一鍵不接受
+sb.timeParts = { h: '16', m: '27' }; sb.basic = { time: '2026-08-25T16:27' };
+onTimeText('h', '25');
+assertEqual(state(), ['16', '27', '2026-08-25T16:27'], '25 時不被接受（時上限 23）');
+onTimeText('m', '60');
+assertEqual(state(), ['16', '27', '2026-08-25T16:27'], '60 分不被接受（分上限 59）');
+onTimeText('h', 'a9');
+assertEqual(sb.timeParts.h, '9', '非數字被濾掉，只留數字');
+
+// 紅框要標在「還沒填的那一邊」，使用者才知道少填哪個
+assertEqual(APP.includes('(timeParts.h ? "border-slate-300" : "border-red-300 bg-red-50")'), true, '時欄位的紅框看自己有沒有填');
+assertEqual(APP.includes('(timeParts.m ? "border-slate-300" : "border-red-300 bg-red-50")'), true, '分欄位的紅框看自己有沒有填');
+// 進入編輯時要還原時分（否則畫面空白卻通得過必填檢查）
+assertEqual(APP.includes("setTimeParts(t.length > 10 ? { h: t.slice(11, 13), m: t.slice(14, 16) } : { h: '', m: '' });"), true,
+  '載回舊紀錄要還原時分欄位');
+// 改日期不可影響已填的時分
+assertEqual(APP.includes('onChange={e => syncTime(timeParts, e.target.value)}'), true, '改日期時沿用已填的時分');
+
+// ===== 5b. 可打字的欄位＋datalist 清單（方案 C）=====
 assertEqual(APP.includes('<datalist id="sqc-hours">') && APP.includes('<datalist id="sqc-minutes">'), true,
   '時/分要用 datalist（同時提供下拉與自行輸入）');
 assertEqual((APP.match(/inputMode="numeric"/g) || []).length >= 2, true, '手機要跳數字鍵盤');
-// 使用者 2026-08-26 選定：單純的可輸入欄位（方案 C），不加單位後綴與自畫的箭頭 ——
-// 後綴會佔掉右側寬度，且在 iPhone 上的手感與原生下拉選單不同，反而更容易誤會。
-assertEqual(APP.includes('sqc-combo'), false, '不可再有 sqc-combo（含 CSS 也要一併移除，不留死碼）');
-assertEqual(APP.includes('sqc-unit') || APP.includes('sqc-chev'), false, '不可再有單位後綴與箭頭');
+assertEqual(APP.includes('sqc-combo'), false, '不可有 sqc-combo（單位後綴與箭頭已移除，不留死碼）');
 assertEqual((APP.match(/placeholder="時"/g) || []).length, 1, '時欄位用 placeholder 標示');
 assertEqual((APP.match(/placeholder="分"/g) || []).length, 1, '分欄位用 placeholder 標示');
-// 清單第一列是空白＝可以把時間清掉（使用者要的「空白欄」，方案 C 也保留）
 assertEqual(APP.includes('<datalist id="sqc-hours"><option value="" />'), true, '時的清單第一列是空白');
 assertEqual(APP.includes('<datalist id="sqc-minutes"><option value="" />'), true, '分的清單第一列是空白');
-// 沒有後綴佔位，w-16 的內容區足夠容納兩位數字（實測 D 案的 4.6rem 會把「16」裁成「1」）
 assertEqual((APP.match(/w-16 px-2 py-2 border rounded-lg text-center tabular-nums/g) || []).length, 2,
   '兩個欄位都用同一組寬度與置中樣式');
-
-const t = /const onTimeText = \(which, raw\) => \{[\s\S]*?\n      \};/.exec(APP);
-const sh = /const timeShown = \(which\) => \{[\s\S]*?\n      \};/.exec(APP);
-assertEqual(!!t && !!sh, true, '應能找到 onTimeText 與 timeShown');
-const sb3 = { basic: { time: '2026-08-25' }, timeRaw: null, String, Number, pad2: (n) => String(n).padStart(2, '0') };
-sb3.setBasic = (o) => { sb3.basic = o; };
-sb3.setTimeRaw = (o) => { sb3.timeRaw = o; };
-vm.createContext(sb3);
-vm.runInContext(m[0] + '\n' + t[0] + '\n' + sh[0] + '; this.api = { onTimeText, timeShown };', sb3);
-const { onTimeText, timeShown } = sb3.api;
-// 逐鍵輸入「16」：第一下不可以被補零成 01，否則第二下會變成 016 而打不出來
-onTimeText('h', '1');
-assertEqual([timeShown('h'), sb3.basic.time], ['1', '2026-08-25T01:00'], '打第一個字時顯示原字串（時間先暫定 01）');
-onTimeText('h', '16');
-assertEqual([timeShown('h'), sb3.basic.time], ['16', '2026-08-25T16:00'], '打完第二個字才是想要的 16 時');
-sb3.setTimeRaw(null);   // 離開欄位
-assertEqual(timeShown('h'), '16', '離開欄位後顯示補零後的值');
-onTimeText('m', '7');
-assertEqual(sb3.basic.time, '2026-08-25T16:07', '分只打一位要補零成 07');
-sb3.setTimeRaw(null);
-assertEqual(timeShown('m'), '07', '顯示 07');
-// 超出範圍的一鍵要被擋掉，不可讓時間變成 25 時
-const before = sb3.basic.time;
-onTimeText('h', '25');
-assertEqual(sb3.basic.time, before, '25 時不可被接受（時上限 23）');
-onTimeText('m', '60');
-assertEqual(sb3.basic.time, before, '60 分不可被接受（分上限 59）');
-onTimeText('h', 'a9');
-assertEqual(sb3.basic.time, '2026-08-25T09:07', '非數字要被濾掉，只留數字');
-onTimeText('h', '');
-assertEqual(sb3.basic.time, '2026-08-25', '清空＝回到必填未填狀態');
 
 // ===== 6. 查詢紀錄與彙總專區不再有「結果」欄，不及格分數改紅字 =====
 assertEqual(APP.includes('<th>結果</th>'), false, '兩個表格都不再有「結果」欄');

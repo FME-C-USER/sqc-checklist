@@ -95,5 +95,17 @@ assertEqual(APP.includes('if (c && c.b) writeBootCache(mo, { ...c.b, stores });'
 assertEqual(APP.includes('if (cached.b.stores && cached.b.stores.length) setStoresState({ loaded: true, err: \'\' });'), true,
   '快取裡有名單就算已載入，選店不必等背景那一趟');
 
+// ===== 5. 載入中不可顯示「共 0 間」，而且要有進度條（現場 2026-08-26 回報）=====
+//   0 家會被當成「本課真的沒有店」，看不出是還在載
+assertEqual(APP.includes('店鋪名單載入中…'), true, '載入中要明講在載名單');
+assertEqual(/!storesState\.loaded\s*\n\s*\/\* 名單還沒到就不要報「共 0 間」/.test(APP), true,
+  '名單未載完時不可顯示「共 N 間」');
+assertEqual(/animation: 'sqc-progress 1s ease-in-out infinite'/.test(APP), true, '要有不定量進度條');
+assertEqual(APP.includes('bg-amber-500 rounded-full'), true, '選店區的進度條用與提示同色系');
+// keyframes 原本在五個條件區塊裡各定義一次，那些區塊都沒渲染時進度條就不會動
+assertEqual((APP.match(/@keyframes sqc-progress/g) || []).length, 1, 'keyframes 只能定義一次');
+assertEqual(/<style>\s*\n\s*body \{ font-family[\s\S]{0,400}@keyframes sqc-progress/.test(APP), true,
+  'keyframes 要定義在全域 style，不可綁在某個條件區塊裡');
+
 console.log(failed === 0 ? '\n✅ 全部通過' : `\n❌ ${failed} 項失敗`);
 process.exit(failed === 0 ? 0 : 1);

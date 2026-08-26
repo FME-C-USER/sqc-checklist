@@ -17,6 +17,9 @@
   <script src="js/billing.js"></script>
   <style>
     body { font-family: "Noto Sans TC", system-ui, "Microsoft JhengHei", sans-serif; }
+    /* 不定量進度條的動畫。定義在這裡而不是各個元件內 —— 原本在五個條件區塊裡各寫一次，
+       那些區塊都沒渲染時這段 CSS 就不存在，新加的進度條會不會動要看運氣。 */
+    @keyframes sqc-progress { 0% { margin-left: 0%; } 50% { margin-left: 67%; } 100% { margin-left: 0%; } }
   </style>
 </head>
 <body class="bg-slate-100">
@@ -33,7 +36,7 @@
     const { useState, useMemo, useEffect, useRef } = React;
     // 版本字串一律用「台灣時間」的 YYYYMMDD-HHMM。與部署關卡無關 ——
     // 那道關卡看的是資安報告的檔名日期，而 GitHub runner 跑 UTC，兩者不要混在一起。
-    const APP_VERSION = '20260826-1641'; // 每次部署更新，用來確認瀏覽器跑的是哪一版（台灣時間）
+    const APP_VERSION = '20260826-1712'; // 每次部署更新，用來確認瀏覽器跑的是哪一版（台灣時間）
     // 這一版前端「至少」需要的後端版本。前後端是各自演進的，版本號本來就不會相等
     // （只改前端時後端不動，反之亦然），所以不能用「兩者相等」當健康指標 ——
     // 要比的是「線上後端有沒有舊到缺少本前端需要的 API」。
@@ -1379,28 +1382,37 @@ ${nm}
        * 兩個選單都必須有值才算填了時間 —— 只選了「時」就湊一個 00 分會變成沒選也算填。
        * 所以另一半還空著時，先給它 00 當預設，使用者一定看得到並可再改。
        */
-      const setTimePart = (which, v) => {
-        const d = basic.time.slice(0, 10);
-        if (!v) { setBasic({ ...basic, time: d }); return; }   // 清掉＝回到必填未填狀態
-        const cur = basic.time.length > 10 ? basic.time.slice(11, 16) : '';
-        const h = which === 'h' ? v : (cur.slice(0, 2) || '00');
-        const m = which === 'm' ? v : (cur.slice(3, 5) || '00');
-        setBasic({ ...basic, time: d + 'T' + h + ':' + m });
-      };
-      // 時/分可以直接打數字（datalist 同時提供下拉）。打字途中會出現「1」這種還沒補零的
-      // 中間狀態，所以顯示值先用暫存的原字串，離開欄位才補零 —— 否則打「16」的第一下就會
-      // 被補成「01」，第二下變成「016」而打不出想要的時間。
-      const [timeRaw, setTimeRaw] = useState(null);   // { which, text }；只在打字期間存在
-      const timeShown = (which) => {
-        if (timeRaw && timeRaw.which === which) return timeRaw.text;
-        return which === 'h' ? basic.time.slice(11, 13) : basic.time.slice(14, 16);
+      /**
+       * 時與分各自獨立保存。
+       * 為什麼不能只靠 basic.time：它的格式是 'YYYY-MM-DD' 或 'YYYY-MM-DDTHH:mm'，
+       * 沒有「有時、沒分」這個中間狀態。所以原本只填了時就會被硬湊成 00 分，
+       * 而清掉分的時候只能整個時間一起清掉 —— 連時也一起消失（2026-08-26 現場回報）。
+       * 改為：timeParts 是使用者實際填的內容（可以只填一邊、可以是打字途中的「1」），
+       * 只有兩邊都填了才組成 basic.time；只填一邊時 basic.time 維持只有日期，
+       * 必填檢查（長度 > 10）自然會擋下，不必另外加規則。
+       */
+      const [timeParts, setTimeParts] = useState({ h: '', m: '' });
+      const syncTime = (parts, dateStr) => {
+        const d = dateStr === undefined ? basic.time.slice(0, 10) : dateStr;
+        const both = parts.h !== '' && parts.m !== '';
+        setBasic(b => ({ ...b, time: both ? d + 'T' + pad2(Number(parts.h)) + ':' + pad2(Number(parts.m)) : d }));
       };
       const onTimeText = (which, raw) => {
         const text = String(raw).replace(/\D/g, '').slice(0, 2);
         const max = which === 'h' ? 23 : 59;
         if (text !== '' && Number(text) > max) return;         // 超出範圍就不接受這一鍵
-        setTimeRaw({ which, text });
-        setTimePart(which, text === '' ? '' : pad2(Number(text)));
+        const next = { ...timeParts, [which]: text };
+        setTimeParts(next);
+        syncTime(next);
+      };
+      // 離開欄位才補零（打「16」的第一下若立刻補成 01，第二下會變成 016）。
+      // 只補使用者自己填的那一邊 —— 不幫另一邊補 00。
+      const onTimeBlur = (which) => {
+        const v = timeParts[which];
+        if (v === '' || v.length === 2) return;
+        const next = { ...timeParts, [which]: pad2(Number(v)) };
+        setTimeParts(next);
+        syncTime(next);
       };
       const [showDoneStores, setShowDoneStores] = useState(false);
       // 店鋪挑選清單：標記已點檢（不可重複點檢）、依搜尋字串過濾。
@@ -1560,8 +1572,11 @@ ${nm}
         const npr = note.indexOf('其他') === 0 ? '其他' : (note === '廠區店' || note === '營區店' ? note : '');
         const npo = note.indexOf('其他') === 0 ? note.replace(/^其他[:：]?/, '') : '';
         const inRoster = STORE_ROSTER.find(s => String(s.code) === String(rec.storeCode));
+        const t = String(rec.time || taipeiNow()).replace(' ', 'T').slice(0, 16);
+        // 時分欄位有自己的狀態，載回舊紀錄時要一起還原，否則畫面會是空的卻通得過必填檢查
+        setTimeParts(t.length > 10 ? { h: t.slice(11, 13), m: t.slice(14, 16) } : { h: '', m: '' });
         setBasic({
-          time: String(rec.time || taipeiNow()).replace(' ', 'T').slice(0, 16),
+          time: t,
           dept: rec.dept || '', section: rec.section || '', staffId: rec.empId || '',
           storeCode: inRoster ? rec.storeCode : '__custom',
           customStore: inRoster ? '' : (rec.storeCode + ' ' + rec.storeName),
@@ -1761,7 +1776,7 @@ ${nm}
             ...b, time: b.time.slice(0, 10),
             storeCode: '', customStore: '', customInfo: null, storeType: '', noPhotoReason: '', noPhotoOther: '',
           }));
-          setTimeRaw(null);
+          setTimeParts({ h: '', m: '' });   // 時分要重填（見上面的說明）
           resetWork(); setTab('records'); loadRecords();
           // 已點檢清單要向後端重查，不能只靠上面那行本機樂觀更新 ——
           // 同一時間別人也在送出，只加自己這一筆的話，同事剛點完的店在這台裝置上仍是可選的。
@@ -2057,7 +2072,6 @@ ${nm}
               <div className="bg-white rounded-xl shadow-sm p-3">
                 <div className="h-1 w-full bg-slate-200 rounded-full overflow-hidden">
                   <div className="h-full w-1/3 bg-emerald-500 rounded-full" style={{ animation: 'sqc-progress 1s ease-in-out infinite' }} />
-                  <style>{`@keyframes sqc-progress { 0%{margin-left:0%} 50%{margin-left:67%} 100%{margin-left:0%} }`}</style>
                 </div>
                 <div className={"text-xs mt-1 " + (retryInfo ? "text-amber-600" : "text-emerald-600")}>{busyText || '載入當月資料中，請稍候…'}</div>
               </div>
@@ -2230,24 +2244,23 @@ ${nm}
                 <h2 className="font-bold text-slate-700">📋 基本資料</h2>
                 <div className="grid md:grid-cols-2 gap-4 text-sm">
                   <div><label className="block text-xs text-slate-500 mb-1">點檢時間</label>
-                    {/* 日期預設當天、時間預設空白且必填：datetime-local 做不到「只有日期」，故拆成兩個欄位。
-                        basic.time 仍是單一來源（'YYYY-MM-DD' 或 'YYYY-MM-DDTHH:mm'），其餘程式不必改。 */}
+                    {/* 日期預設當天、時分預設空白且必填：datetime-local 做不到「只有日期」，故拆成三個欄位。
+                        時與分各自保存在 timeParts（見 syncTime 的說明），兩邊都填了才會組成 basic.time ——
+                        所以清掉「分」不會連帶清掉「時」，也不會幫沒填的那一邊硬湊 00。 */}
                     <div className="flex items-center gap-2">
                       <input type="date" value={basic.time.slice(0, 10)}
-                        onChange={e => setBasic({ ...basic, time: e.target.value + (basic.time.slice(10, 16) || '') })}
+                        onChange={e => syncTime(timeParts, e.target.value)}
                         className="flex-1 px-3 py-2 border border-slate-300 rounded-lg" />
-                      {/* 時、分（使用者 2026-08-26 選定的做法）：單純的可輸入欄位，
-                          點一下出現 datalist 清單（第一列空白＝清掉時間），也可以直接打數字。
-                          不加單位後綴與自畫的箭頭 —— 那會佔掉右側寬度，且在 iPhone 上的手感
-                          與原生下拉選單不同，反而更容易誤會。 */}
-                      <input list="sqc-hours" value={timeShown('h')} inputMode="numeric" placeholder="時" aria-label="時"
-                        onChange={e => onTimeText('h', e.target.value)} onBlur={() => setTimeRaw(null)}
-                        className={"w-16 px-2 py-2 border rounded-lg text-center tabular-nums " + (basic.time.length > 10 ? "border-slate-300" : "border-red-300 bg-red-50")} />
+                      {/* 單純的可輸入欄位：點一下出現 datalist 清單（第一列空白＝清掉該欄），也可直接打數字。
+                          紅框標在「還沒填的那一邊」，使用者才知道少填哪個。 */}
+                      <input list="sqc-hours" value={timeParts.h} inputMode="numeric" placeholder="時" aria-label="時"
+                        onChange={e => onTimeText('h', e.target.value)} onBlur={() => onTimeBlur('h')}
+                        className={"w-16 px-2 py-2 border rounded-lg text-center tabular-nums " + (timeParts.h ? "border-slate-300" : "border-red-300 bg-red-50")} />
                       <datalist id="sqc-hours"><option value="" />{HOURS.map(h => <option key={h} value={h} />)}</datalist>
                       <span className="text-slate-400">:</span>
-                      <input list="sqc-minutes" value={timeShown('m')} inputMode="numeric" placeholder="分" aria-label="分"
-                        onChange={e => onTimeText('m', e.target.value)} onBlur={() => setTimeRaw(null)}
-                        className={"w-16 px-2 py-2 border rounded-lg text-center tabular-nums " + (basic.time.length > 10 ? "border-slate-300" : "border-red-300 bg-red-50")} />
+                      <input list="sqc-minutes" value={timeParts.m} inputMode="numeric" placeholder="分" aria-label="分"
+                        onChange={e => onTimeText('m', e.target.value)} onBlur={() => onTimeBlur('m')}
+                        className={"w-16 px-2 py-2 border rounded-lg text-center tabular-nums " + (timeParts.m ? "border-slate-300" : "border-red-300 bg-red-50")} />
                       <datalist id="sqc-minutes"><option value="" />{MINUTES.map(m => <option key={m} value={m} />)}</datalist>
                     </div>
                     {basic.time.length <= 10 && <div className="text-xs text-red-500 mt-1">請填寫點檢時間（必填）</div>}</div>
@@ -2268,7 +2281,12 @@ ${nm}
                   <div className="border border-emerald-200 rounded-xl bg-emerald-50/40 overflow-hidden">
                     <div className="flex flex-wrap items-center gap-2 px-3 py-2 border-b border-emerald-100">
                       <span className="text-sm font-bold text-emerald-800 whitespace-nowrap">
-                        共 {storePick.total} 間 · {(inspectedState.err || storesState.err) ? <span className="text-red-600">載入失敗</span> : pickReady ? <span>已完成 {storePick.doneCount}</span> : <span className="text-amber-600">{storesState.loaded ? '確認已點檢中…' : '名單載入中…'}</span>}
+                        {(inspectedState.err || storesState.err)
+                          ? <span className="text-red-600">載入失敗</span>
+                          : !storesState.loaded
+                            /* 名單還沒到就不要報「共 0 間」—— 那會被當成本課真的沒有店 */
+                            ? <span className="text-amber-600">店鋪名單載入中…</span>
+                            : <>共 {storePick.total} 間 · {pickReady ? <span>已完成 {storePick.doneCount}</span> : <span className="text-amber-600">確認已點檢中…</span>}</>}
                       </span>
                       <input value={storeQuery} onChange={e => setStoreQuery(e.target.value)} placeholder="搜尋店號或店名"
                         className="flex-1 min-w-[8rem] px-3 py-1.5 border border-slate-300 rounded-full text-sm" />
@@ -2280,10 +2298,17 @@ ${nm}
                     {/* 「已點檢」還沒確認完（或確認失敗）就不可以選店 —— 名單看起來完整，
                         其實每家都會顯示成沒點過，2026-08-25 就是這樣誤選了已點檢的店 */}
                     {!pickReady && !inspectedState.err && !storesState.err && (
-                      <div className="px-3 py-2 text-xs bg-amber-50 text-amber-800 border-b border-amber-200">
-                        {storesState.loaded
-                          ? '正在確認本月哪些店已經點檢過，確認完才能選店（避免重複點檢整份表白填）…'
-                          : '正在載入本月店鋪名單（1500 多家，約需幾秒）…其他欄位可以先填。'}
+                      <div className="px-3 py-2 bg-amber-50 border-b border-amber-200">
+                        {/* 不定量進度條：後端不會回進度，所以只表示「還在跑」，
+                            但至少讓人知道畫面沒有卡住、也不是真的 0 家 */}
+                        <div className="h-1 w-full bg-amber-200 rounded-full overflow-hidden">
+                          <div className="h-full w-1/3 bg-amber-500 rounded-full" style={{ animation: 'sqc-progress 1s ease-in-out infinite' }} />
+                        </div>
+                        <div className="text-xs text-amber-800 mt-1.5">
+                          {storesState.loaded
+                            ? '正在確認本月哪些店已經點檢過，確認完才能選店（避免重複點檢整份表白填）…'
+                            : '正在載入本月店鋪名單（1500 多家，約需幾秒）…其他欄位可以先填。'}
+                        </div>
                       </div>
                     )}
                     {storesState.err && (
@@ -2533,7 +2558,6 @@ ${nm}
                   <div className="bg-white rounded-xl shadow-sm p-3">
                     <div className="h-1 w-full bg-slate-200 rounded-full overflow-hidden">
                       <div className="h-full w-1/3 bg-emerald-500 rounded-full" style={{ animation: 'sqc-progress 1s ease-in-out infinite' }} />
-                      <style>{`@keyframes sqc-progress { 0%{margin-left:0%} 50%{margin-left:67%} 100%{margin-left:0%} }`}</style>
                     </div>
                     <div className={"text-xs mt-1 " + (retryInfo ? "text-amber-600" : "text-emerald-600")}>{busyText || '查詢中，請稍候…'}</div>
                   </div>
@@ -2584,7 +2608,6 @@ ${nm}
                   <div className="bg-white rounded-xl shadow-sm p-3">
                     <div className="h-1 w-full bg-slate-200 rounded-full overflow-hidden">
                       <div className="h-full w-1/3 bg-emerald-500 rounded-full" style={{ animation: 'sqc-progress 1s ease-in-out infinite' }} />
-                      <style>{`@keyframes sqc-progress { 0%{margin-left:0%} 50%{margin-left:67%} 100%{margin-left:0%} }`}</style>
                     </div>
                     <div className={"text-xs mt-1 " + (retryInfo ? "text-amber-600" : "text-emerald-600")}>{busyText || '查詢中，請稍候…'}</div>
                   </div>
@@ -2642,7 +2665,6 @@ ${nm}
               {submitting && (
                 <div className="h-1 w-full bg-slate-200 overflow-hidden">
                   <div className="h-full w-1/3 bg-emerald-500" style={{ animation: 'sqc-progress 1s ease-in-out infinite' }} />
-                  <style>{`@keyframes sqc-progress { 0%{margin-left:0%} 50%{margin-left:67%} 100%{margin-left:0%} }`}</style>
                 </div>
               )}
               <div className="max-w-4xl mx-auto px-4 py-3 flex items-center justify-between">
@@ -3012,7 +3034,6 @@ ${nm}
           {(loading || uploading) && (
             <div className="h-1 w-full bg-slate-200 rounded-full overflow-hidden">
               <div className="h-full w-1/3 bg-emerald-500 rounded-full" style={{ animation: 'sqc-progress 1s ease-in-out infinite' }} />
-              <style>{`@keyframes sqc-progress { 0%{margin-left:0%} 50%{margin-left:67%} 100%{margin-left:0%} }`}</style>
             </div>
           )}
           {uploading && <div className="text-xs text-emerald-600">資料處理中，請稍候…</div>}
