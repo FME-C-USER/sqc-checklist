@@ -33,12 +33,12 @@
     const { useState, useMemo, useEffect, useRef } = React;
     // 版本字串一律用「台灣時間」的 YYYYMMDD-HHMM。與部署關卡無關 ——
     // 那道關卡看的是資安報告的檔名日期，而 GitHub runner 跑 UTC，兩者不要混在一起。
-    const APP_VERSION = '20260826-1455'; // 每次部署更新，用來確認瀏覽器跑的是哪一版（台灣時間）
+    const APP_VERSION = '20260826-1641'; // 每次部署更新，用來確認瀏覽器跑的是哪一版（台灣時間）
     // 這一版前端「至少」需要的後端版本。前後端是各自演進的，版本號本來就不會相等
     // （只改前端時後端不動，反之亦然），所以不能用「兩者相等」當健康指標 ——
     // 要比的是「線上後端有沒有舊到缺少本前端需要的 API」。
     // 規則：改了 程式碼.gs 且前端會用到那個改動時，才把這個值提到該後端版本。
-    const NEEDS_GAS = '20260826-1455';   // 需要：roster 帶出營業課、logEvent 次數限制
+    const NEEDS_GAS = '20260826-1641';   // 需要：getStoreList（門市名單分開載入）
 
     // 全域錯誤攔截：任何未預期錯誤（含 async 事件處理器的未捕捉 rejection）都要顯示出來，
     // 否則按鈕會「按了沒反應」而完全查不到原因
@@ -1213,13 +1213,62 @@
         staffs: (b.staffs || []).map(s => ({ id: s.empId, name: s.name, dept: s.dept, section: s.section })),
         depts: b.depts || [],
       });
-      const reloadBoot = (m) => { const mo = m || workMonth; return SqcApi.getBootstrap(mo, '').then(b => {
-        applyBoot(b, mo);
-        writeBootCache(mo, b);
-        setBootErr(''); setBootWarn(''); setBootAt(Date.now());
-        setGasVer(b.gasVersion || '(舊版後端)');
-        return b;
-      }); };
+      /**
+       * 門市名單改為分開載入（2026-08-26）。
+       * 原本 getBootstrap 一併搬 1500+ 家店（近 200KB、伺服器端六次整表讀取），
+       * 常常撞上逾時 → 畫面顯示載入失敗、其實只是太慢。拆開後題庫與人員 1~2 秒就到，
+       * 畫面立刻可用；名單在背景補，而選店本來就發生在選完課別之後。
+       * 後端回的是「欄位名一次 + 每列一個陣列」的精簡格式，照 cols 還原成物件。
+       */
+      const expandStores = (r) => {
+        const cols = (r && r.cols) || [];
+        return ((r && r.rows) || []).map(row => {
+          const o = {};
+          cols.forEach((c, i) => { o[c] = row[i]; });
+          return o;
+        });
+      };
+      const [storesState, setStoresState] = useState({ loaded: false, err: '' });
+      // 名單是背景載入的，切換月份時前一個月的請求可能晚到 —— 用這個記住「現在要的是哪個月」，
+      // 回來時月份已經不同就丟掉，否則會把上個月的名單灌進這個月
+      const storesReq = useRef('');
+      const loadStores = (m) => {
+        const mo = m || workMonth;
+        if (!CONFIGURED) { setStoresState({ loaded: true, err: '' }); return Promise.resolve(); }
+        storesReq.current = mo;
+        setStoresState(s => ({ loaded: s.loaded, err: '' }));   // 重載時先留著舊名單，不要讓畫面閃空
+        return SqcApi.getStoreList(mo, '').then(r => {
+          if (storesReq.current !== mo) return [];   // 已經切到別的月份，這份結果作廢
+          const stores = expandStores(r);
+          setBoot(b => ({ ...b, stores }));
+          setStoresState({ loaded: true, err: '' });
+          // 名單也一起進快取，下次開 App 才能立刻畫出來
+          try {
+            const raw = localStorage.getItem(bootCacheKey(mo));
+            const c = raw ? JSON.parse(raw) : null;
+            if (c && c.b) writeBootCache(mo, { ...c.b, stores });
+          } catch (e) { /* 空間不足就算了 */ }
+          return stores;
+        }).catch(e => {
+          if (storesReq.current === mo) setStoresState(s => ({ loaded: s.loaded, err: e.message || '載入失敗' }));
+          throw e;
+        });
+      };
+      const reloadBoot = (m) => {
+        const mo = m || workMonth;
+        // light=true：不要名單。名單由 loadStores 另外取（舊版後端會忽略這個參數並照舊全帶）
+        return SqcApi.getBootstrap(mo, '', true).then(b => {
+          // 後端若是舊版仍會帶名單，那就直接沿用，不必再多打一次
+          const hasStores = !!(b.stores && b.stores.length);
+          applyBoot(b, mo);
+          if (hasStores) setStoresState({ loaded: true, err: '' });
+          writeBootCache(mo, b);
+          setBootErr(''); setBootWarn(''); setBootAt(Date.now());
+          setGasVer(b.gasVersion || '(舊版後端)');
+          if (!hasStores) loadStores(mo).catch(() => { });   // 背景補名單，失敗有自己的提示
+          return b;
+        });
+      };
       /**
        * 載入「本月已點檢的店號」。
        * 這支的狀態必須外顯，因為它同時是防重複點檢的唯一依據：
@@ -1241,7 +1290,12 @@
       useEffect(() => {
         if (!CONFIGURED) return;
         const cached = readBootCache(workMonth);
-        if (cached && cached.b) { applyBoot(cached.b, workMonth); setBootAt(cached.at || null); setGasVer(cached.b.gasVersion || '(舊版後端)'); setLoading(false); } // 先用快取讓畫面立即可用
+        if (cached && cached.b) {
+          applyBoot(cached.b, workMonth); setBootAt(cached.at || null);
+          setGasVer(cached.b.gasVersion || '(舊版後端)'); setLoading(false); // 先用快取讓畫面立即可用
+          // 快取裡有名單就算「已載入」，選店不必等背景那一趟；沒有才顯示「名單載入中」
+          if (cached.b.stores && cached.b.stores.length) setStoresState({ loaded: true, err: '' });
+        }
         else { setBootAt(null); setLoading(true); }
         reloadBoot(workMonth)
           .catch(e => {
@@ -1362,8 +1416,9 @@ ${nm}
           .filter(s => !q || String(s.code).toLowerCase().includes(q) || String(s.name).toLowerCase().includes(q));
         return { total: all.length, doneCount: all.filter(s => s.done).length, list };
       }, [sectionStores, storeQuery, showDoneStores, inspectedCodes, editingRecordId, basic.storeCode]);
-      // 「已點檢」還沒確認完就不可以選店：名單看起來完整、其實每家都顯示成沒點過
-      const pickReady = inspectedState.loaded || !!editingRecordId;
+      // 選店要等兩件事：門市名單載完、且「本月已點檢」確認完
+      //   前者沒到就沒有店可選；後者沒到會讓每家店都顯示成沒點過（2026-08-25 的誤選成因）
+      const pickReady = (inspectedState.loaded && storesState.loaded) || !!editingRecordId;
       /**
        * 確認結果回來後，若目前選的店其實已經點過，立刻取消選擇並說明原因。
        * 沒有這一段的話：使用者在空窗期選的店會一路留著（過濾條件刻意保留「目前選中的店」），
@@ -2213,7 +2268,7 @@ ${nm}
                   <div className="border border-emerald-200 rounded-xl bg-emerald-50/40 overflow-hidden">
                     <div className="flex flex-wrap items-center gap-2 px-3 py-2 border-b border-emerald-100">
                       <span className="text-sm font-bold text-emerald-800 whitespace-nowrap">
-                        共 {storePick.total} 間 · {inspectedState.err ? <span className="text-red-600">已點檢確認失敗</span> : pickReady ? <span>已完成 {storePick.doneCount}</span> : <span className="text-amber-600">確認已點檢中…</span>}
+                        共 {storePick.total} 間 · {(inspectedState.err || storesState.err) ? <span className="text-red-600">載入失敗</span> : pickReady ? <span>已完成 {storePick.doneCount}</span> : <span className="text-amber-600">{storesState.loaded ? '確認已點檢中…' : '名單載入中…'}</span>}
                       </span>
                       <input value={storeQuery} onChange={e => setStoreQuery(e.target.value)} placeholder="搜尋店號或店名"
                         className="flex-1 min-w-[8rem] px-3 py-1.5 border border-slate-300 rounded-full text-sm" />
@@ -2224,9 +2279,17 @@ ${nm}
                     </div>
                     {/* 「已點檢」還沒確認完（或確認失敗）就不可以選店 —— 名單看起來完整，
                         其實每家都會顯示成沒點過，2026-08-25 就是這樣誤選了已點檢的店 */}
-                    {!pickReady && !inspectedState.err && (
+                    {!pickReady && !inspectedState.err && !storesState.err && (
                       <div className="px-3 py-2 text-xs bg-amber-50 text-amber-800 border-b border-amber-200">
-                        正在確認本月哪些店已經點檢過，確認完才能選店（避免重複點檢整份表白填）…
+                        {storesState.loaded
+                          ? '正在確認本月哪些店已經點檢過，確認完才能選店（避免重複點檢整份表白填）…'
+                          : '正在載入本月店鋪名單（1500 多家，約需幾秒）…其他欄位可以先填。'}
+                      </div>
+                    )}
+                    {storesState.err && (
+                      <div className="px-3 py-2 text-xs bg-red-50 text-red-700 border-b border-red-200 flex items-center justify-between gap-2">
+                        <span>店鋪名單載入失敗（{storesState.err}）。</span>
+                        <button type="button" onClick={() => loadStores(workMonth).catch(() => { })} className="underline whitespace-nowrap">重試</button>
                       </div>
                     )}
                     {inspectedState.err && (

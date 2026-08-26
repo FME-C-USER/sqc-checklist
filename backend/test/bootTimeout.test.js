@@ -87,7 +87,7 @@ assertEqual((APP.match(/setBootWarn\(bootFailMsg\(e\)\)/g) || []).length, 3, '�
 
 // ===== 3. getBootstrap 不可重複讀同一張活頁 =====
 const GS = fs.readFileSync(GS_PATH, 'utf8');
-const boot = /function getBootstrap\(month, section\) \{[\s\S]*?\n\}/.exec(GS);
+const boot = /function getBootstrap\(month, section, light\) \{[\s\S]*?\n\}/.exec(GS);
 assertEqual(!!boot, true, '應能找到 getBootstrap');
 assertEqual((boot[0].match(/readSheet\('點檢人員'\)/g) || []).length, 1, '「點檢人員」只能讀一次');
 assertEqual(boot[0].includes('distinctDepts(people)'), true, '部課對照要沿用已讀好的資料');

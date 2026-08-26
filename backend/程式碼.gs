@@ -10,7 +10,7 @@
 // 後端版本：每次修改本檔就更新，並於前端「資料更新時間」旁顯示。
 // 用途：貼上程式碼後若忘記「部署 → 管理部署作業 → 新版本」，畫面上的後端版本就不會變，
 //       可立即分辨是「沒貼上」「貼了但沒部署」還是「已生效」。
-var GAS_VERSION = '20260826-1455';   // 台灣時間 YYYYMMDD-HHMM
+var GAS_VERSION = '20260826-1641';   // 台灣時間 YYYYMMDD-HHMM
 
 var SPREADSHEET_ID = '1GRZZsZRgakMGENspOxmlx96NfckC8UYOe0ipuNNEoh0';
 var DRIVE_ROOT_ID  = '122nQjldImn5Zh5AUguxZF0YzobThgdc9';
@@ -44,7 +44,8 @@ function doPost(e) {
 
     var routes = {
       login: function () { return login(p.userId, p.password); },
-      getBootstrap: function () { return getBootstrap(p.month, p.section); },
+      getBootstrap: function () { return getBootstrap(p.month, p.section, p.light === true); },
+      getStoreList: function () { return getStoreList(p.month, p.section); },
       createUploadSessions: function () { return { sessions: createUploadSessions(p.items, p.origin) }; },
       submitRecord: function () { return submitRecord(p.record); },
       attachPhotoLinks: function () { return attachPhotoLinks(p.month, p.recordId, p.links); },
@@ -276,7 +277,13 @@ function findStaffByAd(ad) {
 // ============================================================
 // 開場資料：當月題庫 + 店鋪名單(依課別) + 設定
 // ============================================================
-function getBootstrap(month, section) {
+/**
+ * 開場資料。
+ * light=true 時「不含門市名單」—— 名單由前端另外呼叫 getStoreList 在背景取，
+ * 這樣畫面 1~2 秒就能開起來，不必等近 200KB 的名單（見 getStoreList 的說明）。
+ * 舊版前端不會帶這個參數，所以仍然拿到完整資料，不會因為後端先更新而壞掉。
+ */
+function getBootstrap(month, section, light) {
   ensureMonth(month); // 開啟某月即自動建齊該月所有活頁
   // 「點檢人員」只讀一次：原本 staffs 與 distinctDepts() 各讀一次整張活頁，
   // 而這支是開場的關鍵路徑（前端等它才能用），每一次多餘的整表讀取都直接加在等待時間上。
@@ -287,7 +294,7 @@ function getBootstrap(month, section) {
     passScore: Number(getSetting('及格分數') || 85),
     checklist: getChecklist(month),
     observations: getObservations(month),
-    stores: getStores(month, section),
+    stores: light === true ? [] : getStores(month, section),
     // 點檢人員下拉：只帶「有填部別或課別」的人員（純管理者未填部/課者不列入下拉，但仍可登入）
     staffs: people.filter(function (r) {
       return String(r['部別'] || '').trim() !== '' || String(r['課別'] || '').trim() !== '';
@@ -358,6 +365,27 @@ function lookupStore(q) {
     }
   }
   return { rows: out };
+}
+
+/**
+ * 門市名單（前端專用的精簡格式）。
+ * 為什麼跟 getStores 分開：開場的 getBootstrap 原本要一併搬 1500+ 家店，
+ * 六次整表讀取＋近 200KB 的傳輸讓它常常撞上逾時（2026-08-26 現場一直出現載入失敗）。
+ * 拆成獨立的一支之後，前端可以先拿到題庫/人員把畫面開起來，名單在背景補。
+ * 格式也改為「欄位名一次 + 每列一個陣列」：物件格式的鍵名重複 1500 次，
+ * 光鍵名就占掉將近一半的位元組。另外 remote/holiday/batch 前端完全沒用到，不傳。
+ * cols 一併回傳，前端照它還原成物件 —— 日後增減欄位不必兩邊一起改。
+ */
+var STORE_LIST_COLS = ['code', 'name', 'section', 'type'];
+function getStoreList(month, section) {
+  var rows = readSheet('店鋪名單_' + month);
+  var out = [];
+  for (var i = 0; i < rows.length; i++) {
+    var r = rows[i];
+    if (section && String(r['課別']) !== String(section)) continue;
+    out.push([String(r['店號']), r['店名'], r['課別'], r['店鋪型態'] || '一般店']);
+  }
+  return { cols: STORE_LIST_COLS, rows: out };
 }
 
 function getStores(month, section) {

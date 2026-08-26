@@ -23,8 +23,11 @@ function assertEqual(actual, expected, label) {
 // ===== 1. 確認狀態必須外顯，且選店要等它 =====
 assertEqual(APP.includes("const [inspectedState, setInspectedState] = useState({ loaded: false, err: '' })"), true,
   '要有「已確認 / 確認失敗」狀態，初始為未確認');
-assertEqual(APP.includes('const pickReady = inspectedState.loaded || !!editingRecordId;'), true,
-  '選店的開關綁在確認狀態上（編輯既有紀錄例外，那時店鋪是固定的）');
+// 選店要等兩件事：門市名單（改為背景載入後才多這一項）與「本月已點檢」確認
+assertEqual(APP.includes('const pickReady = (inspectedState.loaded && storesState.loaded) || !!editingRecordId;'), true,
+  '選店的開關要同時綁名單與確認狀態（編輯既有紀錄例外，那時店鋪是固定的）');
+assertEqual(APP.includes('正在載入本月店鋪名單'), true, '名單還沒到要說在載名單，不要說在確認已點檢');
+assertEqual(APP.includes('店鋪名單載入失敗'), true, '名單載入失敗要單獨顯示並可重試');
 assertEqual(APP.includes('disabled={s.done || !pickReady}'), true, '未確認完時整份名單都不可點');
 assertEqual(APP.includes('正在確認本月哪些店已經點檢過'), true, '要告訴使用者在等什麼，不可只是不能點');
 

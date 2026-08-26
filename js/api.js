@@ -19,6 +19,7 @@
    */
   const TIMEOUT_BY_ACTION = {
     getBootstrap: 45000,
+    getStoreList: 45000,   // 1500+ 家店；在背景跑，慢一點不影響畫面可用
     buildMonthlyReport: 60000,
     importMaster: 60000,
     repairPhotoLinks: 60000,
@@ -115,7 +116,9 @@
     call,
     onRetry, // 供UI顯示「重試中 n/m」，避免暫時性失敗看起來像卡住
     login: (userId, password) => call('login', { userId, password }),
-    getBootstrap: (month, section) => call('getBootstrap', { month, section }),
+    // light=true：不含門市名單（名單改由 getStoreList 在背景取，開場才不會被近 200KB 拖住）
+    getBootstrap: (month, section, light) => call('getBootstrap', { month, section, light: light === true }),
+    getStoreList: (month, section) => call('getStoreList', { month, section }),
     // 只回傳「單檔上傳網址」，權杖留在後端（見 uploader.js 開頭說明）
     createUploadSessions: (items, origin) => call('createUploadSessions', { items, origin }),
     submitRecord: (record) => call('submitRecord', { record }),
