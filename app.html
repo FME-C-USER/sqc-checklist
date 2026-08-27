@@ -37,7 +37,7 @@
     const { useState, useMemo, useEffect, useRef } = React;
     // 版本字串一律用「台灣時間」的 YYYYMMDD-HHMM。與部署關卡無關 ——
     // 那道關卡看的是資安報告的檔名日期，而 GitHub runner 跑 UTC，兩者不要混在一起。
-    const APP_VERSION = '20260827-1519'; // 每次部署更新，用來確認瀏覽器跑的是哪一版（台灣時間）
+    const APP_VERSION = '20260827-1600'; // 每次部署更新，用來確認瀏覽器跑的是哪一版（台灣時間）
     // 這一版前端「至少」需要的後端版本。前後端是各自演進的，版本號本來就不會相等
     // （只改前端時後端不動，反之亦然），所以不能用「兩者相等」當健康指標 ——
     // 要比的是「線上後端有沒有舊到缺少本前端需要的 API」。
@@ -1516,6 +1516,9 @@ ${nm}
         return Array.from(new Set([a, b]));
       };
       const [queryLoading, setQueryLoading] = useState(false);
+      // 有月份讀不到時的警示文字。必須攤在畫面上而不是只彈一次視窗 ——
+      // 「執行店數 0」這種數字看起來很權威，使用者會直接相信它。
+      const [loadWarn, setLoadWarn] = useState('');
       // 顯示 API 自動重試狀態（Google 轉送層偶發變慢/回404，重試通常就會恢復）
       const [retryInfo, setRetryInfo] = useState(null);
       useEffect(() => {
@@ -1526,29 +1529,62 @@ ${nm}
       // 目前畫面上這份清單是用哪組條件查出來的。背景自動刷新要沿用它 ——
       // 直接讀 filter 會把「使用者改了日期但還沒按查詢」的新條件偷偷套上去。
       const appliedFilter = useRef(null);
+      // 讀不到的月份要指名是哪一個月、什麼原因 —— 只說「查詢失敗」查不出是哪一段沒抓到。
+      // 定義在 loadRecords 之前：雖然它只在 promise 回呼裡被叫到、不會撞到 TDZ，
+      // 但這個專案曾因 useMemo 排在它引用的 const 之前而整個 App 起不來，一律先定義再使用。
+      const warnTextOf = (bad) => bad.map(b =>
+        `${b.month} 讀取失敗（${(b.error && b.error.message) || '未知原因'}）`).join('；');
+      /**
+       * 查詢紀錄／彙總專區共用的取資料。
+       *
+       * silent 一定要用「=== true」嚴格比對，不可以只看 truthy：
+       * 兩個「查詢」按鈕原本寫成 onClick={loadRecords}，React 會把 click 事件物件
+       * 當第一個參數傳進來，而事件物件是 truthy —— 於是按下查詢時
+       *   1 沿用「上一次」的查詢條件，使用者剛改好的日期被整個忽略
+       *     （初始條件是「今天→今天」，所以改成 8/01~8/26 後按查詢仍只抓到今天，
+       *      前端再用 8/01~8/26 過濾只有今天的資料 → 執行店數 0，看起來像資料不見）
+       *   2 進度條不出現、按鈕也不會 disable（可以連點觸發多次查詢）
+       *   3 查詢失敗完全不提示
+       * 呼叫點已改成 () => loadRecords()，這裡再加一道，避免以後又有人寫回 onClick={loadRecords}。
+       *
+       * 查詢紀錄：所有登入者皆可查全部（不依登入者工號過濾）。
+       * 因為名冊多數人未填 AD、登入後取不到工號，用工號過濾會失效或誤擋；
+       * 權限差異僅在「維護專區」與報表/請款產出限管理者。
+       */
       const loadRecords = (useApplied) => {
         if (!CONFIGURED) return;
-        // 查詢紀錄：所有登入者皆可查全部（不依登入者工號過濾）。
-        // 因為名冊多數人未填 AD、登入後取不到工號，用工號過濾會失效或誤擋；
-        // 權限差異僅在「維護專區」與報表/請款產出限管理者。
-        const src = (useApplied && appliedFilter.current) || filter;
+        const silent = useApplied === true;
+        const src = (silent && appliedFilter.current) || filter;
         const f = { from: src.from, to: src.to, section: src.section };
         appliedFilter.current = f;
         const months = queryMonthsOf(f.from, f.to);
         // 背景自動刷新不顯示進度條、失敗也不彈視窗 —— 使用者沒有按查詢，
         // 跳出「查詢失敗」只會讓人以為自己做錯了什麼。下一次刷新或手動查詢會再試。
-        if (!useApplied) setQueryLoading(true);
-        return Promise.all(months.map(m => SqcApi.queryRecords(m, f).catch(() => ({ records: [] }))))
+        if (!silent) setQueryLoading(true);
+        // 逐月查，但「那個月讀不到」不可以被當成「那個月沒有紀錄」。
+        // 原本是 .catch(() => ({ records: [] }))：Google 轉送層偶發逾時或回 404 時
+        // （實測過一次 33 秒後 404），使用者看到的是「執行店數 0」而不是「查詢失敗」，
+        // 而他們會相信那個 0。所以要把失敗的月份記下來並攤在畫面上。
+        return Promise.all(months.map(m =>
+          SqcApi.queryRecords(m, f)
+            .then(r => ({ ok: true, month: m, records: (r && r.records) || [] }))
+            .catch(e => ({ ok: false, month: m, error: e, records: [] }))
+        ))
           .then(results => {
-            const all = results.flatMap(r => (r && r.records) || []);
+            const bad = results.filter(r => !r.ok);
+            // 背景刷新遇到部分失敗時，寧可留著上一次完整的清單，也不要用不完整的覆蓋掉
+            if (bad.length && silent) { setLoadWarn(warnTextOf(bad)); return; }
+            setLoadWarn(bad.length ? warnTextOf(bad) : '');
+            const all = results.flatMap(r => r.records);
             setRecords(all.map(x => ({
               id: x.id, date: String(x.time).slice(0, 10), store: x.storeName, section: x.section,
               staff: x.staffName, version: x.month, total: Number(x.total), grade: x.grade,
               pendingPhotos: Number(x.pendingPhotos) || 0, _raw: x,
             })));
+            if (bad.length) alert('⚠ ' + warnTextOf(bad) + '\n\n下方的筆數與統計並不完整，請重新查詢一次。');
           })
-          .catch(e => { if (!useApplied) alert('查詢失敗：' + e.message); })
-          .finally(() => { if (!useApplied) setQueryLoading(false); });
+          .catch(e => { if (!silent) alert('查詢失敗：' + e.message); })
+          .finally(() => { if (!silent) setQueryLoading(false); });
       };
 
       // 依賴一定要含 checklist：題庫是開場 API 回來才有的，第一次算的時候 categories 還是空陣列。
@@ -2630,7 +2666,10 @@ ${nm}
                     <button onClick={() => setMonthRange(-1)} className="px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs">上月</button>
                     <button onClick={() => setMonthRange(0)} className="px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs">本月</button>
                   </div>
-                  <button onClick={loadRecords} disabled={queryLoading} className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white rounded-lg">{queryLoading ? '查詢中…' : '🔍 查詢'}</button>
+                  {/* 一定要包一層箭頭函式：直接寫 onClick={loadRecords} 會把 click 事件
+                      當第一個參數傳進去，而事件物件是 truthy → 沿用上一次的查詢條件、
+                      使用者剛改的日期被忽略，且失敗不提示。詳見 loadRecords 的註解。 */}
+                  <button onClick={() => loadRecords()} disabled={queryLoading} className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white rounded-lg">{queryLoading ? '查詢中…' : '🔍 查詢'}</button>
                   <label className={"flex items-center gap-1.5 px-3 py-2 rounded-lg cursor-pointer " + (pendingCount ? "bg-red-50 text-red-700 border border-red-200" : "text-slate-500")}>
                     <input type="checkbox" checked={onlyPending} onChange={e => setOnlyPending(e.target.checked)} />
                     <span className="text-xs whitespace-nowrap">只看照片未齊{pendingCount ? `（${pendingCount} 筆）` : ''}</span>
@@ -2653,6 +2692,13 @@ ${nm}
                       <div className="h-full w-1/3 bg-emerald-500 rounded-full" style={{ animation: 'sqc-progress 1s ease-in-out infinite' }} />
                     </div>
                     <div className={"text-xs mt-1 " + (retryInfo ? "text-amber-600" : "text-emerald-600")}>{busyText || '查詢中，請稍候…'}</div>
+                  </div>
+                )}
+                {loadWarn && (
+                  <div className="bg-amber-50 border border-amber-300 text-amber-800 rounded-xl p-3 text-sm">
+                    <div className="font-semibold">⚠ 有月份沒有讀到，下方的筆數與統計不完整</div>
+                    <div className="text-xs mt-1">{loadWarn}</div>
+                    <button onClick={() => loadRecords()} className="mt-2 px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-xs">重新查詢</button>
                   </div>
                 )}
                 <div className="bg-white rounded-xl shadow-sm overflow-hidden">
@@ -2689,7 +2735,10 @@ ${nm}
                     <button onClick={() => setMonthRange(-1)} className="px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs">上月</button>
                     <button onClick={() => setMonthRange(0)} className="px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs">本月</button>
                   </div>
-                  <button onClick={loadRecords} disabled={queryLoading} className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white rounded-lg">{queryLoading ? '查詢中…' : '🔍 查詢'}</button>
+                  {/* 一定要包一層箭頭函式：直接寫 onClick={loadRecords} 會把 click 事件
+                      當第一個參數傳進去，而事件物件是 truthy → 沿用上一次的查詢條件、
+                      使用者剛改的日期被忽略，且失敗不提示。詳見 loadRecords 的註解。 */}
+                  <button onClick={() => loadRecords()} disabled={queryLoading} className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white rounded-lg">{queryLoading ? '查詢中…' : '🔍 查詢'}</button>
                   <div className="ml-auto flex flex-wrap gap-3">
                     <button onClick={exportManagerReport} disabled={buildingManager} className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white rounded-lg">{buildingManager ? '產出中…' : '📘 產出課長版'}</button>
                     <button onClick={exportCustomerReport} disabled={buildingCustomer} className="px-4 py-2 bg-violet-600 hover:bg-violet-700 disabled:opacity-50 text-white rounded-lg">{buildingCustomer ? '產出中…' : '📗 產出客戶版'}</button>
@@ -2703,6 +2752,13 @@ ${nm}
                       <div className="h-full w-1/3 bg-emerald-500 rounded-full" style={{ animation: 'sqc-progress 1s ease-in-out infinite' }} />
                     </div>
                     <div className={"text-xs mt-1 " + (retryInfo ? "text-amber-600" : "text-emerald-600")}>{busyText || '查詢中，請稍候…'}</div>
+                  </div>
+                )}
+                {loadWarn && (
+                  <div className="bg-amber-50 border border-amber-300 text-amber-800 rounded-xl p-3 text-sm">
+                    <div className="font-semibold">⚠ 有月份沒有讀到，下方的筆數與統計不完整</div>
+                    <div className="text-xs mt-1">{loadWarn}</div>
+                    <button onClick={() => loadRecords()} className="mt-2 px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-xs">重新查詢</button>
                   </div>
                 )}
                 <div className="grid grid-cols-3 gap-3">

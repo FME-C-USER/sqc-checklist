@@ -139,11 +139,15 @@ assertEqual(/if \(!pendingCount\) return;/.test(APP), true, '畫面上沒有紅�
 assertEqual(/setTimeout\(\(\) => loadRecords\(true\), 1500\)/.test(APP), true, '稍等一下再查，留餘裕給後端寫完');
 // 背景刷新必須沿用上一次查詢的條件，否則使用者改了日期還沒按查詢時會被偷偷換掉
 assertEqual(APP.includes('const appliedFilter = useRef(null);'), true, '要記住這份清單是用哪組條件查的');
-assertEqual(APP.includes('const src = (useApplied && appliedFilter.current) || filter;'), true,
+// 2026-08-27 改為 silent === true 嚴格比對：原本的 (useApplied && ...) 會被 click 事件物件
+// 騙過去，按「查詢」時沿用上一次的條件、使用者剛改的日期被忽略。詳見 queryFilter.test.js。
+assertEqual(APP.includes('const silent = useApplied === true;'), true,
+  '要用 === true 嚴格比對（truthy 判斷會被 click 事件物件騙過）');
+assertEqual(APP.includes('const src = (silent && appliedFilter.current) || filter;'), true,
   '背景刷新用已套用的條件，手動查詢用當下的條件');
 // 背景刷新不可彈視窗、不可閃進度條 —— 使用者沒按查詢，跳「查詢失敗」只會讓人以為自己做錯事
-assertEqual(APP.includes("if (!useApplied) setQueryLoading(true);"), true, '背景刷新不顯示進度條');
-assertEqual(APP.includes("catch(e => { if (!useApplied) alert('查詢失敗：' + e.message); })"), true,
+assertEqual(APP.includes('if (!silent) setQueryLoading(true);'), true, '背景刷新不顯示進度條');
+assertEqual(APP.includes("catch(e => { if (!silent) alert('查詢失敗：' + e.message); })"), true,
   '背景刷新失敗不彈視窗');
 // 送出後自動關閉那條路徑也要刷新（原本只有手動按「關閉」才刷）
 assertEqual(/setPostSubmit\(null\);\s*\n\s*loadRecords\(true\);/.test(APP), true, '自動關閉時順手刷新清單');
