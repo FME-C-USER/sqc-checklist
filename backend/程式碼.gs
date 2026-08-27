@@ -10,7 +10,7 @@
 // 後端版本：每次修改本檔就更新，並於前端「資料更新時間」旁顯示。
 // 用途：貼上程式碼後若忘記「部署 → 管理部署作業 → 新版本」，畫面上的後端版本就不會變，
 //       可立即分辨是「沒貼上」「貼了但沒部署」還是「已生效」。
-var GAS_VERSION = '20260827-1240';   // 台灣時間 YYYYMMDD-HHMM
+var GAS_VERSION = '20260827-1401';   // 台灣時間 YYYYMMDD-HHMM
 
 var SPREADSHEET_ID = '1GRZZsZRgakMGENspOxmlx96NfckC8UYOe0ipuNNEoh0';
 var DRIVE_ROOT_ID  = '122nQjldImn5Zh5AUguxZF0YzobThgdc9';
@@ -115,7 +115,12 @@ function doPost(e) {
  * 但要把「知情的決定」記進異動紀錄，事後才追得出是哪一筆、誰做的決定。
  * 事件名稱走白名單：否則任何登入者都能往異動紀錄塞任意文字。
  */
-var CLIENT_EVENTS = { leaveWithPendingPhotos: '照片未傳完即離開' };
+var CLIENT_EVENTS = {
+  leaveWithPendingPhotos: '照片未傳完即離開',
+  // 手機儲存空間不足導致照片存不進待傳佇列。這種情況照片會直接遺失（紀錄裡也不會記到），
+  // 必須留下軌跡，否則事後只會看到「這家店照片比較少」而查不出原因。
+  photoQueueFull: '照片存不進待傳佇列',
+};
 // 這支是前端可任意呼叫的寫入點，沒有上限的話任何登入者都能不斷往異動紀錄塞 500 字的列，
 // 把真正的軌跡淹掉（活頁有儲存格上限）。一位點檢人員一小時內正常不會超過幾筆，
 // 60 筆已遠高於合理使用量。

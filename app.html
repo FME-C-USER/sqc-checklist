@@ -37,7 +37,7 @@
     const { useState, useMemo, useEffect, useRef } = React;
     // 版本字串一律用「台灣時間」的 YYYYMMDD-HHMM。與部署關卡無關 ——
     // 那道關卡看的是資安報告的檔名日期，而 GitHub runner 跑 UTC，兩者不要混在一起。
-    const APP_VERSION = '20260827-1240'; // 每次部署更新，用來確認瀏覽器跑的是哪一版（台灣時間）
+    const APP_VERSION = '20260827-1401'; // 每次部署更新，用來確認瀏覽器跑的是哪一版（台灣時間）
     // 這一版前端「至少」需要的後端版本。前後端是各自演進的，版本號本來就不會相等
     // （只改前端時後端不動，反之亦然），所以不能用「兩者相等」當健康指標 ——
     // 要比的是「線上後端有沒有舊到缺少本前端需要的 API」。
@@ -1548,14 +1548,18 @@ ${nm}
           .finally(() => { if (!useApplied) setQueryLoading(false); });
       };
 
+      // 依賴一定要含 checklist：題庫是開場 API 回來才有的，第一次算的時候 categories 還是空陣列。
+      // 原本只寫 [scores]，於是「使用者還沒動過任何一題」時合計就一直停在 0 ——
+      // 分區小計是在 render 內即時算的（顯示 5/5），合計卻是 0/10，兩個數字同頁互相矛盾；
+      // 若全店滿分、點檢人員沒去動任何得分就送出，會寫進一筆 0 分「不合格」的紀錄。
       const total = useMemo(() => {
         let t = 0;
         checklist.categories.forEach(c => c.items.forEach(it => { const s = scores[it.id]; t += (s && s.score != null) ? s.score : it.max; }));
         return t;
-      }, [scores]);
+      }, [scores, checklist]);
 
       // 是否「無缺失」→ 所有題目皆滿分（沒有任何扣分）
-      const noDeductDefect = useMemo(() => checklist.categories.every(c => c.items.every(it => { const s = scores[it.id]; return !s || s.score == null || s.score === it.max; })), [scores]);
+      const noDeductDefect = useMemo(() => checklist.categories.every(c => c.items.every(it => { const s = scores[it.id]; return !s || s.score == null || s.score === it.max; })), [scores, checklist]);
 
       const grade = gradeOf(total);
       const setItemState = (id, st) => setScores(prev => ({ ...prev, [id]: st }));
@@ -1633,7 +1637,7 @@ ${nm}
         setTab('work');
       };
 
-      const doSubmit = () => {
+      const doSubmit = async () => {
         const isEdit = !!editingRecordId;
         // 題庫是計分依據：尚在載入或載入失敗(題庫為空)時送出，會把明細與分數寫成 0 分覆蓋掉原紀錄，必須先擋下
         if (loading) { alert('題庫仍在載入中，請稍候幾秒再送出'); return; }
@@ -1763,6 +1767,40 @@ ${nm}
         }
         addPhotos([monthFolder, 'SQC點檢表完成照片'], paperForm);
 
+        /**
+         * 照片先進佇列，再依「真的存進去的那幾張」組出紀錄。
+         * 原本是 queue.forEach(q => SqcUploader.enqueue(...)) —— 沒有 await 也沒有 catch。
+         * enqueue 是寫進 IndexedDB，手機儲存空間不足時會失敗（每張照片上限 1200KB，
+         * 一家店 19 張約 22MB，連續幾家沒訊號就可能撞到配額），而那個 rejection 沒人接：
+         * 照片JSON 已經記下檔名、照片卻從來沒進佇列，畫面上什麼都不會說 ——
+         * 之後就永遠是「照片未齊」，而「照片連結修復」會回報 Drive 找不到這個檔案。
+         * 改為先寫佇列、把失敗的那幾張從照片JSON 移除，並明確告訴使用者。
+         */
+        const enqueueResults = await Promise.allSettled(
+          queue.map(q => SqcUploader.enqueue({ ...q, recordId: recId, month: workMonth }))
+        );
+        const failedNames = queue
+          .filter((_, i) => enqueueResults[i].status === 'rejected')
+          .map(q => q.name);
+        if (failedNames.length) {
+          const bad = new Set(failedNames);
+          Object.keys(photosJson).forEach(k => {
+            photosJson[k] = (photosJson[k] || []).filter(e => !bad.has(typeof e === 'string' ? e : (e && e.name)));
+            if (!photosJson[k].length) delete photosJson[k];
+          });
+          const why = enqueueResults.find(r => r.status === 'rejected');
+          const msg = (why && why.reason && why.reason.name === 'QuotaExceededError')
+            ? '手機儲存空間不足'
+            : ('原因：' + ((why && why.reason && (why.reason.message || why.reason.name)) || '未知'));
+          alert(`⚠ 有 ${failedNames.length} 張照片沒能存進待傳佇列（${msg}）。\n\n`
+            + '這些照片不會被上傳，紀錄裡也不會記到它們。\n'
+            + '請清出手機空間後，到「查詢紀錄」找到這筆按「編輯」重新加入照片。');
+          if (CONFIGURED) {
+            SqcApi.logEvent('photoQueueFull', `${storeName}：${failedNames.length} 張存不進佇列（${msg}）`).catch(() => { });
+          }
+        }
+        const queuedCount = queue.length - failedNames.length;
+
         const record = {
           id: recId, month: workMonth, time: basic.time.replace('T', ' '),
           dept: basic.dept, section: basic.section, empId: basic.staffId, staffName: staff.name,
@@ -1775,8 +1813,6 @@ ${nm}
           paperPhotos: (photosJson[[monthFolder, 'SQC點檢表完成照片'].join('/')] || [])
             .map(e => (e && typeof e === 'object') ? e.name : e).filter(Boolean),
         };
-
-        queue.forEach(q => SqcUploader.enqueue({ ...q, recordId: recId, month: workMonth }));
 
         // 紀錄依「點檢時間」分月存放。編輯時若把點檢時間改到別的月份，該筆就必須從原月份活頁搬到新月份，
         // 否則用新月份去更新會找不到原列(原紀錄不會被改到)。搬移採「先寫入新月份、成功後才刪原月份」的順序，
@@ -1826,13 +1862,13 @@ ${nm}
           loadInspected(workMonth);
           // 照片還沒傳完就放人走，是「報表沒有照片連結」的唯一成因 —— 照片只存在那一台裝置上，
           // 人離開、裝置失聯就再也兌現不了。所以送出後改成擋在上傳進度畫面，傳完才放行。
-          if (queue.length) {
+          if (queuedCount) {
             // 紀錄剛寫進後端 → 立刻踢一次上傳，並清掉退避。
             // 照片是在紀錄寫入「之前」就開始傳的，所以第一次回寫連結常會收到「找不到紀錄」而退避；
             // 不清掉的話要等下一輪 setInterval（15 秒）才會再試，每一家店都會白等十幾秒。
             SqcUploader.pump({ force: true, recordId: recId });
             // 順利的店幾秒就傳完了，先不要彈畫面擋人；緩衝期過後還沒完成才彈出來
-            const info = { recordId: recId, store: storeName, total, grade: grade.txt, added: queue.length };
+            const info = { recordId: recId, store: storeName, total, grade: grade.txt, added: queuedCount };
             setTimeout(() => {
               SqcUploader.countsOfRecord(recId)
                 .then(c => {
@@ -1858,12 +1894,16 @@ ${nm}
       // 包一層例外攔截：任何未預期的錯誤都要顯示出來，不可讓按鈕「按了沒反應」而查不出原因
       const submit = () => {
         if (submitting) return; // 正在送出就忽略重複點擊
-        try { doSubmit(); }
-        catch (e) {
+        // doSubmit 現在是 async（要等照片寫進佇列才知道有幾張成功），
+        // 所以除了 try/catch 還要接住 rejection —— 否則錯誤會變成沒人接的 promise，
+        // 按鈕鎖在「送出中」而畫面上什麼都不說。
+        const oops = (e) => {
           setSubmitting(false);
           console.error('[SQC] 送出時發生未預期錯誤', e);
           alert('送出時發生錯誤，請截圖此訊息：\n' + (e && (e.stack || e.message) || e));
-        }
+        };
+        try { Promise.resolve(doSubmit()).catch(oops); }
+        catch (e) { oops(e); }
       };
 
       // ---- 查詢/彙總篩選 ----
