@@ -23,38 +23,53 @@ function assertEqual(actual, expected, label) {
 }
 
 // ===== 1. 逾時要按動作分，重的動作不可被 12 秒砍掉 =====
-const mBy = /const TIMEOUT_BY_ACTION = \{[\s\S]*?\n  \};/.exec(API);
+const mSlow = /const SLOW_ACTIONS = \{[\s\S]*?\n  \};/.exec(API);
+const mLong = /const RETRY_LONGER = \{[\s\S]*?\n  \};/.exec(API);
 const mTs = /const timeoutsOf = \(action\) => \{[\s\S]*?\n  \};/.exec(API);
-assertEqual(!!mBy && !!mTs, true, '應能找到 TIMEOUT_BY_ACTION 與 timeoutsOf');
+assertEqual(!!mSlow && !!mLong && !!mTs, true, '應能找到 SLOW_ACTIONS、RETRY_LONGER 與 timeoutsOf');
 const sb = { TIMEOUT_MS: 12000 };
 vm.createContext(sb);
-vm.runInContext(mBy[0] + '\n' + mTs[0] + '; this.fn = timeoutsOf;', sb);
+vm.runInContext([mSlow[0], mLong[0], mTs[0], 'this.fn = timeoutsOf;'].join('\n'), sb);
 const timeoutsOf = sb.fn;
 const RETRY = [700, 1500, 3000];
 const worst = (a) => {
   const ts = timeoutsOf(a);
-  return ts.reduce((s, x, i) => s + x + (i + 1 < ts.length ? RETRY[Math.min(i, 2)] : 0), 0);
+  return ts.reduce((s2, x, i) => s2 + x + (i + 1 < ts.length ? RETRY[Math.min(i, 2)] : 0), 0);
 };
-// 重的動作：第一次仍用短逾時（快速跳過轉送層偶發的 404），第二次才給足時間
-assertEqual(timeoutsOf('getBootstrap')[0], 12000, '開場載入第一次仍用 12 秒');
-assertEqual(timeoutsOf('getBootstrap')[1] >= 30000, true, '第二次要給足時間（六次整表讀取＋1500 家店的傳輸）');
-assertEqual(timeoutsOf('getBootstrap').length, 2, '重的動作只嘗試兩次，否則失敗要等好幾分鐘');
-assertEqual(timeoutsOf('buildMonthlyReport')[1] >= 30000, true, '產報表要更久');
-assertEqual(timeoutsOf('importMaster')[1] >= 30000, true, '匯入名單要更久');
-assertEqual(timeoutsOf('repairPhotoLinks')[1] >= 30000, true, '整月照片修復要更久');
-// 輕量動作維持四次短逾時
+
+// 正常就慢的動作：第一次就要給足時間。
+//   2026-08-26 踩過的坑：原本一律「第一次 12 秒」，但 getStoreList 讀 1500+ 列正常就要十幾秒，
+//   於是第一次必然逾時 → 每次開 App 都先看到一次「回應較慢，自動重試中」才成功。
+assertEqual(timeoutsOf('getStoreList')[0] >= 30000, true, '名單第一次就要給足時間（正常就要十幾秒）');
+assertEqual(timeoutsOf('getStoreList').length, 2, '慢的動作只嘗試兩次，避免失敗時等好幾分鐘');
+assertEqual(timeoutsOf('buildMonthlyReport')[0] >= 30000, true, '產報表第一次就要給足時間');
+assertEqual(timeoutsOf('importMaster')[0] >= 30000, true, '匯入第一次就要給足時間');
+assertEqual(timeoutsOf('repairPhotoLinks')[0] >= 30000, true, '整月照片修復第一次就要給足時間');
+assertEqual(timeoutsOf('getMaster')[0] >= 30000, true, '維護專區讀名單第一次就要給足時間');
+
+// 正常很快、偶爾被轉送層拖住的動作：第一次短（快速跳過那一次），第二次才給足
+assertEqual(timeoutsOf('getBootstrap')[0], 12000, '開場載入（已不含名單）第一次用短逾時');
+assertEqual(timeoutsOf('getBootstrap')[1] >= 30000, true, '第二次給足時間');
+assertEqual(timeoutsOf('getBootstrap').length, 2, '只嘗試兩次');
+assertEqual(timeoutsOf('queryRecords'), [12000, 30000], '查詢紀錄同屬「正常快、偶爾慢」');
+
+// 其餘動作維持四次短逾時
 assertEqual(timeoutsOf('submitRecord'), [12000, 12000, 12000, 12000], '送出維持四次 12 秒');
+assertEqual(timeoutsOf('attachPhotoLinks'), [12000, 12000, 12000, 12000], '回寫連結維持四次 12 秒');
 assertEqual(timeoutsOf('checkEditPass'), [12000, 12000, 12000, 12000], '未列出的動作用預設值');
-// 最壞總等待不可比原本（12×4＋間隔＝53 秒）長太多，否則失敗時像卡死
-assertEqual(worst('getBootstrap') <= 75000, true, '開場載入最壞總等待不超過 75 秒（實際 58 秒）');
+
+// 最壞總等待要有上限，否則失敗時像卡死
+assertEqual(worst('getBootstrap') <= 75000, true, '開場載入最壞不超過 75 秒（實際 58 秒）');
 assertEqual(worst('submitRecord'), 53200, '送出的最壞總等待與原本相同');
+assertEqual(worst('getStoreList') <= 100000, true, '名單最壞不超過 100 秒（背景載入，畫面仍可用）');
+
 // 逾時訊息要講實際用的秒數，不可寫死 12
 assertEqual(API.includes("'伺服器逾時未回應（' + Math.round(ms / 1000) + ' 秒）'"), true,
   '逾時訊息要顯示該次實際的逾時秒數');
 assertEqual(API.includes('const out = await attempt(action, payload, timeouts[i]);'), true, '每次嘗試用各自的逾時');
 assertEqual(/setTimeout\(\(\) => ctrl\.abort\(\), TIMEOUT_MS\)/.test(API), false, '不可再用全域逾時');
-// 重試的睡眠要以「還有沒有下一次」為準，不可用 RETRY_DELAYS 的長度（重動作只有兩次）
 assertEqual(API.includes('if (i + 1 < maxAttempts) {'), true, '最後一次失敗後不可再多睡一輪');
+assertEqual(API.includes('const TIMEOUT_BY_ACTION'), false, '舊的單一分類已被取代，不留死碼');
 
 // ===== 2. 載入失敗時，版本號要標明是快取值 =====
 assertEqual(APP.includes("後端 {gasVer || '—'}{bootWarn ? '（上次載入時）' : ''}"), true,

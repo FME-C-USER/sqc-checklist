@@ -221,11 +221,23 @@
       }));
     };
     try {
-      const res = await window.SqcApi.attachPhotoLinks(month, recordId, links);
+      // deferShare：只寫連結。「設為知道連結就能看」要對每張照片打三次 Drive API，
+      // 19 張就是幾十次往返、實測佔掉好幾秒 —— 而使用者是在等這一支回來才看到「已完成」。
+      // 連結一寫回，報表就已經點得到照片了；分享是給「沒有 Google 帳號的外部收件人」用的，
+      // 晚幾秒完成不影響任何人，所以移到背景。
+      const res = await window.SqcApi.attachPhotoLinks(month, recordId, links, true);
       // 照片是在紀錄送出「之前」就開始上傳的，所以可能比紀錄本身更早完成 → 後端會回「找不到紀錄」。
       // 這種情況必須維持 done、等下次 pump 週期紀錄存在後再送，不可標記 linked(否則連結永久遺失)。
       if (res && res.ok === false) { await backoff(res.message || '找不到紀錄', true); return; }
       await Promise.all(toLink.map((p) => window.SqcDB.updatePhoto({ ...p, status: 'linked' })));
+      // 標記 linked 之後才分享，且不等它 —— 分享失敗不該讓照片回到「未完成」狀態，
+      // 那些檔案已經在雲端硬碟、連結也已經寫回紀錄了。真的沒分享成功時，
+      // 維護專區的「照片連結修復」會再補一次（它也會設定分享）。
+      // 舊版後端沒有 sharePhotoLinks，但它的 attachPhotoLinks 會忽略 deferShare 而照舊同步分享，
+      // 所以這裡失敗也無妨。
+      if (res && res.deferredShare) {
+        window.SqcApi.sharePhotoLinks(links).catch(() => { });
+      }
     } catch (e) { await backoff(String(e && e.message || e), false); }
   }
 

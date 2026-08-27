@@ -161,8 +161,11 @@ function findDuplicateStoreRecords() {
 }
 
 // ===== 工具 =====
+var _ss = null;
 function ss() {
-  return SpreadsheetApp.openById(SPREADSHEET_ID);
+  // 與 程式碼.gs 的 ssBook() 同理：一次執行裡會呼叫很多次，openById 不必重複做
+  if (!_ss) _ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  return _ss;
 }
 
 /** 若活頁不存在則建立並寫入表頭；已存在則只補表頭列 */

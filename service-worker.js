@@ -3,7 +3,11 @@
 //   - 本站靜態檔：cache-first（離線可用）
 //   - GAS API / Drive：一律走網路，不快取（資料要即時）
 // ============================================================
-const CACHE = 'sqc-shell-v3';
+const CACHE = 'sqc-shell-v4';
+// 預先快取「每次開 App 都要用到」的檔案。
+// xlsx 與 exceljs（合計 1.81MB）刻意不列入 —— 它們只有產報表／Excel 匯入才用得到，
+// 而多數點檢人員不會用到那兩個功能。改由 app.html 的 ensureLib() 用到才載入，
+// 下面的 fetch 處理是 network-first 且會回填快取，所以第一次真的用到之後就有離線版本。
 const SHELL = [
   './',
   './index.html',
@@ -20,8 +24,6 @@ const SHELL = [
   './vendor/react-18.3.1.min.js',
   './vendor/react-dom-18.3.1.min.js',
   './vendor/babel-standalone-8.0.4.min.js',
-  './vendor/xlsx-0.20.3.full.min.js',
-  './vendor/exceljs-4.4.0.min.js',
 ];
 
 self.addEventListener('install', (e) => {

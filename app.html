@@ -8,8 +8,9 @@
   <script src="vendor/react-18.3.1.min.js"></script>
   <script src="vendor/react-dom-18.3.1.min.js"></script>
   <script src="vendor/babel-standalone-8.0.4.min.js"></script>
-  <script src="vendor/xlsx-0.20.3.full.min.js"></script>
-  <script src="vendor/exceljs-4.4.0.min.js"></script>
+  <!-- xlsx（0.91MB）與 exceljs（0.90MB）只有「產報表」與「Excel 匯入」用得到，
+       但點檢人員從來不會用到那兩個功能。原本每次開 App 都要下載並解析這 1.81MB
+       （佔全部前端資源的 37%），改為用到才載入 —— 見下方的 ensureLib()。 -->
   <script src="js/config.js"></script>
   <script src="js/api.js"></script>
   <script src="js/db.js"></script>
@@ -36,12 +37,12 @@
     const { useState, useMemo, useEffect, useRef } = React;
     // 版本字串一律用「台灣時間」的 YYYYMMDD-HHMM。與部署關卡無關 ——
     // 那道關卡看的是資安報告的檔名日期，而 GitHub runner 跑 UTC，兩者不要混在一起。
-    const APP_VERSION = '20260826-1712'; // 每次部署更新，用來確認瀏覽器跑的是哪一版（台灣時間）
+    const APP_VERSION = '20260827-1240'; // 每次部署更新，用來確認瀏覽器跑的是哪一版（台灣時間）
     // 這一版前端「至少」需要的後端版本。前後端是各自演進的，版本號本來就不會相等
     // （只改前端時後端不動，反之亦然），所以不能用「兩者相等」當健康指標 ——
     // 要比的是「線上後端有沒有舊到缺少本前端需要的 API」。
     // 規則：改了 程式碼.gs 且前端會用到那個改動時，才把這個值提到該後端版本。
-    const NEEDS_GAS = '20260826-1641';   // 需要：getStoreList（門市名單分開載入）
+    const NEEDS_GAS = '20260827-1240';   // 需要：submitRecord 等冪、getInspectedCodes、sharePhotoLinks
 
     // 全域錯誤攔截：任何未預期錯誤（含 async 事件處理器的未捕捉 rejection）都要顯示出來，
     // 否則按鈕會「按了沒反應」而完全查不到原因
@@ -248,6 +249,39 @@
       ],
     };
     const IDENTITIES = ['店長', '副店', '正職', 'PT'];
+    /**
+     * 用到才載入的大型函式庫（xlsx 0.91MB、exceljs 0.90MB，合計佔前端資源 37%）。
+     * 只有「產報表」與「Excel 匯入」需要，點檢人員從來不會用到 ——
+     * 原本每次開 App 都要下載並解析，在手機上是明顯的延遲。
+     * 已載入就直接回；同一支重複呼叫共用同一個 Promise，不會載入兩次。
+     * Service Worker 會快取檔案，所以第二次之後只剩解析成本。
+     */
+    const LIBS = {
+      XLSX: 'vendor/xlsx-0.20.3.full.min.js',
+      ExcelJS: 'vendor/exceljs-4.4.0.min.js',
+    };
+    const _libLoading = {};
+    function ensureLib(name) {
+      // 只允許白名單裡的名稱。目前呼叫端都是字面值，但沒有這道守衛的話，
+      // 未知名稱會讓 s.src 變成 undefined 而插入一個指向「undefined」的 script 標籤。
+      if (!LIBS[name]) return Promise.reject(new Error('未知的函式庫：' + name));
+      if (window[name]) return Promise.resolve(window[name]);
+      if (_libLoading[name]) return _libLoading[name];
+      _libLoading[name] = new Promise((resolve, reject) => {
+        const s = document.createElement('script');
+        s.src = LIBS[name];
+        s.onload = () => window[name]
+          ? resolve(window[name])
+          : reject(new Error(name + ' 載入後仍不存在'));
+        s.onerror = () => {
+          delete _libLoading[name];   // 允許重試（例如剛好斷線）
+          reject(new Error('無法載入 ' + name + ' 函式庫（' + LIBS[name] + '），請確認網路後再試'));
+        };
+        document.head.appendChild(s);
+      });
+      return _libLoading[name];
+    }
+
     const PASS_SCORE = 85;
     // 送出後給照片上傳的緩衝期：這段時間內傳完就不彈進度畫面，只顯示一行成功提示。
     // 順利的店多數在 2~4 秒內完成，不必每一家都被擋一次。
@@ -1282,13 +1316,22 @@
        *      Google 轉送層不穩），整個 session 的防重複機制就靜靜失效，畫面上完全看不出來。
        */
       const loadInspected = (m) => {
+        const mo = m || workMonth;
         if (!CONFIGURED) { setInspectedState({ loaded: true, err: '' }); return Promise.resolve(); }
         setInspectedState({ loaded: false, err: '' });
-        return SqcApi.queryRecords(m || workMonth, {}).then(r => {
-          const map = {}; (r.records || []).forEach(x => { map[normCode(x.storeCode)] = true; });
-          setInspectedCodes(map);
-          setInspectedState({ loaded: true, err: '' });
-        }).catch(e => setInspectedState({ loaded: false, err: e.message || '查詢失敗' }));
+        // 只取店號清單。原本呼叫 queryRecords(mo, {}) 取「全部紀錄」，但這裡只用得到店號 ——
+        // 而那支會把每一列的明細/觀察/照片JSON 全部解析後整包傳過來，月底上千筆就是好幾 MB。
+        // 舊版後端沒有 getInspectedCodes（會回「未知動作」），此時退回舊做法，功能不受影響。
+        const viaCodes = () => SqcApi.getInspectedCodes(mo).then(r => (r.codes || []));
+        const viaRecords = () => SqcApi.queryRecords(mo, {}).then(r => (r.records || []).map(x => x.storeCode));
+        return viaCodes()
+          .catch(e => (/未知動作/.test(e.message || '') ? viaRecords() : Promise.reject(e)))
+          .then(codes => {
+            const map = {}; codes.forEach(c => { const k = normCode(c); if (k) map[k] = true; });
+            setInspectedCodes(map);
+            setInspectedState({ loaded: true, err: '' });
+          })
+          .catch(e => setInspectedState({ loaded: false, err: e.message || '查詢失敗' }));
       };
       useEffect(() => {
         if (!CONFIGURED) return;
@@ -1801,7 +1844,11 @@ ${nm}
                 .catch(() => setPostSubmit(info));   // 查不到就照舊彈出來，寧可多問一次
             }, POST_GRACE_MS);
           } else {
-            setToast(`✅ ${isEdit ? '已更新' : '已送出'}　${storeName}　${total}/${TOTAL_MAX}（${grade.txt}）`);
+            // resent＝這一筆先前其實已經寫入成功，只是回應在網路上遺失而自動重送。
+            // 這是成功，不是錯誤 —— 但要講清楚，否則使用者會納悶「我明明按一次怎麼等這麼久」。
+            setToast(result && result.resent
+              ? `✅ ${storeName} 已送出（先前的回應在網路上遺失，已確認資料只有一筆）`
+              : `✅ ${isEdit ? '已更新' : '已送出'}　${storeName}　${total}/${TOTAL_MAX}（${grade.txt}）`);
           }
         }).catch(e => alert((isEdit ? '更新' : '送出') + '失敗：' + e.message
           + (isEdit ? '' : '\n\n這筆已存入待送佇列，網路恢復後會自動重送，請保持頁面開啟。')))
@@ -1914,6 +1961,7 @@ ${nm}
         if (!pending.length) { alert('當月名單中沒有尚未點檢的店鋪 🎉'); return; }
         const head = ['店號', '店名', '課別', '店鋪型態'];
         const data = [head].concat(pending.map(s => [padStoreCode(s.code), s.name, s.section, s.type || '一般店']));
+        await ensureLib('XLSX');
         const ws = XLSX.utils.aoa_to_sheet(data);
         ws['!cols'] = [{ wch: 12 }, { wch: 18 }, { wch: 10 }, { wch: 10 }];
         const wb = XLSX.utils.book_new();
@@ -1951,6 +1999,7 @@ ${nm}
               + '請到「維護專區 → 店鋪名單」重新匯入官方委外名單（檔案右側需含「梯次／評核日期區間」小表），'
               + '匯入後訊息會顯示「同時轉入梯次期間 N 筆」才算成功。');
           }
+          await ensureLib('ExcelJS');
           const wb = new ExcelJS.Workbook();
           if (!customerFacing) addPlainSheet(wb, '不及格店', buildFailStoreSheet(report));
           buildRosterCheckSheet(wb, report, customerFacing, filter);
@@ -2013,6 +2062,7 @@ ${nm}
         try {
           const { report, reportMonth } = ask;
           const out = SqcBilling.buildBillingSheets(report, report.pricing, ask.offshore, { from: filter.from, to: filter.to });
+          await ensureLib('ExcelJS');   // 只有產請款金額才需要，用到才載入
           const wb = buildBillingWorkbook(out);
 
           const fromMMDD = (filter.from || '').replace(/-/g, '').slice(4);
@@ -2949,7 +2999,7 @@ ${nm}
       };
       useEffect(() => { setEditing(null); load(); }, [sub, month]);
 
-      const parseFile = (file) => new Promise((resolve, reject) => {
+      const parseFile = (file) => ensureLib('XLSX').then(() => new Promise((resolve, reject) => {
         const reader = new FileReader();
         reader.onload = (ev) => {
           try {
@@ -2964,7 +3014,7 @@ ${nm}
         };
         reader.onerror = reject;
         reader.readAsArrayBuffer(file);
-      });
+      }));
 
       const [uploading, setUploading] = useState(false);
       const onUpload = async (e) => {

@@ -12,30 +12,33 @@
   // 且通常下一次就恢復 → 設較短逾時、多retry幾次，並對外通報重試狀態讓畫面不會看起來像卡住
   const TIMEOUT_MS = 12000;
   /**
-   * 逾時要按動作分。開場的 getBootstrap 要搬全部門市名單（實測 1500+ 家）＋題庫＋觀察題＋
-   * 人員，伺服器端有六次完整活頁讀取，本來就可能十幾秒；用 12 秒的通用逾時等於每次都在
-   * 逾時邊緣，訊號差一點就必然失敗 —— 而失敗後畫面只會說「連線不穩」，數據其實是快取的。
-   * 相反地，輕量的動作（送出、查詢單筆）維持短逾時才能快速跳過偶發的轉送層 404。
+   * 正常就慢的動作：第一次就要給足時間。
+   * 這裡踩過一次坑（2026-08-26）：原本一律「第一次 12 秒、第二次才給足」，
+   * 但 getStoreList 要讀 1500+ 列、正常就要十幾秒 —— 於是第一次必然逾時，
+   * 每次開 App 都會看到「回應較慢，自動重試中」，然後第二次才成功。
+   * 功能是好的，卻讓使用者每次都先看一次失敗。
    */
-  const TIMEOUT_BY_ACTION = {
-    getBootstrap: 45000,
-    getStoreList: 45000,   // 1500+ 家店；在背景跑，慢一點不影響畫面可用
+  const SLOW_ACTIONS = {
+    getStoreList: 45000,
     buildMonthlyReport: 60000,
     importMaster: 60000,
     repairPhotoLinks: 60000,
     getMaster: 30000,
+  };
+  /**
+   * 正常很快、但偶爾會被 Google 轉送層拖住的動作：第一次用短逾時快速跳過那一次，
+   * 第二次才給足時間。（實測轉送層偶發會 30 秒才回 404，而正常回應約 1~2 秒。）
+   */
+  const RETRY_LONGER = {
+    getBootstrap: 45000,
     queryRecords: 30000,
   };
   const RETRY_DELAYS = [700, 1500, 3000];
-  /**
-   * 每次嘗試各自的逾時。重的動作不是「一律給 45 秒」——
-   * 那會讓真的失敗時要等 45×4＝三分鐘才看到訊息。
-   * 改成第一次仍用 12 秒（正常回應遠低於此，可快速跳過轉送層偶發的 404），
-   * 第二次才給足時間讓真的比較慢的請求跑完；重的動作只嘗試兩次，總等待與原本相近。
-   */
+  /** 每次嘗試各自的逾時；慢的動作只嘗試兩次，避免真的失敗時要等好幾分鐘 */
   const timeoutsOf = (action) => {
-    const heavy = TIMEOUT_BY_ACTION[action];
-    return heavy ? [TIMEOUT_MS, heavy] : [TIMEOUT_MS, TIMEOUT_MS, TIMEOUT_MS, TIMEOUT_MS];
+    if (SLOW_ACTIONS[action]) return [SLOW_ACTIONS[action], SLOW_ACTIONS[action]];
+    if (RETRY_LONGER[action]) return [TIMEOUT_MS, RETRY_LONGER[action]];
+    return [TIMEOUT_MS, TIMEOUT_MS, TIMEOUT_MS, TIMEOUT_MS];
   };
   const _retryListeners = new Set();
   const onRetry = (fn) => { _retryListeners.add(fn); return () => _retryListeners.delete(fn); };
@@ -119,10 +122,15 @@
     // light=true：不含門市名單（名單改由 getStoreList 在背景取，開場才不會被近 200KB 拖住）
     getBootstrap: (month, section, light) => call('getBootstrap', { month, section, light: light === true }),
     getStoreList: (month, section) => call('getStoreList', { month, section }),
+    // 只回店號清單（防重複點檢用）。舊版後端沒這支，前端會退回 queryRecords
+    getInspectedCodes: (month) => call('getInspectedCodes', { month }),
     // 只回傳「單檔上傳網址」，權杖留在後端（見 uploader.js 開頭說明）
     createUploadSessions: (items, origin) => call('createUploadSessions', { items, origin }),
     submitRecord: (record) => call('submitRecord', { record }),
-    attachPhotoLinks: (month, recordId, links) => call('attachPhotoLinks', { month, recordId, links }),
+    // deferShare=true：只寫連結，不做「設為知道連結就能看」（那要對每張照片打三次 Drive API）。
+    // 分享由 sharePhotoLinks 在背景另外做，使用者才不必等那幾秒。
+    attachPhotoLinks: (month, recordId, links, deferShare) => call('attachPhotoLinks', { month, recordId, links, deferShare: deferShare === true }),
+    sharePhotoLinks: (links) => call('sharePhotoLinks', { links }),
     queryRecords: (month, filter) => call('queryRecords', { month, filter }),
     // pass：非當週紀錄的修改/刪除密碼（後端把關，前端只是先問一次）
     updateRecord: (month, id, record, pass) => call('updateRecord', { month, id, record, pass }),

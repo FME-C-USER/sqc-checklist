@@ -10,7 +10,7 @@
 // 後端版本：每次修改本檔就更新，並於前端「資料更新時間」旁顯示。
 // 用途：貼上程式碼後若忘記「部署 → 管理部署作業 → 新版本」，畫面上的後端版本就不會變，
 //       可立即分辨是「沒貼上」「貼了但沒部署」還是「已生效」。
-var GAS_VERSION = '20260826-1641';   // 台灣時間 YYYYMMDD-HHMM
+var GAS_VERSION = '20260827-1240';   // 台灣時間 YYYYMMDD-HHMM
 
 var SPREADSHEET_ID = '1GRZZsZRgakMGENspOxmlx96NfckC8UYOe0ipuNNEoh0';
 var DRIVE_ROOT_ID  = '122nQjldImn5Zh5AUguxZF0YzobThgdc9';
@@ -46,9 +46,11 @@ function doPost(e) {
       login: function () { return login(p.userId, p.password); },
       getBootstrap: function () { return getBootstrap(p.month, p.section, p.light === true); },
       getStoreList: function () { return getStoreList(p.month, p.section); },
+      getInspectedCodes: function () { return getInspectedCodes(p.month); },
       createUploadSessions: function () { return { sessions: createUploadSessions(p.items, p.origin) }; },
       submitRecord: function () { return submitRecord(p.record); },
-      attachPhotoLinks: function () { return attachPhotoLinks(p.month, p.recordId, p.links); },
+      attachPhotoLinks: function () { return attachPhotoLinks(p.month, p.recordId, p.links, p.deferShare === true); },
+      sharePhotoLinks: function () { return sharePhotoLinks(p.links); },
       queryRecords: function () { return { records: queryRecords(p.month, p.filter) }; },
       updateRecord: function () { return updateRecord(p.month, p.id, p.record, p.pass, sess && (sess.ad || sess.name)); },
       deleteRecord: function () { return deleteRecord(p.month, p.id, p.pass, sess && (sess.ad || sess.name)); },
@@ -525,17 +527,54 @@ function submitRecord(rec) {
   lock.waitLock(20000);
   try {
     var sh = ensureSheetNamed('點檢紀錄_' + rec.month, HEADERS_MAP.record); // 缺活頁自動建立
-    // 鎖定範圍內再次確認：同店本月是否已有紀錄（避免多人同時送出造成重複）
-    var data = sh.getDataRange().getValues();
-    var head = data[0];
+    // 只讀「紀錄ID」與「店號」兩欄。原本用 getDataRange() 把整張表讀進來，
+    // 但那張表每一列都含明細/觀察/照片JSON —— 月底上千筆時光是讀就要好幾秒，
+    // 而這裡只需要比對兩個欄位。找到重複才去讀那一列的細節（下面的 dupAt）。
+    var lastRow = sh.getLastRow();
+    var head = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0];
+    var idCol = head.indexOf('紀錄ID');
     var storeCol = head.indexOf('店號');
+    var ids = (lastRow > 1 && idCol >= 0) ? sh.getRange(2, idCol + 1, lastRow - 1, 1).getValues() : [];
+    var codes = (lastRow > 1 && storeCol >= 0) ? sh.getRange(2, storeCol + 1, lastRow - 1, 1).getValues() : [];
+    var recId = String(rec.id || '');
     var recCode = normCode(rec.storeCode);
-    for (var i = 1; i < data.length; i++) {
-      if (recCode !== '' && normCode(data[i][storeCol]) === recCode) {
-        return { ok: false, code: 'DUPLICATE', message: '這家店本月已有其他人送出點檢紀錄，請重新整理後至查詢紀錄編輯該筆' };
-      }
+    /**
+     * 兩種「已存在」要分清楚，順序也不能顛倒：
+     *   1. 同一個紀錄ID → 這一筆先前其實已經寫入成功，只是回應在網路上遺失，
+     *      用戶端自動重送了同一筆（api.js 逾時會重試最多四次，紀錄ID 是前端產生的
+     *      UUID，重送時不變）。這時必須回「成功」——
+     *      2026-08-26 現場就是這樣：同事只按一次上傳，等了很久卻被告知「已有點檢紀錄」，
+     *      而那筆紀錄正是他自己第一次送出的。回報錯誤會讓人以為整份表白填了。
+     *   2. 不同紀錄ID、同一家店 → 真的重複（別人搶先送，或自己在另一台裝置另填了一份）。
+     * 所以要先把整張表看完確認有沒有同 ID，才能判定是不是真的重複 ——
+     * 若邊掃邊回 DUPLICATE，同 ID 的那一列排在後面就永遠看不到。
+     */
+    var sameId = false, dupAt = -1;   // dupAt 為 0-based（對應 ids/codes 的索引）
+    for (var i = 0; i < ids.length; i++) {
+      if (recId !== '' && String(ids[i][0]) === recId) { sameId = true; break; }
+      if (dupAt < 0 && recCode !== '' && codes[i] && normCode(codes[i][0]) === recCode) dupAt = i;
     }
-    var id = rec.id || (Utilities.getUuid());
+    if (sameId) {
+      // resent：供前端區分「重送被確認」與「第一次就成功」，兩者都是成功
+      return { ok: true, id: recId, resent: true };
+    }
+    if (dupAt >= 0) {
+      // 只有真的重複時才去讀那一列（讀一列很便宜，比整張表讀進來划算太多）
+      var dupRow = sh.getRange(dupAt + 2, 1, 1, head.length).getValues()[0];
+      var staffCol = head.indexOf('點檢人員');
+      var timeCol = head.indexOf('點檢時間');
+      var who = staffCol >= 0 ? String(dupRow[staffCol] || '') : '';
+      var when = timeCol >= 0 ? toYmd(dupRow[timeCol]) : '';
+      return {
+        ok: false, code: 'DUPLICATE',
+        // 帶出「誰、什麼時候」才知道要找誰確認；原本一律寫「其他人」，
+        // 但也可能是自己在另一台裝置送的，講死反而誤導
+        message: '這家店本月已有點檢紀錄'
+          + (who ? '（' + who + (when ? ' 於 ' + when : '') + ' 送出）' : '')
+          + '，請至查詢紀錄編輯該筆',
+      };
+    }
+    var id = recId || (Utilities.getUuid());
     var now = nowStr();
     var row = recordToRow(sh, Object.assign({}, rec, { id: id, createdAt: now, updatedAt: now }));
     sh.appendRow(row);
@@ -548,11 +587,18 @@ function submitRecord(rec) {
 
 // 照片直傳 Drive 完成後，把雲端連結(fileId)回寫進紀錄的照片JSON，讓報表能列出連結
 // links: { "路徑/資料夾":[{name, fileId}, ...], ... }；可分批多次呼叫，累加合併不覆蓋既有連結
-function attachPhotoLinks(month, recordId, links) {
+/**
+ * 把上傳完成的照片連結寫回紀錄。
+ * deferShare=true 時「不做分享」—— 分享要對每張照片打三次 Drive API
+ * （getFileById → 確認歸屬 → setSharing），19 張就是幾十次往返、實測佔掉好幾秒，
+ * 而使用者是在等這一支回來才看到「已完成」。改由前端在背景另外呼叫 sharePhotoLinks。
+ * 舊版前端不會帶這個參數，仍會同步分享（行為不變），所以後端先更新也不會壞。
+ */
+function attachPhotoLinks(month, recordId, links, deferShare) {
   var lock = LockService.getScriptLock();
   lock.waitLock(20000);
   try {
-    var sh = SpreadsheetApp.openById(SPREADSHEET_ID).getSheetByName('點檢紀錄_' + month);
+    var sh = ssBook().getSheetByName('點檢紀錄_' + month);
     if (!sh) return { ok: false, message: '找不到月份活頁' };
     var data = sh.getDataRange().getValues();
     var head = data[0];
@@ -578,7 +624,11 @@ function attachPhotoLinks(month, recordId, links) {
       // 同步狀態要跟著更新，否則補齊了還一直顯示「照片未齊」，主管就不會再信這個欄位
       var syncCol = head.indexOf('同步狀態');
       if (syncCol >= 0) sh.getRange(i + 1, syncCol + 1).setValue(syncStateOf(photos));
-      // 報表(含客戶版)裡的照片連結要讓沒有 Google 帳號的人也能開 → 逐檔設為「知道連結可檢視」
+      // 報表(含客戶版)裡的照片連結要讓沒有 Google 帳號的人也能開 → 逐檔設為「知道連結可檢視」。
+      // deferShare 時交給前端在背景另外呼叫，這一支就能立刻回來。
+      if (deferShare === true) {
+        return { ok: true, deferredShare: true, pending: photoPendingCount(photos) };
+      }
       var share = shareLinkedPhotos(links);
       return { ok: true, shared: share.ok, shareFailed: share.failed, pending: photoPendingCount(photos) };
     }
@@ -627,6 +677,41 @@ function repairRecordPhotos(month, recordId) {
   return { ok: res.ok !== false, filled: filled, missing: missing, message: res.message };
 }
 
+/**
+ * 本月已點檢的店號清單（防重複點檢用）。
+ * 為什麼要獨立一支：前端原本呼叫 queryRecords(month, {}) 取「全部紀錄」，
+ * 但它只用得到 storeCode 一個欄位 —— 而 queryRecords 會讀整張活頁、把每一列的
+ * 明細JSON／觀察JSON／照片JSON 全部 parse 再整包傳到瀏覽器。
+ * 月底上千筆、每筆帶幾十張照片連結時，這是好幾 MB 的浪費，而且每次開 App 都做一次。
+ * 這裡只讀「店號」一欄。
+ */
+function getInspectedCodes(month) {
+  var sh = ssBook().getSheetByName('點檢紀錄_' + month);
+  if (!sh) return { codes: [] };
+  var lastRow = sh.getLastRow();
+  if (lastRow < 2) return { codes: [] };
+  var head = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0];
+  var col = head.indexOf('店號');
+  if (col < 0) return { codes: [] };
+  var vals = sh.getRange(2, col + 1, lastRow - 1, 1).getValues();
+  var out = [];
+  for (var i = 0; i < vals.length; i++) {
+    var c = normCode(vals[i][0]);
+    if (c) out.push(c);   // 已正規化（去前導0），前端可直接比對
+  }
+  return { codes: out };
+}
+
+/**
+ * 只做「把照片設為知道連結就能看」。由前端在連結寫回成功之後於背景呼叫，
+ * 所以使用者不必等這幾秒。歸屬驗證在 shareLinkedPhotos 裡（只動照片根目錄底下的檔案），
+ * 前端傳進來的 fileId 不會因此獲得任何額外權限。
+ */
+function sharePhotoLinks(links) {
+  var r = shareLinkedPhotos(links);
+  return { ok: true, shared: r.ok, failed: r.failed };
+}
+
 function queryRecords(month, filter) {
   filter = filter || {};
   var rows = readSheet('點檢紀錄_' + month);
@@ -644,7 +729,7 @@ function updateRecord(month, id, rec, pass, who) {
   var lock = LockService.getScriptLock();
   lock.waitLock(20000);
   try {
-    var sh = SpreadsheetApp.openById(SPREADSHEET_ID).getSheetByName('點檢紀錄_' + month);
+    var sh = ssBook().getSheetByName('點檢紀錄_' + month);
     var data = sh.getDataRange().getValues();
     var head = data[0];
     var idCol = head.indexOf('紀錄ID');
@@ -672,7 +757,7 @@ function deleteRecord(month, id, pass, who) {
   var lock = LockService.getScriptLock();
   lock.waitLock(20000);
   try {
-    var sh = SpreadsheetApp.openById(SPREADSHEET_ID).getSheetByName('點檢紀錄_' + month);
+    var sh = ssBook().getSheetByName('點檢紀錄_' + month);
     var data = sh.getDataRange().getValues();
     var idCol = data[0].indexOf('紀錄ID');
     for (var i = 1; i < data.length; i++) {
@@ -1019,7 +1104,13 @@ function deleteRowByKind(kind, month, id) {
 // ============================================================
 // 工具
 // ============================================================
-function ssBook() { return SpreadsheetApp.openById(SPREADSHEET_ID); }
+// 一次請求裡會呼叫很多次（每個 readSheet 都要），openById 不必重複做。
+// Apps Script 每次執行都是全新的 JS 環境，所以這個快取不會跨請求殘留。
+var _book = null;
+function ssBook() {
+  if (!_book) _book = SpreadsheetApp.openById(SPREADSHEET_ID);
+  return _book;
+}
 
 function readSheet(name) {
   var sh = ssBook().getSheetByName(name);
