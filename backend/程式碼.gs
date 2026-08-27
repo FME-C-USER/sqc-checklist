@@ -10,7 +10,7 @@
 // 後端版本：每次修改本檔就更新，並於前端「資料更新時間」旁顯示。
 // 用途：貼上程式碼後若忘記「部署 → 管理部署作業 → 新版本」，畫面上的後端版本就不會變，
 //       可立即分辨是「沒貼上」「貼了但沒部署」還是「已生效」。
-var GAS_VERSION = '20260827-1401';   // 台灣時間 YYYYMMDD-HHMM
+var GAS_VERSION = '20260827-1519';   // 台灣時間 YYYYMMDD-HHMM
 
 var SPREADSHEET_ID = '1GRZZsZRgakMGENspOxmlx96NfckC8UYOe0ipuNNEoh0';
 var DRIVE_ROOT_ID  = '122nQjldImn5Zh5AUguxZF0YzobThgdc9';
@@ -649,8 +649,11 @@ function attachPhotoLinks(month, recordId, links, deferShare) {
  * 照片上傳完成後才會呼叫 attachPhotoLinks 回寫 fileId；若當下網路斷掉或使用者
  * 直接關閉頁面，照片其實已經在 Drive，但紀錄裡只剩檔名 —— 編輯時就顯示「無雲端連結」，
  * 報表裡也沒有連結。檔名是固定規則（店號_日期_題目_序號），所以能依「資料夾＋檔名」找回來。
- * 注意：查 Drive 的部分不可以持鎖 —— ensureFolderId 自己會拿 script lock，
- *       在持鎖中呼叫會互鎖等到逾時。所以先查完，再交給 attachPhotoLinks 寫回。
+ * 資料夾一律用 folderIdOfPath_()「只查不建」，不可以用 getUploadFolderId()：
+ *   1 後者找不到就會建資料夾 —— 修復流程若真的找不到照片，會在 Drive 留下一堆空資料夾；
+ *   2 後者會拿 script lock（waitLock 20000），逐個 key 查下來會把自己序列化甚至等到逾時；
+ *   3 後者不排除垃圾桶裡的資料夾。
+ * setup.gs 的整月修復 repairPhotoLinks() 用的也是 folderIdOfPath_，兩支修復要行為一致。
  */
 function repairRecordPhotos(month, recordId) {
   var sh = ssBook().getSheetByName('點檢紀錄_' + month);
@@ -669,7 +672,7 @@ function repairRecordPhotos(month, recordId) {
     (photos[key] || []).forEach(function (e) {
       var name = (typeof e === 'string') ? e : (e && e.name);
       if (!name || (e && e.fileId)) return;               // 已經有 fileId 就跳過
-      if (folderId === null) folderId = ensureFolderId(key.split('/'));
+      if (folderId === null) folderId = folderIdOfPath_(key);   // 吃「資料夾/子資料夾」路徑字串，自己會 split
       var fid = folderId ? findFileIdByName(folderId, name) : '';
       if (!fid) { missing++; return; }                    // Drive 裡真的沒有這張（可能當時根本沒上傳成功）
       if (!links[key]) links[key] = [];
@@ -1046,10 +1049,27 @@ function logChange(user, action, target, detail) {
     sh.appendRow(safeRow_([nowStr(), user || '', action || '', target || '', detail || '']));
   } catch (e) { /* 記錄失敗不影響主流程 */ }
 }
+/** 最近 N 筆異動紀錄（新的在前）。
+ *  只讀最後 N 列，不可以用 readSheet('異動紀錄') —— 那會把整張表讀進來，
+ *  只為了 slice 出最後 300 筆。這張表是常駐的、有兩個寫入來源（維護區的修改/刪除軌跡，
+ *  加上 logEvent），而且沒有清理機制，列數只會單向增加。
+ *  與 submitRecord、getInspectedCodes 同一個做法：先問 getLastRow()，再只取需要的範圍。 */
 function getChangeLog(limit) {
-  var rows = readSheet('異動紀錄');
   limit = limit || 300;
-  return { rows: rows.slice(-limit).reverse().map(function (r) { return { time: toDateTimeStr(r['時間']), user: r['操作人'], action: r['動作'], target: r['對象'], note: r['說明'] }; }) };
+  var sh = ssBook().getSheetByName('異動紀錄');
+  if (!sh) return { rows: [] };
+  var lastRow = sh.getLastRow();
+  if (lastRow < 2) return { rows: [] };
+  var lastCol = sh.getLastColumn();
+  var head = sh.getRange(1, 1, 1, lastCol).getValues()[0];
+  var n = Math.min(limit, lastRow - 1);
+  var data = sh.getRange(lastRow - n + 1, 1, n, lastCol).getValues();
+  var out = [];
+  for (var i = data.length - 1; i >= 0; i--) {   // 直接倒著走，不必先 slice 再 reverse
+    var r = rowObj(head, data[i]);
+    out.push({ time: toDateTimeStr(r['時間']), user: r['操作人'], action: r['動作'], target: r['對象'], note: r['說明'] });
+  }
+  return { rows: out };
 }
 // 找不到活頁就自動建立（附表頭），回傳工作表
 function ensureSheetNamed(name, headers) {
@@ -1237,12 +1257,18 @@ function checkEditPass(pass, who) {
   return { ok: ok };
 }
 
-/** 該日期字串所屬那一週的週一(yyyy-MM-dd)；週一為一週之始 */
+/** 該日期所屬那一週的週一(yyyy-MM-dd)；週一為一週之始
+ *  一律先過 toYmd()：Sheet 讀回來的日期欄是 Date 物件，直接 String() 會得到
+ *  "Thu Aug 27 2026 ..."，split('-') 長度不是 3 就回空字串 —— 而空字串會讓
+ *  isCrossWeek 回 false，也就是跨週密碼保護「靜默放行」。錯誤方向是放行而不是擋下，
+ *  所以不能只靠呼叫端記得包 toYmd。 */
 function weekMondayOf(ymd) {
-  var s = String(ymd || '').slice(0, 10);
-  var parts = s.split('-');
+  var parts = toYmd(ymd).split('-');
   if (parts.length !== 3) return '';
-  var d = new Date(Date.UTC(Number(parts[0]), Number(parts[1]) - 1, Number(parts[2])));
+  var year = Number(parts[0]), month = Number(parts[1]) - 1, day = Number(parts[2]);
+  // 「2026-ab-27」這種會讓 Date.UTC 得到 NaN，Utilities.formatDate 對 Invalid Date 會拋錯
+  if (isNaN(year) || isNaN(month) || isNaN(day)) return '';
+  var d = new Date(Date.UTC(year, month, day));
   var dow = (d.getUTCDay() + 6) % 7;            // 週一=0、週日=6
   d.setUTCDate(d.getUTCDate() - dow);
   return Utilities.formatDate(d, 'UTC', 'yyyy-MM-dd');
@@ -1379,15 +1405,8 @@ function rowToRecord(r) {
   };
 }
 function safeJson(s) { try { return JSON.parse(s || '{}'); } catch (e) { return {}; } }
-function mapToInternal(merged, month, id) {
-  return {
-    id: id, time: merged['點檢時間'], dept: merged['部別'], section: merged['課別'], empId: merged['員編'],
-    staffName: merged['點檢人員'], storeCode: merged['店號'], storeName: merged['店名'], storeType: merged['店鋪型態'], note: merged['備註'],
-    month: month, total: merged['合計得分'], grade: merged['等第'], staffCount: merged['在店店員人數'],
-    identity: merged['簽名身分別'], detail: merged.detail, observation: merged.observation, photos: merged.photos,
-    paperPhotos: merged.paperPhotos, folderUrl: merged['照片資料夾'], createdAt: merged['建立時間'], updatedAt: merged.updatedAt,
-  };
-}
+// 這裡原本有一支 mapToInternal(merged, month, id)，全專案（含測試）零呼叫 ——
+// 職責已由 rowToRecord 與 recordToRow 取代，2026-08-27 刪除。
 
 // ============================================================
 // 編輯紀錄時檢視/刪除既有照片

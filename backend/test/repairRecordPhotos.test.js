@@ -4,7 +4,10 @@
 //   檔名是固定規則（店號_日期_題目_序號），所以能依「資料夾＋檔名」把 fileId 找回來。
 // 執行方式：node backend/test/repairRecordPhotos.test.js
 const path = require('path');
-const { loadGasFile } = require('./gas-fake-env');
+// stubExisting 而不是直接指派：打樁前先確認該函式在 backend/*.gs 裡真的存在。
+// 這支測試原本自己補了一個 ctx.ensureFolderId，而正式碼裡根本沒有那支函式 ——
+// 邏輯驗過了，正式環境卻一執行就 ReferenceError。
+const { loadGasFile, stubExisting } = require('./gas-fake-env');
 
 const GS_PATH = path.join(__dirname, '..', '程式碼.gs');
 let failed = 0;
@@ -24,16 +27,22 @@ const DRIVE = {
   '115年08月/重點觀察題2.【櫃台全景照】': {},   // 資料夾在，但檔案真的不存在
 };
 let folderCalls = 0;
-ctx.ensureFolderId = (parts) => { folderCalls++; const k = parts.join('/'); return DRIVE[k] ? 'FOLDER:' + k : ''; };
-ctx.findFileIdByName = (folderId, name) => {
+// folderIdOfPath_ 吃的是「資料夾/子資料夾」路徑字串（自己 split），不是陣列。
+// 修復流程必須用它這種「只查不建」的版本 —— getUploadFolderId 找不到就會建資料夾、
+// 還會拿 script lock，兩者在修復情境下都是錯的。
+stubExisting(ctx, 'folderIdOfPath_', (pathStr) => {
+  folderCalls++;
+  return DRIVE[pathStr] ? 'FOLDER:' + pathStr : '';
+});
+stubExisting(ctx, 'findFileIdByName', (folderId, name) => {
   const k = String(folderId).replace(/^FOLDER:/, '');
   return (DRIVE[k] && DRIVE[k][name]) || '';
-};
+});
 const shared = [];
-ctx.shareLinkedPhotos = (links) => {
+stubExisting(ctx, 'shareLinkedPhotos', (links) => {
   Object.keys(links || {}).forEach(k => (links[k] || []).forEach(l => shared.push(l.fileId)));
   return { ok: shared.length, failed: 0 };
-};
+});
 
 const rec = (id, photos) => ({
   id: id, month: '11508', time: '2026-08-25 09:00', dept: '一部', section: '北一課',

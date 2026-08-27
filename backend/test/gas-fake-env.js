@@ -90,4 +90,42 @@ function loadGasFile(gsPath) {
   return { ctx: sandbox, book };
 }
 
-module.exports = { loadGasFile, makeFakeSheet };
+/**
+ * 打樁，但先確認被打樁的函式「在正式碼裡真的存在」。
+ *
+ * 為什麼需要這道檢查：2026-08-27 發現 repairRecordPhotos 呼叫的 ensureFolderId
+ * 整個專案都沒有定義，正式環境一執行就 ReferenceError；而測試不但沒抓到，反而是
+ * 測試自己 `ctx.ensureFolderId = ...` 憑空補了一支，把「依賴不存在」偽裝成「依賴正常」。
+ * 打樁天生會遮蔽這件事，所以打樁前一定要先驗證對象存在。
+ *
+ * 注意不能只看 ctx：Apps Script 的所有 .gs 共用同一個全域範圍，
+ * 但假環境一次只載入一個檔，所以跨檔的函式（例如 setup.gs 的 folderIdOfPath_）
+ * 不會出現在 ctx 裡。因此改為掃 backend/*.gs 的原始碼判斷。
+ */
+const path = require('path');
+let _definedNames = null;
+function definedInGsSources() {
+  if (_definedNames) return _definedNames;
+  const dir = path.join(__dirname, '..');
+  _definedNames = new Set();
+  fs.readdirSync(dir).filter((f) => f.endsWith('.gs')).forEach((f) => {
+    const src = fs.readFileSync(path.join(dir, f), 'utf8');
+    let m;
+    const re = /function\s+([A-Za-z_$][\w$]*)\s*\(/g;
+    while ((m = re.exec(src))) _definedNames.add(m[1]);
+  });
+  return _definedNames;
+}
+
+function stubExisting(ctx, name, fn) {
+  if (!definedInGsSources().has(name)) {
+    throw new Error(
+      '打樁對象在正式碼裡不存在：' + name + '\n' +
+      '  backend/*.gs 裡沒有 function ' + name + '(...)。\n' +
+      '  若是改名漏改，請修正正式碼；不要在測試裡憑空補一支，那會讓正式環境的 ReferenceError 被遮掉。'
+    );
+  }
+  ctx[name] = fn;
+}
+
+module.exports = { loadGasFile, makeFakeSheet, stubExisting };
