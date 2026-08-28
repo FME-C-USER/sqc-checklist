@@ -10,7 +10,7 @@
 // 後端版本：每次修改本檔就更新，並於前端「資料更新時間」旁顯示。
 // 用途：貼上程式碼後若忘記「部署 → 管理部署作業 → 新版本」，畫面上的後端版本就不會變，
 //       可立即分辨是「沒貼上」「貼了但沒部署」還是「已生效」。
-var GAS_VERSION = '20260827-1519';   // 台灣時間 YYYYMMDD-HHMM
+var GAS_VERSION = '20260828-1559';   // 台灣時間 YYYYMMDD-HHMM
 
 var SPREADSHEET_ID = '1GRZZsZRgakMGENspOxmlx96NfckC8UYOe0ipuNNEoh0';
 var DRIVE_ROOT_ID  = '122nQjldImn5Zh5AUguxZF0YzobThgdc9';
@@ -34,7 +34,7 @@ function doPost(e) {
     var OPEN = { login: 1 };
     // buildMonthlyReport 不列管理者專屬：課長版/客戶版所有登入者皆可產出。
     // 請款金額雖同樣取這份資料，但單價僅回傳給管理者(見 buildMonthlyReport)，且按鈕限管理者顯示。
-    var ADMIN_ONLY = { importMaster: 1, upsertItem: 1, deleteItem: 1, upsertRow: 1, deleteRow: 1, getMaster: 1, getChangeLog: 1, repairPhotoLinks: 1 };
+    var ADMIN_ONLY = { importMaster: 1, upsertItem: 1, deleteItem: 1, upsertRow: 1, deleteRow: 1, getMaster: 1, getChangeLog: 1, repairPhotoLinks: 1, recomputeScores: 1 };
     var sess = null;
     if (!OPEN[action]) {
       sess = getSession(req.token);
@@ -79,6 +79,8 @@ function doPost(e) {
       logEvent: function () { return logEvent(p.event, p.detail, sess && (sess.name || sess.ad)); },
       // 整月補回照片連結（維護專區用；write=false 只試算）。定義在 setup.gs，同專案可直接呼叫
       repairPhotoLinks: function () { return repairPhotoLinks(p.month, p.write === true); },
+      // 整月重算分區扣分題的分數（修正非同步造成的合計不一致；write=false 只試算）。同樣定義在 setup.gs
+      recomputeScores: function () { return recomputeScores(p.month, p.write === true); },
     };
     if (!routes[action]) return json({ ok: false, error: '未知動作：' + action });
     var result = routes[action]();
@@ -120,6 +122,10 @@ var CLIENT_EVENTS = {
   // 手機儲存空間不足導致照片存不進待傳佇列。這種情況照片會直接遺失（紀錄裡也不會記到），
   // 必須留下軌跡，否則事後只會看到「這家店照片比較少」而查不出原因。
   photoQueueFull: '照片存不進待傳佇列',
+  // 照片重試很多次還是傳不上去時，把「原因」送回來。
+  // 沒有這一項的話那個錯誤字串只會存在該支手機的 IndexedDB 裡 ——
+  // 2026-08-27 有人一小時內重試幾百次全數失敗，事後只能靠猜。
+  photoUploadStuck: '照片上傳卡住',
 };
 // 這支是前端可任意呼叫的寫入點，沒有上限的話任何登入者都能不斷往異動紀錄塞 500 字的列，
 // 把真正的軌跡淹掉（活頁有儲存格上限）。一位點檢人員一小時內正常不會超過幾筆，
@@ -431,7 +437,11 @@ var UPLOAD_SESSION_MAX = 20; // 一次最多開幾個，避免 UrlFetchApp 逾�
 var DEFAULT_ORIGIN = 'https://fme-c-user.github.io';
 var ALLOWED_ORIGINS = {
   'https://fme-c-user.github.io': 1,                        // GitHub Pages（原入口）
-  'https://sqc-checklist-ec6xuimwxa-de.a.run.app': 1,       // GCP Cloud Run（2026-08-24 新增的入口）
+  'https://sqc-checklist-ec6xuimwxa-de.a.run.app': 1,       // GCP Cloud Run 舊格式（對外公布的網址）
+  // Cloud Run 對同一個服務會「同時」提供新舊兩種格式的網址，兩個都通。
+  // 2026-08-28 實測 https://sqc-checklist-403438157899.asia-east1.run.app 也回 200，
+  // 而它不在白名單裡 —— 任何人從它開 App，照片會 100% 全數上傳失敗（見下方 originFor_ 的說明）。
+  'https://sqc-checklist-403438157899.asia-east1.run.app': 1,
   'http://localhost:8931': 1,                               // 本機測試用
 };
 
@@ -453,10 +463,42 @@ function findFileIdByName(folderId, name) {
   }
 }
 
+/**
+ * 決定要用哪個 Origin 去向 Drive 建立上傳工作階段。
+ *
+ * 這件事不可以「比對失敗就靜默退回預設值」——
+ * Drive 只允許「建立工作階段時登記的那個 Origin」對該網址做跨來源 PUT。
+ * 若前端實際所在的網址不是登記的那一個，瀏覽器的 preflight 會被擋，
+ * PUT 根本不會送出 → 那支手機的每一張照片都失敗，而後端這邊
+ * 工作階段建立成功、執行記錄一片乾淨，完全看不出異常。
+ * 2026-08-28 查一起「照片 0 進度」時，就是因為這個靜默退回而多繞了很久。
+ *
+ * 所以：帶了網址但不在白名單 → 明確報錯，讓使用者第一次就知道；
+ *       完全沒帶（很舊的前端）→ 只能沿用預設值，維持相容。
+ */
+function originFor_(origin) {
+  var o = String(origin || '');
+  if (!o) return { ok: true, origin: DEFAULT_ORIGIN };
+  if (ALLOWED_ORIGINS[o]) return { ok: true, origin: o };
+  // 回填客端送來的字串要截斷。訊息會一路流到 photo.error、再經 photoUploadStuck
+  // 寫進異動紀錄（那一段本來就有 500 字上限與 safeCell_ 中和），但回應本身不該無界。
+  o = o.slice(0, 120);
+  return { ok: false, error: '這個網址不在允許清單內：' + o
+    + '。照片無法上傳，請改用官方網址 https://sqc-checklist-ec6xuimwxa-de.a.run.app/app.html'
+    + '（若這是新的正式網址，請將它加入後端的 ALLOWED_ORIGINS）' };
+}
+
 function createUploadSessions(items, origin) {
   items = (items || []).slice(0, UPLOAD_SESSION_MAX);
   if (!items.length) return [];
-  var org = ALLOWED_ORIGINS[String(origin || '')] ? String(origin) : DEFAULT_ORIGIN;
+  var chk = originFor_(origin);
+  if (!chk.ok) {
+    // 每一項都回同一個錯誤：前端會把它存進 photo.error 並顯示，不會變成沉默的失敗
+    var bad = [];
+    for (var b = 0; b < items.length; b++) bad.push({ ok: false, error: chk.error });
+    return bad;
+  }
+  var org = chk.origin;
   var token = ScriptApp.getOAuthToken(); // 只在伺服器端使用，不回傳給前端
   var out = [], reqs = [], reqAt = [];
   for (var i = 0; i < items.length; i++) {
@@ -599,19 +641,30 @@ function submitRecord(rec) {
  * 而使用者是在等這一支回來才看到「已完成」。改由前端在背景另外呼叫 sharePhotoLinks。
  * 舊版前端不會帶這個參數，仍會同步分享（行為不變），所以後端先更新也不會壞。
  */
+/*
+ * 鎖內只讀「紀錄ID」一欄 + 命中那一列的照片JSON 一格。
+ * 原本是 getDataRange().getValues()，把整張活頁讀進來（月底 1500 筆 × 23 欄、
+ * 其中三個 JSON 欄各幾 KB，一次十幾 MB）—— 而 LockService 是整支腳本共用一把鎖，
+ * 這支又是現場最頻繁的寫入路徑（每批照片傳完就回寫一次），
+ * 於是每個人回寫照片時全系統都在等它，且會隨月份筆數持續惡化。
+ * 做法與 submitRecord、getInspectedCodes、getChangeLog 一致：先問 getLastRow()，只取需要的範圍。
+ */
 function attachPhotoLinks(month, recordId, links, deferShare) {
   var lock = LockService.getScriptLock();
   lock.waitLock(20000);
   try {
     var sh = ssBook().getSheetByName('點檢紀錄_' + month);
     if (!sh) return { ok: false, message: '找不到月份活頁' };
-    var data = sh.getDataRange().getValues();
-    var head = data[0];
+    var lastRow = sh.getLastRow();
+    if (lastRow < 2) return { ok: false, message: '找不到紀錄' };
+    var head = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0];
     var idCol = head.indexOf('紀錄ID');
     var photoCol = head.indexOf('照片JSON');
-    for (var i = 1; i < data.length; i++) {
-      if (String(data[i][idCol]) !== String(recordId)) continue;
-      var photos = safeJson(data[i][photoCol]);
+    if (idCol < 0 || photoCol < 0) return { ok: false, message: '活頁缺少必要欄位' };
+    var ids = sh.getRange(2, idCol + 1, lastRow - 1, 1).getValues();
+    for (var i = 1; i <= ids.length; i++) {
+      if (String(ids[i - 1][0]) !== String(recordId)) continue;
+      var photos = safeJson(sh.getRange(i + 1, photoCol + 1).getValue());
       Object.keys(links || {}).forEach(function (key) {
         var arr = photos[key] || [];
         (links[key] || []).forEach(function (link) {
@@ -867,10 +920,11 @@ function buildMonthlyReport(month, filter, isManager) {
         var typed = customNames[nm];
         labels.push(typed ? String(typed) : String(nm));
       });
-      // 有填了名稱但子項沒被勾選的情況（理論上不會發生），仍要呈現，避免漏掉缺失
-      Object.keys(customNames).forEach(function (k) {
-        if (ngSubs.indexOf(k) < 0 && customNames[k]) labels.push(String(customNames[k]));
-      });
+      // 這裡原本還有一段「有填了名稱但子項沒被勾選也要呈現」的保險，註解寫著「理論上不會發生」。
+      // 它其實會發生：取消勾選時前端不會清掉已輸入的文字，那段文字就成了畫面上看不到、
+      // 卻仍存在紀錄裡的隱藏資料 —— 於是報表列出那幾個貨架是缺失，分數卻完全沒扣到它們，
+      // 拿報表核對得分就是核不出來。2026-08-27 移除，並在前端改為取消勾選即清掉文字：
+      // 分數與報表只有一個真相來源，就是「勾選狀態」。
       if (labels.length) itemExtra[it.id] = labels.join('、');
     });
     var catSubtotal = {};

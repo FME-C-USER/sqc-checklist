@@ -140,14 +140,33 @@ sentRequests = [];
 post('createUploadSessions', { items: [items[0]], origin: 'https://fme-c-user.github.io' }, token);
 assertEqual(sentRequests[0].headers.Origin, 'https://fme-c-user.github.io', '建立工作階段時必須帶 Origin，否則跨網域 PUT 會被 CORS 擋掉');
 
+// 不在白名單的 origin：2026-08-28 起改為「明確報錯」，不再靜默換成預設網域。
+// 原本靜默退回會產生最糟的故障 —— 工作階段建得成功、後端執行記錄一片乾淨，
+// 但瀏覽器的 preflight 對不上登記的 Origin，PUT 根本不會送出 →
+// 那支手機的每一張照片都失敗，而伺服器端完全看不出異常。
+// 安全性質不變且更強：不只「不原樣回填」，而是根本不呼叫 Drive。
 sentRequests = [];
-post('createUploadSessions', { items: [items[0]], origin: 'https://evil.example.com' }, token);
-assertEqual(sentRequests[0].headers.Origin, 'https://fme-c-user.github.io', '不在白名單的 origin 應換成正式網域，不可原樣回填');
+{
+  const r = post('createUploadSessions', { items: [items[0]], origin: 'https://evil.example.com' }, token);
+  const ss = (r.result && r.result.sessions) || [];
+  assertEqual(sentRequests.length, 0, '不在白名單時不可對 Drive 發出任何請求');
+  assertEqual(ss.map((s) => s.ok), [false], '每一項都要回 ok:false');
+  assertEqual(/這個網址不在允許清單內/.test((ss[0] || {}).error || ''), true, '錯誤要指出是網址的問題');
+  assertEqual(/evil\.example\.com/.test((ss[0] || {}).error || ''), true, '要把實際的網址寫進訊息，才查得出是誰用了哪個網址');
+  assertEqual(/請改用官方網址/.test((ss[0] || {}).error || ''), true, '要告訴使用者怎麼處理');
+}
 
 // Cloud Run 是 2026-08-24 起的第二個入口，白名單漏掉它的話從該網址上傳照片會被 CORS 擋掉
 sentRequests = [];
 post('createUploadSessions', { items: [items[0]], origin: 'https://sqc-checklist-ec6xuimwxa-de.a.run.app' }, token);
 assertEqual(sentRequests[0].headers.Origin, 'https://sqc-checklist-ec6xuimwxa-de.a.run.app', 'Cloud Run 網址必須在白名單內');
+
+// Cloud Run 對同一個服務同時提供新舊兩種格式的網址，兩個都通。
+// 2026-08-28 實測新格式也回 200，而它原本不在白名單 —— 從它開 App 的人照片會全滅。
+sentRequests = [];
+post('createUploadSessions', { items: [items[0]], origin: 'https://sqc-checklist-403438157899.asia-east1.run.app' }, token);
+assertEqual(sentRequests[0].headers.Origin, 'https://sqc-checklist-403438157899.asia-east1.run.app',
+  'Cloud Run 的新格式網址也必須在白名單內');
 
 sentRequests = [];
 post('createUploadSessions', { items: [items[0]] }, token);

@@ -11,7 +11,11 @@
 // ============================================================
 (function () {
   const CONCURRENCY = 3;   // 同時進行的 PUT 數（行動網路上不宜過多）
-  const BATCH = 6;         // 一次向後端索取幾張的上傳網址（往返次數 = 張數 / BATCH）
+  // 一次向後端索取幾張的上傳網址（往返次數 = 張數 / BATCH）。
+  // 一家店約 19 張：BATCH 6 要 4 次往返、每次 1~2 秒；改成 10 只要 2 次，省 2~4 秒。
+  // 後端 UPLOAD_SESSION_MAX 是 20，所以 10 還有餘裕。多開的工作階段若沒用到也無害
+  // （Drive 的 resumable session 網址有效期以天計，過期自動失效）。
+  const BATCH = 10;
   let _running = false;
   let _again = false;      // 跑到一半又被要求重試 → 跑完再跑一輪，不要直接丟掉
   const _listeners = new Set();
@@ -36,6 +40,13 @@
     if (session && session.existing && session.fileId) return session.fileId;
     if (!session || !session.ok || !session.url) {
       throw new Error((session && session.error) || '未取得上傳網址');
+    }
+    // 照片內容不見了要當場講清楚。iOS Safari 對 IndexedDB 裡的 Blob 有已知的失效問題
+    // （存進去後在某些情況讀出來是空的），而空 body 的 PUT 只會換到一個 Drive 4xx，
+    // 看起來像網路或權限問題 —— 那會把診斷帶往完全錯誤的方向。
+    if (!photo.blob || !photo.blob.size) {
+      throw new Error('照片內容不見了：本機儲存的檔案是空的（size='
+        + ((photo.blob && photo.blob.size) || 0) + '），無法上傳，需要重拍');
     }
     // 工作階段網址本身即帶授權，不可再加 Authorization 標頭
     const res = await fetch(session.url, {
@@ -129,9 +140,55 @@
         pend = (await window.SqcDB.pendingPhotos()).filter((p) => !p.nextAt || p.nextAt <= Date.now());
       }
       await reconcileLinks(); // 涵蓋 App 重啟後、上次已全數 done 但尚未回寫連結的紀錄
+      await reportStuck();    // 卡住太久的要把原因送回後端，不要讓它死在這支手機裡
     } finally {
       emit();
     }
+  }
+
+  /**
+   * 把「重試很多次還是失敗」的照片原因回報到異動紀錄。
+   *
+   * 為什麼需要：每次失敗的原因本來就存進了 photo.error，但介面只顯示張數 ——
+   * 2026-08-27 有人一小時內重試幾百次全部失敗，而我們事後只能靠猜，
+   * 因為那個字串一直躺在她手機的 IndexedDB 裡，沒有任何地方會把它拿出來。
+   *
+   * 同一筆紀錄、同一個錯誤只回報一次（回報過的標記 reported），
+   * 否則 19 張照片會塞 19 筆一樣的紀錄，而 logEvent 每人每小時只有 60 筆額度。
+   * 一併帶上 location.origin —— 網址不在後端白名單時照片會全數失敗，而那件事
+   * 從伺服器端完全看不出來，所以來源必須跟著錯誤一起送。
+   */
+  const REPORT_AFTER_TRIES = 10;
+  async function reportStuck() {
+    if (!window.SqcApi || !window.SqcApi.logEvent || !window.SqcDB.photoDiagnostics) return;
+    try {
+      const list = await window.SqcDB.photoDiagnostics();
+      const stuck = list.filter((p) => p.status === 'pending' && !p.reported && p.tries >= REPORT_AFTER_TRIES);
+      if (!stuck.length) return;
+      const groups = new Map();
+      stuck.forEach((p) => {
+        const key = (p.recordId || '?') + '｜' + (p.error || '(沒有錯誤訊息)');
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(p);
+      });
+      for (const [, members] of groups) {
+        const first = members[0];
+        const msg = `${members.length} 張卡住（已重試 ${first.tries} 次）`
+          + `｜錯誤：${first.error || '(沒有錯誤訊息)'}`
+          + `｜檔名：${first.name}`
+          + `｜題目：${first.where}`
+          + `｜內容大小：${first.blobSize} bytes`
+          + `｜來源：${location.origin}`;
+        try { await window.SqcApi.logEvent('photoUploadStuck', msg); } catch (e) { break; }
+        // 回報成功才標記，否則下次還要再試（但標記失敗不影響上傳，個別 try 住）
+        for (const m of members) {
+          try {
+            const full = await window.SqcDB.getPhoto(m.id);
+            if (full) await window.SqcDB.updatePhoto({ ...full, reported: true });
+          } catch (e) { /* 標記失敗就下次再回報，不可讓它中斷 pump */ }
+        }
+      }
+    } catch (e) { /* 診斷回報本身絕對不能影響上傳 */ }
   }
 
   /**

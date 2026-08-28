@@ -68,7 +68,12 @@ assertEqual(splitNames('報架，其他'), ['報架', '其他'], '全形逗號')
 assertEqual(splitNames('報架, 其他'), ['報架', '其他'], '半形逗號加空白');
 assertEqual(splitNames('報架、其他'), ['報架', '其他'], '頓號');
 assertEqual(splitNames('報架/其他'), ['報架', '其他'], '斜線');
-assertEqual(splitNames('報架 其他'), ['報架', '其他'], '空白');
+// 空白「不再」是分隔符（2026-08-27）：貨架名稱本身常含空格（「TM 前貨架」、
+// 「報架(第二排 靠門)」），把空白當分隔符會讓一個貨架被算成兩個、多扣一份分數。
+assertEqual(splitNames('報架 其他'), ['報架 其他'], '空白不是分隔符，整串算一個名稱');
+assertEqual(splitNames('TM 前貨架'), ['TM 前貨架'], '含空格的貨架名稱要算一個');
+assertEqual(splitNames('報架(第二排 靠門)'), ['報架(第二排 靠門)'], '含空格與括號的名稱要算一個');
+assertEqual(splitNames('日用品架、 寵物架'), ['日用品架', '寵物架'], '分隔符後的空白要被 trim 掉');
 assertEqual(splitNames('  '), [], '只有空白＝0個');
 
 // ===== 6. 不在子項清單裡的標籤要忽略（題庫改版後的舊紀錄）=====
@@ -105,8 +110,15 @@ assertEqual(src2.includes('needShots={Math.max(1, (toiletReasons[t.id] || []).le
   '廁所觀察的 PhotoUpload 需求張數應與送出檢查一致');
 assertEqual(src2.includes('const needT = Math.max(1, (toiletReasons[t.id] || []).length)'), true,
   '送出檢查應以不合格項目數為需求張數');
-assertEqual(src2.includes("needShots={item.type === 'subdeduct' ? Math.max(1, totalUnits) : 1}"), true,
-  '分區扣分題的 PhotoUpload 也要傳入需求張數');
+// 畫面與送出檢查一律走 shotsNeededOf ——「同一支函式」才不會出現
+// 「畫面說要 2 張、送出檢查卻要 3 張」，而且它會蓋住配分上限
+// （原本會出現「這一題已經扣到 0 分了，卻還要求 11 張照片才能送出」）
+assertEqual(src2.includes('needShots={shotsNeededOf(item, s)}'), true,
+  '分區扣分題的 PhotoUpload 要用 shotsNeededOf');
+assertEqual(src2.includes('const needShots = shotsNeededOf(it, s);'), true,
+  '送出檢查也要用同一支 shotsNeededOf');
+assertEqual(/const maxUnitsOf = \(item\) => \(item\.perPoint > 0\) \? Math\.floor\(item\.max \/ item\.perPoint\) : Infinity;/.test(src2), true,
+  '要有「一題最多能扣幾個單位」的上限');
 
 console.log(failed === 0 ? '\n✅ 全部通過' : `\n❌ ${failed} 項失敗`);
 process.exit(failed === 0 ? 0 : 1);

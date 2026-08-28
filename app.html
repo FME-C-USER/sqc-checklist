@@ -21,6 +21,13 @@
     /* 不定量進度條的動畫。定義在這裡而不是各個元件內 —— 原本在五個條件區塊裡各寫一次，
        那些區塊都沒渲染時這段 CSS 就不存在，新加的進度條會不會動要看運氣。 */
     @keyframes sqc-progress { 0% { margin-left: 0%; } 50% { margin-left: 67%; } 100% { margin-left: 0%; } }
+    /* 送出被必填擋下時，捲到該處並閃一圈紅框 —— 只捲到位置，使用者還是要自己找是哪一列。
+       同樣定義在這裡而不是元件內：那些區塊沒渲染時 CSS 就不存在。 */
+    @keyframes sqc-flash {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); }
+      15%, 65% { box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.85); }
+    }
+    .sqc-flash { animation: sqc-flash 2.2s ease-in-out 1; }
   </style>
 </head>
 <body class="bg-slate-100">
@@ -37,7 +44,7 @@
     const { useState, useMemo, useEffect, useRef } = React;
     // 版本字串一律用「台灣時間」的 YYYYMMDD-HHMM。與部署關卡無關 ——
     // 那道關卡看的是資安報告的檔名日期，而 GitHub runner 跑 UTC，兩者不要混在一起。
-    const APP_VERSION = '20260827-1600'; // 每次部署更新，用來確認瀏覽器跑的是哪一版（台灣時間）
+    const APP_VERSION = '20260828-1559'; // 每次部署更新，用來確認瀏覽器跑的是哪一版（台灣時間）
     // 這一版前端「至少」需要的後端版本。前後端是各自演進的，版本號本來就不會相等
     // （只改前端時後端不動，反之亦然），所以不能用「兩者相等」當健康指標 ——
     // 要比的是「線上後端有沒有舊到缺少本前端需要的 API」。
@@ -45,7 +52,11 @@
     // 需要：submitRecord 等冪、getInspectedCodes、sharePhotoLinks，
     // 以及 repairRecordPhotos 能真的執行（20260827-1519 之前它呼叫一支不存在的函式，
     // 一執行就 ReferenceError；下面開啟編輯時會自動呼叫它，所以列為必要版本）
-    const NEEDS_GAS = '20260827-1519';
+    // 20260828-1100 起還需要：recomputeScores（維護專區的「分數重算」），
+    // 以及報表不再把「有填名稱但沒勾選」的文字列成缺失（分數與報表要一致）
+    // 20260828-1559 起還需要：Cloud Run 新格式網址進白名單、Origin 不合法時明確報錯、
+    // 以及放行 photoUploadStuck 事件（否則卡住的原因會被後端丟掉，等於沒做）
+    const NEEDS_GAS = '20260828-1559';
 
     // 全域錯誤攔截：任何未預期錯誤（含 async 事件處理器的未捕捉 rejection）都要顯示出來，
     // 否則按鈕會「按了沒反應」而完全查不到原因
@@ -382,6 +393,16 @@
       const n = (String(obsItem.name).match(/重點觀察題\s*(\d+)/) || [])[1] || String(idx + 1);
       return groupLinks(groups, k => k.indexOf('重點觀察題' + n) === 0);
     };
+    /**
+     * 報表的「備註」欄。欄位標題本來就寫著「備註(例：廠區店無法拍照)」，
+     * 但實際只填了不可拍照的「原因」（如「廠區店」），沒有「無法拍照」這句話。
+     * 在報表端補而不是在送出時寫進紀錄的備註欄：後端每一列本來就帶「拍照類型」，
+     * 所以已經送出的舊紀錄也會一起正確，不必另外跑一次資料修復。
+     */
+    const noteCell = (r) => (r.拍照類型 === '不可拍照')
+      ? ('無法拍照' + (r.備註 ? '｜' + r.備註 : ''))
+      : (r.備註 || '');
+
     // 店號補回前導0並確保以文字寫入(避免Excel開啟時把"017246"顯示成17246)
     const padStoreCode = (c) => { const s = String(c == null ? '' : c).trim(); return /^\d+$/.test(s) && s.length < 6 ? ('000000' + s).slice(-6) : s; };
 
@@ -444,7 +465,7 @@
           ...koItems.map((k, i) => joinLinks(keyObsLinks(r, k, i))),
           joinLinks(zonesA.reduce((acc, z) => acc.concat((r.photoGroups || {})[`滿分照片/${z}`] || []), [])),
           joinLinks(zonesB.reduce((acc, z) => acc.concat((r.photoGroups || {})[`滿分照片/${z}`] || []), [])),
-          r.備註, joinLinks((r.photoGroups || {})['SQC點檢表完成照片']), '', r.店型態);
+          noteCell(r), joinLinks((r.photoGroups || {})['SQC點檢表完成照片']), '', r.店型態);
         return line;
       }));
     }
@@ -1049,7 +1070,10 @@
     const subLabelOf = (sub) => typeof sub === 'string' ? sub : sub.label;
     const subIsCustom = (sub) => typeof sub === 'object' && sub.custom;
     const subFixedUnits = (sub) => (typeof sub === 'object' && sub.units) ? sub.units : 1;
-    const splitNames = (v) => String(v || '').split(/[\s,，、;；\/|]+/).filter(Boolean);
+    // 分隔符不含空白：貨架名稱本身就常有空格（「TM 前貨架」、「報架(第二排 靠門)」），
+    // 把空白當分隔符會讓一個貨架被算成兩個、多扣一份分數。改成只認明確的符號，
+    // 並逐段 trim，這樣「日用品架、 寵物架」也只算兩個。
+    const splitNames = (v) => String(v || '').split(/[,，、;；\/|]+/).map(x => x.trim()).filter(Boolean);
     function ngUnitsOf(item, st) {
       const s = st || {};
       return (s.ngSubs || []).reduce((sum, lbl) => {
@@ -1059,29 +1083,67 @@
         return sum + (subIsCustom(sub) ? Math.max(1, named) : subFixedUnits(sub));
       }, 0);
     }
+    // 一題最多能扣幾個單位：扣到 0 分之後再多勾也不會更低，
+    // 所以缺失照片的張數也不該再往上要求（原本會出現「已經 0 分卻還要 11 張照片」）。
+    const maxUnitsOf = (item) => (item.perPoint > 0) ? Math.floor(item.max / item.perPoint) : Infinity;
+    const shotsNeededOf = (item, st) => item.type === 'subdeduct'
+      ? Math.max(1, Math.min(ngUnitsOf(item, st), maxUnitsOf(item)))
+      : 1;
+    /**
+     * 單一題目的得分 —— 全 App 只有這一個算式。
+     *
+     * 分區扣分題「不儲存」算出來的分數，一律在用到的當下現算。
+     * 原本是由 ItemRow 的 useEffect 把分數寫回 state，而合計／分類小計／送出的明細
+     * 都讀那個寫回的值 —— useEffect 是 passive effect，在畫面繪製後才由排程器沖洗，
+     * 所以存在「題目列已經顯示新分數、合計卻還是舊的」的窗口（2026-08-27 實測：
+     * 取消勾選後的 microtask 階段，題目列 18、分類小計 14/18、合計 96）。
+     * 若送出落在那個窗口裡，存進去的分數會比 ngSubs 應得的少扣或多扣，
+     * 而編輯時是重算 → 分數又變了。現場回報的「填寫 88、編輯 92」就是這個。
+     * 手機上照片壓縮會佔住主執行緒，那個窗口會被拉得更長。
+     */
+    const scoreOfItem = (item, st) => {
+      const s = st || {};
+      if (item.type === 'subdeduct') return Math.max(0, item.max - ngUnitsOf(item, s) * item.perPoint);
+      return (s.score != null) ? s.score : item.max;
+    };
 
-    function ItemRow({ item, state, setState, canPhoto, monthFolder, existingCount = 0, existing = [], onRemoveExisting = null }) {
+    function ItemRow({ item, state, setState, canPhoto, monthFolder, existingCount = 0, existing = [], onRemoveExisting = null, flash = '' }) {
       const s = state || {};
       const labelOf = subLabelOf;
       const isCustom = subIsCustom;
       const fixedUnits = subFixedUnits;
       const nameUnits = (lbl) => splitNames(s.customNames?.[lbl]).length;
-      const totalUnits = ngUnitsOf(item, s);
 
-      const subdeductScore = item.type === 'subdeduct' ? Math.max(0, item.max - totalUnits * item.perPoint) : null;
-      const score = item.type === 'subdeduct' ? subdeductScore : (s.score != null ? s.score : item.max);
+      // 分數一律現算（scoreOfItem），不再寫回 state 也不再有 useEffect 同步 ——
+      // 合計、分類小計、送出的明細用的是同一支函式，三處不可能再對不起來。
+      const score = scoreOfItem(item, s);
       const isNG = score < item.max;
 
-      useEffect(() => { if (item.type === 'subdeduct') setState({ ...s, score: subdeductScore }); }, [subdeductScore]);
-
-      const toggleSub = (lbl) => {
-        const ng = s.ngSubs || [];
-        setState({ ...s, ngSubs: ng.includes(lbl) ? ng.filter(x => x !== lbl) : [...ng, lbl] });
-      };
-      const setCustomName = (lbl, v) => setState({ ...s, customNames: { ...(s.customNames || {}), [lbl]: v } });
+      /**
+       * 一律用「更新函式」改狀態，不可展開 render 當下的 s。
+       * s 是快照：同一批更新裡（或照片壓縮這種非同步流程完成時）用它去 spread，
+       * 會把期間其他欄位的變更整包蓋回舊值。分數本身已改為現算而不儲存，
+       * 但 ngSubs／customNames／photos 仍然是真資料，蓋掉就是掉資料。
+       */
+      const patch = (fn) => setState(fn);
+      const toggleSub = (lbl) => patch(p => {
+        const ng = p.ngSubs || [];
+        const on = ng.includes(lbl);
+        const next = { ...p, ngSubs: on ? ng.filter(x => x !== lbl) : [...ng, lbl] };
+        // 取消勾選時要把已填的名稱一起清掉。留著的話那段文字就成了「畫面上看不到、
+        // 卻仍在紀錄裡」的隱藏資料 —— 報表會把它列成缺失，分數卻沒扣到它，
+        // 兩邊對不起來（現場就是這樣核不出來的）。
+        if (on && p.customNames && p.customNames[lbl] != null) {
+          const cn = { ...p.customNames };
+          delete cn[lbl];
+          next.customNames = cn;
+        }
+        return next;
+      });
+      const setCustomName = (lbl, v) => patch(p => ({ ...p, customNames: { ...(p.customNames || {}), [lbl]: v } }));
 
       return (
-        <div className="px-4 py-3 border-b border-slate-100 last:border-0">
+        <div id={`item-${item.id}`} className={"px-4 py-3 border-b border-slate-100 last:border-0 " + flash}>
           <div className="flex items-start justify-between gap-3">
             <div className="flex-1">
               <div className="font-semibold text-slate-800 text-sm">{item.name}
@@ -1104,19 +1166,23 @@
                   const lbl = labelOf(sub);
                   const on = (s.ngSubs || []).includes(lbl);
                   const u = isCustom(sub) ? Math.max(1, nameUnits(lbl)) : fixedUnits(sub);
-                  return <button key={lbl} onClick={() => toggleSub(lbl)} title={sub.note || ''} className={"text-xs px-2 py-1 rounded-full border transition " + (on ? "bg-red-500 text-white border-red-500" : "bg-white text-slate-500 border-slate-300")}>{on ? '✕ ' : ''}{lbl}{sub.note ? ' ⓘ' : ''} -{u * item.perPoint}</button>;
+                  // 顯示的扣分要蓋住配分上限：填了 11 個貨架時原本會顯示 -22，
+                  // 但這一題最多只會少 18 分，寫 -22 是騙人的
+                  const shown = Math.min(u * item.perPoint, item.max);
+                  return <button key={lbl} onClick={() => toggleSub(lbl)} title={sub.note || ''} className={"text-xs px-2 py-1 rounded-full border transition " + (on ? "bg-red-500 text-white border-red-500" : "bg-white text-slate-500 border-slate-300")}>{on ? '✕ ' : ''}{lbl}{sub.note ? ' ⓘ' : ''} -{shown}</button>;
                 })}
               </div>
-              {/* 可填寫子項：填入名稱（多個以、或/分隔），每個名稱扣一個缺失 */}
+              {/* 可填寫子項：填入名稱（多個以、,/ 分隔，不可用空白），每個名稱扣一個缺失 */}
               {item.subs.filter(sub => isCustom(sub) && (s.ngSubs || []).includes(labelOf(sub))).map(sub => {
                 const lbl = labelOf(sub);
+                const n = Math.max(1, nameUnits(lbl));
                 return (
                   <div key={lbl} className="mt-2">
-                    <div className="text-[10px] text-slate-500 mb-0.5">填入{lbl}名稱；<b className="text-red-500">多個貨架請用空格或符號（、,/）隔開</b>，系統依隔開的數量計算扣分</div>
+                    <div className="text-[10px] text-slate-500 mb-0.5">填入{lbl}名稱；<b className="text-red-500">多個貨架請用「、」或「,」「/」隔開</b>，系統依隔開的數量計算扣分。<b>名稱本身可以有空格</b>（如 TM 前貨架）</div>
                     <input value={s.customNames?.[lbl] || ''} onChange={e => setCustomName(lbl, e.target.value)}
-                      placeholder="例：日用品架 寵物貨架　或　日用品架、寵物貨架"
+                      placeholder="例：日用品架、寵物貨架"
                       className="w-full text-xs px-2 py-1.5 border border-red-300 rounded bg-red-50" />
-                    <div className="text-[10px] text-red-500 mt-0.5">辨識為 {nameUnits(lbl)} 個貨架 → 扣 {Math.max(1, nameUnits(lbl)) * item.perPoint} 分（{splitNames(s.customNames?.[lbl]).join('｜') || '尚未填寫'}）</div>
+                    <div className="text-[10px] text-red-500 mt-0.5">辨識為 {nameUnits(lbl)} 個貨架 → 扣 {Math.min(n * item.perPoint, item.max)} 分（{splitNames(s.customNames?.[lbl]).join('｜') || '尚未填寫'}）</div>
                   </div>
                 );
               })}
@@ -1125,13 +1191,13 @@
 
           {item.type === 'deduct' && (
             <div className="flex items-center gap-2 mt-2">
-              <button onClick={() => setState({ ...s, score: item.max })} className={"text-xs px-4 py-1 rounded border " + (score === item.max ? "bg-emerald-500 text-white border-emerald-500" : "bg-white text-slate-500 border-slate-300")}>合格 ({item.max})</button>
-              <button onClick={() => setState({ ...s, score: 0 })} className={"text-xs px-4 py-1 rounded border " + (score === 0 ? "bg-red-500 text-white border-red-500" : "bg-white text-slate-500 border-slate-300")}>缺失 (0)</button>
+              <button onClick={() => patch(p => ({ ...p, score: item.max }))} className={"text-xs px-4 py-1 rounded border " + (score === item.max ? "bg-emerald-500 text-white border-emerald-500" : "bg-white text-slate-500 border-slate-300")}>合格 ({item.max})</button>
+              <button onClick={() => patch(p => ({ ...p, score: 0 }))} className={"text-xs px-4 py-1 rounded border " + (score === 0 ? "bg-red-500 text-white border-red-500" : "bg-white text-slate-500 border-slate-300")}>缺失 (0)</button>
             </div>
           )}
 
           {isNG && canPhoto && (
-            <PhotoUpload label="缺失照片（NG 項目必須拍照記錄）" required needShots={item.type === 'subdeduct' ? Math.max(1, totalUnits) : 1} photos={s.photos} onChange={p => setState({ ...s, photos: p })} folderPath={`${DRIVE_ROOT}/${monthFolder}/${item.name}/缺失`} existingCount={existingCount} existing={existing} onRemoveExisting={onRemoveExisting} />
+            <PhotoUpload label="缺失照片（NG 項目必須拍照記錄）" required needShots={shotsNeededOf(item, s)} photos={s.photos} onChange={ph => patch(p => ({ ...p, photos: ph }))} folderPath={`${DRIVE_ROOT}/${monthFolder}/${item.name}/缺失`} existingCount={existingCount} existing={existing} onRemoveExisting={onRemoveExisting} />
           )}
         </div>
       );
@@ -1182,23 +1248,66 @@
       const [postSubmit, setPostSubmit] = useState(null);
       const [postStat, setPostStat] = useState(null);
       const [toast, setToast] = useState('');
+      /**
+       * 上傳診斷：把這支手機佇列裡每一張的狀態與「失敗原因」攤出來。
+       *
+       * 為什麼需要：每次上傳失敗的原因本來就存進了 photo.error，但介面只顯示張數 ——
+       * 2026-08-27 有人一小時內重試幾百次全數失敗，而事後只能靠猜，因為那個字串
+       * 一直躺在她手機的 IndexedDB 裡，沒有任何地方會把它拿出來。
+       * 佇列是每支手機各自獨立的，所以這個畫面必須讓點檢人員本人打得開，不能只給管理者。
+       */
+      const [diag, setDiag] = useState(null);   // null=關閉、[]=沒東西、[...]=清單
+      const [diagBusy, setDiagBusy] = useState(false);
+      const openDiag = async () => {
+        setDiagBusy(true);
+        try {
+          const list = await SqcDB.photoDiagnostics();
+          // 卡最久的排前面，現場要先看的就是那幾張
+          list.sort((a, b) => (b.tries || 0) - (a.tries || 0));
+          setDiag(list);
+        } catch (e) {
+          setDiag([{ id: 'err', name: '(讀取佇列失敗)', status: '?', where: '', tries: 0, error: String(e && e.message || e) }]);
+        } finally { setDiagBusy(false); }
+      };
       useEffect(() => {
         if (!toast) return;
         const t = setTimeout(() => setToast(''), 4000);
         return () => clearTimeout(t);
       }, [toast]);
       const postRecId = postSubmit && postSubmit.recordId;
+      // 這一筆每一張照片的狀態（只取狀態與題目路徑，不取 blob 與 thumb ——
+      // thumb 是整張 1920px 的 dataURL，19 張抓進 state 會吃掉十幾MB）
+      const [postShots, setPostShots] = useState([]);
       useEffect(() => {
-        if (!postRecId || !window.SqcUploader) { setPostStat(null); return; }
+        if (!postRecId || !window.SqcUploader) { setPostStat(null); setPostShots([]); return; }
         let alive = true;
-        const refresh = () => SqcUploader.countsOfRecord(postRecId)
-          .then(c => { if (alive) setPostStat(c); }).catch(() => { });
+        const refresh = () => {
+          SqcUploader.countsOfRecord(postRecId)
+            .then(c => { if (alive) setPostStat(c); }).catch(() => { });
+          if (window.SqcDB && SqcDB.photosOfRecord) {
+            SqcDB.photosOfRecord(postRecId)
+              .then(list => {
+                if (!alive) return;
+                setPostShots(list.map(p => ({
+                  id: p.id, status: p.status,
+                  // 「115年08月/題目/缺失」→ 只留題目，現場要看的是「哪一題還沒傳完」
+                  where: (p.pathParts || []).slice(1).join('/'),
+                })));
+              }).catch(() => { });
+          }
+        };
         refresh();
         const off = SqcUploader.onChange(refresh);
         return () => { alive = false; off(); };
       }, [postRecId]);
-      // 完成＝這一筆沒有還在傳的(pending)、也沒有等著回寫連結的(done)。
-      // orphan（檔案在雲端硬碟但放棄回寫連結）算「已結案但要人工處理」，不可當成沒事。
+      /**
+       * 兩個不同的門檻，不可以混用：
+       *   cloudSafe ＝ 沒有 pending → 所有檔案都已進雲端硬碟 → **可以離開現場**
+       *   postDone  ＝ 連 done 都沒有 → 連結也寫回紀錄了 → 整筆結案、面板可自動關閉
+       * 現場真正需要的判斷是前者。原本只有 postDone 一個標準，於是照片明明都安全進了雲端，
+       * 畫面還在說「請留在現場」、離開還要按確認並記進異動紀錄 —— 那是假警報。
+       */
+      const cloudSafe = !!postStat && postStat.pending === 0;
       const postDone = !!postStat && postStat.pending === 0 && postStat.done === 0;
       useEffect(() => {
         // 傳完就自動關閉，不必再按一次「完成」；有需要人工處理的才留著讓人看清楚
@@ -1217,13 +1326,31 @@
           navigator.storage.persisted().then(ok => { if (!ok) navigator.storage.persist().catch(() => { }); }).catch(() => { });
         }
       }, []);
-      // 還有東西沒送完就提醒，避免關掉分頁後照片停在佇列裡沒人知道
+      /**
+       * 一進來就先踢一次補傳。
+       * uploader 只有 setInterval(15秒)、online 事件與「切回前景」三個觸發點，
+       * 所以「上次沒傳完、這次重開 App」的情況要白等最多 15 秒才會開始 ——
+       * 而使用者常常就是為了補傳才打開的。
+       * 放在 App（登入後）而不是 uploader 載入時：pumpRecords 會呼叫需要權杖的
+       * queryRecords，未登入時觸發只會失敗並白白累加重試次數。
+       */
       useEffect(() => {
-        if (!((pendingUp.unfinished || 0) + (pendingUp.queuedRecords || 0))) return;
+        if (CONFIGURED && window.SqcUploader) SqcUploader.pump();
+      }, []);
+      /**
+       * 還有東西沒送完就提醒關掉分頁。
+       *
+       * 只看 pending（＝檔案還沒進雲端硬碟）與待送出的紀錄，不可以看 unfinished ——
+       * unfinished = pending + done，而 done 的檔案「已經在雲端硬碟了」，只差把連結寫回紀錄。
+       * 那種情況攔人是假警報：關掉也不會遺失任何照片，連結之後用「照片連結修復」補得回來。
+       * 而假警報最大的代價是「訓練大家忽略警告」—— 等到真的有照片沒傳完時也不會理。
+       */
+      useEffect(() => {
+        if (!((pendingUp.pending || 0) + (pendingUp.queuedRecords || 0))) return;
         const warn = (e) => { e.preventDefault(); e.returnValue = ''; return ''; };
         window.addEventListener('beforeunload', warn);
         return () => window.removeEventListener('beforeunload', warn);
-      }, [pendingUp.unfinished, pendingUp.queuedRecords]);
+      }, [pendingUp.pending, pendingUp.queuedRecords]);
       const fmtStamp = (ts) => {
         if (!ts) return '';
         const d = new Date(ts);
@@ -1418,6 +1545,29 @@ ${nm}
       const [existingPhotos, setExistingPhotos] = useState({});      // 編輯時保留原有照片JSON
       const [editPass, setEditPass] = useState('');                  // 跨週編輯用的密碼（後端會再驗一次）
       const [editOrigStaff, setEditOrigStaff] = useState(null);      // 該筆原本的點檢人員（員編已不在名單時沿用，不擋住編輯）
+      /**
+       * 送出被必填擋下時，要能直接帶使用者到出問題的地方。
+       * 原本點檢作業頁的 8 項檢查只有 alert 就 return —— 而那一頁很長
+       * （三個大分類＋觀察區＋簽核區），關掉提示視窗只能自己往下找。
+       * flashId 同時驅動「捲到該處」與「閃一圈紅框」；只捲不標的話還是找不到是哪一列。
+       */
+      const [flashId, setFlashId] = useState('');
+      const flashCls = (id) => (flashId === id ? 'sqc-flash' : '');
+      useEffect(() => {
+        if (!flashId) return;
+        const el = document.getElementById(flashId);
+        if (el) {
+          // behavior:'smooth' 是由 requestAnimationFrame 驅動的：頁面不可見時那個動畫
+          // 完全不會前進，捲動就靜默失效。這裡要保證的是「元素最後有到畫面上」，
+          // 平滑只是好看，所以不可見或使用者開了「減少動態效果」時就直接跳過去。
+          const smooth = document.visibilityState === 'visible'
+            && !(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+          el.scrollIntoView({ behavior: smooth ? 'smooth' : 'auto', block: 'center' });
+        }
+        // 動畫是 2.2 秒，稍微留一點餘裕再清掉，否則最後一段會被截掉
+        const t = setTimeout(() => setFlashId(''), 2600);
+        return () => clearTimeout(t);
+      }, [flashId, tab]);
       // 店鋪挑選清單必須放在 editingRecordId / editPass 等 state 宣告之後 ——
       // useMemo 的計算在 render 當下就執行，若放在前面會踩到 const 的暫時性死區
       // （ReferenceError: Cannot access 'editingRecordId' before initialization）。
@@ -1593,16 +1743,57 @@ ${nm}
       // 若全店滿分、點檢人員沒去動任何得分就送出，會寫進一筆 0 分「不合格」的紀錄。
       const total = useMemo(() => {
         let t = 0;
-        checklist.categories.forEach(c => c.items.forEach(it => { const s = scores[it.id]; t += (s && s.score != null) ? s.score : it.max; }));
+        checklist.categories.forEach(c => c.items.forEach(it => { t += scoreOfItem(it, scores[it.id]); }));
         return t;
       }, [scores, checklist]);
 
       // 是否「無缺失」→ 所有題目皆滿分（沒有任何扣分）
-      const noDeductDefect = useMemo(() => checklist.categories.every(c => c.items.every(it => { const s = scores[it.id]; return !s || s.score == null || s.score === it.max; })), [scores, checklist]);
+      const noDeductDefect = useMemo(() => checklist.categories.every(c => c.items.every(it => scoreOfItem(it, scores[it.id]) === it.max)), [scores, checklist]);
 
       const grade = gradeOf(total);
-      const setItemState = (id, st) => setScores(prev => ({ ...prev, [id]: st }));
+      // fn 是「更新函式」而不是新物件：外層的 map 本來就用 updater，但單一題目的內容
+      // 若由呼叫端展開 render 快照組好再傳進來，那一層照樣會蓋掉期間的其他變更。
+      // 兩層都用 prev 才是真的安全。
+      const setItemState = (id, fn) => setScores(prev => ({ ...prev, [id]: fn(prev[id] || {}) }));
       const logout = () => { sessionStorage.removeItem('sqc_user'); location.href = 'index.html'; };
+
+      /**
+       * 自行新增店鋪：主檔查到之後還要通過三道檢查才算選定。
+       *
+       * 原本只確認「店鋪主檔有這家店」就直接選上。但主檔是「所有店」，
+       * 本月名單才是「這個月要點檢的店」—— 於是名單外的店可以一路填完整份表，
+       * 而本月已點檢的店也要等按下送出才被擋（整份表白填）。
+       *
+       * 這個功能仍然必要：畫面上的清單是 STORE_ROSTER.filter(課別 === 所選課別)，
+       * 所以「在本月名單、但主責課別不同」的店不會出現在清單上，只能靠這裡撈出來。
+       */
+      const acceptCustomStore = (s) => {
+        const code = normCode(s.code);
+        // 名單／已點檢還沒載完就不能判斷。這時放行等於把 2026-08-25 那個
+        // 「空窗期選到已點檢店」的競態原封不動搬回來，所以寧可要使用者等幾秒。
+        if (!pickReady) { alert('本月店鋪名單還在載入中，請稍候幾秒再新增。'); return false; }
+        const inRoster = STORE_ROSTER.find(x => normCode(x.code) === code);
+        if (!inRoster) {
+          alert(`「${s.code} ${s.name}」不在本月（${monthFolderOf(workMonth)}）的店鋪名單內，不可點檢。\n\n`
+            + '若這家店本月確實要點檢，請先請管理者到「維護專區 → 店鋪名單」把它加入本月名單。');
+          return false;
+        }
+        if (inspectedCodes[code]) {
+          alert(`「${inRoster.name}」本月已有點檢紀錄，不可重複點檢。\n（如需修正請到「查詢紀錄」編輯那一筆。）`);
+          return false;
+        }
+        // 在名單裡但屬別的課 —— 這正是本功能最主要的用途，放行，但要講清楚課別的歸屬
+        if (basic.section && inRoster.section && inRoster.section !== basic.section) {
+          alert(`「${inRoster.name}」在本月名單內，但主責課別是「${inRoster.section}」，`
+            + `與上方選的「${basic.section}」不同。\n\n仍可繼續點檢；本筆紀錄的課別會記為上方所選的課別。`);
+        }
+        // 用名單裡的那一筆（帶課別與店鋪型態），主檔只補上營業部等額外欄位。
+        // 這裡一定要用 updater：doLookup 是在 await lookupStore()（一次網路往返）之後才走到這裡，
+        // 展開 basic 快照會把使用者在等待期間改過的部別／課別／可否拍照整包蓋回舊值。
+        setBasic(prev => ({ ...prev, customInfo: { ...s, ...inRoster }, customStore: inRoster.code + ' ' + inRoster.name }));
+        setCustResults([]);
+        return true;
+      };
 
       // 自行新增店鋪：查店鋪主檔
       const doLookup = async () => {
@@ -1612,7 +1803,7 @@ ${nm}
           const r = await SqcApi.lookupStore(q);
           const rows = r.rows || [];
           const exact = rows.filter(s => String(s.code) === q || s.name === q);
-          if (exact.length === 1) { setBasic({ ...basic, customInfo: exact[0], customStore: exact[0].code + ' ' + exact[0].name }); setCustResults([]); }
+          if (exact.length === 1) acceptCustomStore(exact[0]);
           else { setCustResults(rows); if (!rows.length) alert('店鋪主檔查無此店，無法新增（請確認店號/店名）'); }
         } catch (e) { alert('查詢失敗：' + e.message); }
       };
@@ -1676,6 +1867,18 @@ ${nm}
         setTab('work');
       };
 
+      /**
+       * 必填擋下：提示 → 切到正確頁籤 → 捲到該處並閃紅框。
+       * alert 是阻塞的，所以關掉視窗之後才會切頁與捲動，順序剛好。
+       * 捲動放在 useEffect 裡而不是這裡：切頁後那個元素要等下一次渲染才存在。
+       */
+      const jumpTo = (id, msg, toTab) => {
+        alert(msg);
+        if (toTab && toTab !== tab) setTab(toTab);
+        setFlashId('');          // 先清掉，連續兩次擋在同一個 id 時動畫才會重播
+        setTimeout(() => setFlashId(id), 0);
+      };
+
       const doSubmit = async () => {
         const isEdit = !!editingRecordId;
         // 題庫是計分依據：尚在載入或載入失敗(題庫為空)時送出，會把明細與分數寫成 0 分覆蓋掉原紀錄，必須先擋下
@@ -1684,30 +1887,30 @@ ${nm}
           alert('目前沒有載入到本月題庫，為避免分數被覆蓋成 0 分，已阻止送出。\n請重新整理頁面；若仍為空，請確認「維護專區→點檢題目」該月份已匯入題庫。');
           return;
         }
-        if (basic.time.length <= 10) { alert('請先在「基本資料」填寫點檢時間（時間為必填）'); setTab('basic'); return; }
-        if (!effStore) { alert('請先在「基本資料」選擇店鋪'); setTab('basic'); return; }
-        if (!isEdit && inspectedCodes[normCode(effStore.code)]) { alert('這家店本月已有點檢紀錄，不可重複點檢（如需修正請至查詢紀錄編輯該筆）'); setTab('basic'); return; }
-        if (!basic.storeType) { alert('請先在「基本資料」選擇可否拍照'); setTab('basic'); return; }
-        if (!reasonOk) { alert('不可拍照店鋪請選擇原因'); setTab('basic'); return; }
-        if (!basic.staffId) { alert('請先在「基本資料」選擇點檢人員'); setTab('basic'); return; }
-        if (!sign.count) { alert('請選擇「在店店員人數」'); return; }
-        if (!sign.identity) { alert('請選擇「簽名店鋪人員身分別」'); return; }
+        if (basic.time.length <= 10) { jumpTo('basic-time', '請先在「基本資料」填寫點檢時間（時間為必填）', 'basic'); return; }
+        if (!effStore) { jumpTo('basic-store', '請先在「基本資料」選擇店鋪', 'basic'); return; }
+        if (!isEdit && inspectedCodes[normCode(effStore.code)]) { jumpTo('basic-store', '這家店本月已有點檢紀錄，不可重複點檢（如需修正請至查詢紀錄編輯該筆）', 'basic'); return; }
+        if (!basic.storeType) { jumpTo('basic-phototype', '請先在「基本資料」選擇可否拍照', 'basic'); return; }
+        if (!reasonOk) { jumpTo('basic-phototype', '不可拍照店鋪請選擇原因', 'basic'); return; }
+        if (!basic.staffId) { jumpTo('basic-staff', '請先在「基本資料」選擇點檢人員', 'basic'); return; }
+        if (!sign.count) { jumpTo('sign-count', '請選擇「在店店員人數」', 'work'); return; }
+        if (!sign.identity) { jumpTo('sign-identity', '請選擇「簽名店鋪人員身分別」', 'work'); return; }
 
         // 是否已存在該照片欄位的舊照片（編輯時沿用；新建時一律沒有）
         const hasExisting = (parts) => (existingPhotos[parts.join('/')] || []).length > 0;
 
         // 紙本點檢表：所有店（含編輯）皆須有紙本，新傳或沿用原有皆可
-        if (!paperForm.length && !hasExisting([monthFolder, 'SQC點檢表完成照片'])) { alert('所有店皆須上傳「紙本點檢表」才能送出'); return; }
+        if (!paperForm.length && !hasExisting([monthFolder, 'SQC點檢表完成照片'])) { jumpTo('paper-form', '所有店皆須上傳「紙本點檢表」才能送出', 'work'); return; }
 
         // 觀察區：畫面上看得到的題目全部必填（含「店舖有無對外廁所」本身）
         for (const o of checklist.toiletObservations) {
-          if (obsVisible(o.show) && !toilet[o.id]) { alert(`觀察區必填：請選擇「${o.name}」`); return; }
+          if (obsVisible(o.show) && !toilet[o.id]) { jumpTo(`toilet-${o.id}`, `觀察區必填：請選擇「${o.name}」`, 'work'); return; }
         }
         if (toilet['O1'] === '有') {
           for (const t of checklist.toiletInspect) {
-            if (!toilet[t.id]) { alert(`觀察區必填：請選擇廁所觀察「${t.name}」`); return; }
+            if (!toilet[t.id]) { jumpTo(`toilet-${t.id}`, `觀察區必填：請選擇廁所觀察「${t.name}」`, 'work'); return; }
             if (toilet[t.id] === '不符合' && t.opts && t.opts.length && !(toiletReasons[t.id] || []).length) {
-              alert(`廁所觀察「${t.name}」為不符合，請選擇不合格項目`); return;
+              jumpTo(`toilet-reasons-${t.id}`, `廁所觀察「${t.name}」為不符合，請選擇不合格項目`, 'work'); return;
             }
           }
         }
@@ -1715,20 +1918,23 @@ ${nm}
         // 照片必拍檢查：可拍照店鋪（含編輯），沿用原照片或本次新傳皆可滿足
         if (canPhoto) {
           for (const k of checklist.keyObservations) {
-            if (!(keyObs[k.id] || []).length && !hasExisting([monthFolder, k.name])) { alert(`「${k.name}」為必拍重點觀察題`); return; }
+            if (!(keyObs[k.id] || []).length && !hasExisting([monthFolder, k.name])) { jumpTo(`keyobs-${k.id}`, `「${k.name}」為必拍重點觀察題`, 'work'); return; }
           }
           if (noDeductDefect) {
-            for (const z of PERFECT_ZONES) { if (!(perfectPhotos[z] || []).length && !hasExisting([monthFolder, '滿分照片', z])) { alert(`無缺失店鋪：滿分照片區「${z}」必須上傳照片`); return; } }
+            for (const z of PERFECT_ZONES) { if (!(perfectPhotos[z] || []).length && !hasExisting([monthFolder, '滿分照片', z])) { jumpTo(`perfect-${z}`, `無缺失店鋪：滿分照片區「${z}」必須上傳照片`, 'work'); return; } }
           } else {
             for (const c of checklist.categories) for (const it of c.items) {
-              const s = scores[it.id]; const sc = (s && s.score != null) ? s.score : it.max; const ng = sc < it.max;
+              const s = scores[it.id]; const ng = scoreOfItem(it, s) < it.max;
               // 多缺失項的題目：鎖定幾個扣分項就要幾張缺失照片（一個缺失一張憑證）。
               // 「填寫型」子項填了幾個名稱就算幾個扣分項，與扣分邏輯同一份定義（ngUnitsOf）。
               // 既有照片（編輯時的原照片）也算在內，不需要重傳。
-              const needShots = it.type === 'subdeduct' ? Math.max(1, ngUnitsOf(it, s)) : 1;
+              // 用 shotsNeededOf（與畫面上的 PhotoUpload 同一支）：它會蓋住配分上限，
+              // 否則會出現「這一題已經扣到 0 分了，卻還要求再上傳照片才能送出」。
+              const needShots = shotsNeededOf(it, s);
               const haveShots = (s?.photos || []).length + existingCountAt([monthFolder, it.name, '缺失']);
               if (ng && haveShots < needShots) {
-                alert(`「${it.name}」鎖定了 ${needShots} 個扣分項，需上傳 ${needShots} 張缺失照片（目前 ${haveShots} 張）`);
+                jumpTo(`item-${it.id}`,
+                  `「${it.name}」鎖定了 ${needShots} 個扣分項，需上傳 ${needShots} 張缺失照片（目前 ${haveShots} 張）`, 'work');
                 return;
               }
             }
@@ -1740,7 +1946,8 @@ ${nm}
                 const needT = Math.max(1, (toiletReasons[t.id] || []).length);
                 const haveT = (toiletPhotos[t.id] || []).length + existingCountAt([monthFolder, '廁所觀察', t.name, '缺失']);
                 if (haveT < needT) {
-                  alert(`廁所觀察「${t.name}」勾了 ${needT} 個不合格項目，需上傳 ${needT} 張缺失照片（目前 ${haveT} 張）`);
+                  jumpTo(`toilet-${t.id}`,
+                    `廁所觀察「${t.name}」勾了 ${needT} 個不合格項目，需上傳 ${needT} 張缺失照片（目前 ${haveT} 張）`, 'work');
                   return;
                 }
               }
@@ -1755,17 +1962,19 @@ ${nm}
         }
         // 新增時找不到就擋下：寧可要求重選，也不要默默把紀錄掛到登入者名下（會造成點檢人員誤植）
         if (!staff) {
-          alert(`找不到所選點檢人員的資料（員編 ${basic.staffId || '空白'}），請重新選擇「點檢人員」`);
-          setTab('basic'); return;
+          jumpTo('basic-staff', `找不到所選點檢人員的資料（員編 ${basic.staffId || '空白'}），請重新選擇「點檢人員」`, 'basic');
+          return;
         }
         const storeName = effStore ? effStore.name : '';
         const storeCode = effStore ? effStore.code : '';
         const recId = editingRecordId || ((window.crypto && crypto.randomUUID) ? crypto.randomUUID() : 'r' + Date.now());
 
+        // 分數用 scoreOfItem 現算，與畫面上的合計、分類小計是同一支函式 ——
+        // 原本讀 s.score（由 useEffect 非同步寫回），會在同步完成前送出就存到舊分數
         const detail = {};
         checklist.categories.forEach(c => c.items.forEach(it => {
           const s = scores[it.id] || {};
-          detail[it.id] = { name: it.name, score: (s.score != null ? s.score : it.max), ngSubs: s.ngSubs || [], customNames: s.customNames || {} };
+          detail[it.id] = { name: it.name, score: scoreOfItem(it, s), ngSubs: s.ngSubs || [], customNames: s.customNames || {} };
         }));
         const observation = { toilet, obsText, toiletReasons };
 
@@ -1774,8 +1983,7 @@ ${nm}
         if (isEdit) {
           // 編輯時若項目已從缺失改為合格，清掉過時的缺失照片紀錄，避免資料不一致
           checklist.categories.forEach(c => c.items.forEach(it => {
-            const s = scores[it.id] || {};
-            const ng = (s.score != null ? s.score : it.max) < it.max;
+            const ng = scoreOfItem(it, scores[it.id]) < it.max;
             const key = [monthFolder, it.name, '缺失'].join('/');
             if (!ng) delete photosJson[key];
           }));
@@ -1798,7 +2006,7 @@ ${nm}
         if (canPhoto) {
           checklist.categories.forEach(c => c.items.forEach(it => {
             const s = scores[it.id] || {};
-            if ((s.score != null ? s.score : it.max) < it.max) addPhotos([monthFolder, it.name, '缺失'], s.photos);
+            if (scoreOfItem(it, s) < it.max) addPhotos([monthFolder, it.name, '缺失'], s.photos);
           }));
           checklist.keyObservations.forEach(k => addPhotos([monthFolder, k.name], keyObs[k.id]));
           checklist.toiletInspect.forEach(t => { if (toilet[t.id] === '不符合') addPhotos([monthFolder, '廁所觀察', t.name, '缺失'], toiletPhotos[t.id]); });
@@ -2239,17 +2447,98 @@ ${nm}
                 </div>
               </div>
             )}
+            {/* 上傳診斷：把佇列裡每一張的狀態與失敗原因攤出來，讓現場的人（或截圖）就能看到 */}
+            {diag && (
+              <div className="fixed inset-0 z-50 bg-black/60 flex items-start justify-center p-3 overflow-y-auto">
+                <div className="bg-white rounded-2xl shadow-xl max-w-2xl w-full p-4 my-4">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <div className="text-lg font-bold text-slate-800">🔎 上傳診斷</div>
+                      <div className="text-xs text-slate-500 mt-0.5">
+                        這是<b>這支手機</b>待傳佇列的內容 —— 換手機或換瀏覽器就看不到。
+                        傳不上去時請把這個畫面截圖回報。
+                      </div>
+                    </div>
+                    <button onClick={() => setDiag(null)} className="text-slate-400 hover:text-slate-600 text-xl leading-none px-1">×</button>
+                  </div>
+                  <div className="text-xs text-slate-500 mt-2 font-mono break-all">來源網址：{location.origin}</div>
+                  {!diag.length ? (
+                    <p className="text-sm text-emerald-700 mt-3">佇列是空的 —— 這支手機沒有待傳的照片。</p>
+                  ) : (
+                    <div className="mt-3 space-y-2">
+                      {diag.map(p => (
+                        <div key={p.id} className={"border rounded-lg p-2.5 text-xs "
+                          + (p.status === 'pending' ? 'border-red-200 bg-red-50'
+                            : p.status === 'orphan' ? 'border-amber-200 bg-amber-50' : 'border-slate-200 bg-slate-50')}>
+                          <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+                            <span className={"font-bold " + (p.status === 'pending' ? 'text-red-700' : p.status === 'orphan' ? 'text-amber-700' : 'text-slate-600')}>
+                              {p.status === 'pending' ? '還沒進雲端' : p.status === 'done' ? '已進雲端，待寫連結'
+                                : p.status === 'linked' ? '完成' : p.status === 'orphan' ? '需人工處理' : p.status}
+                            </span>
+                            <span className="text-slate-600">{p.where || '(無題目)'}</span>
+                            {p.tries > 0 && <span className="text-slate-500">已重試 <b>{p.tries}</b> 次</span>}
+                            {/* 內容大小是關鍵：0 代表照片本身在本機就已經不見了，不是網路問題 */}
+                            <span className={p.blobSize ? 'text-slate-500' : 'text-red-700 font-bold'}>
+                              內容 {p.blobSize ? Math.round(p.blobSize / 1024) + ' KB' : '0（照片不見了）'}
+                            </span>
+                          </div>
+                          <div className="text-slate-400 mt-1 font-mono break-all">{p.name}</div>
+                          {p.error && <div className="text-red-700 mt-1 font-mono break-all">上傳錯誤：{p.error}</div>}
+                          {p.linkErr && <div className="text-amber-700 mt-1 font-mono break-all">回寫連結錯誤：{p.linkErr}（{p.linkTries} 次）</div>}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  <div className="flex flex-wrap justify-end gap-2 mt-4">
+                    <button onClick={() => SqcUploader.pump({ force: true })} disabled={pendingUp.busy}
+                      className="px-3 py-2 text-sm bg-slate-200 hover:bg-slate-300 disabled:opacity-60 text-slate-700 rounded-lg">
+                      {pendingUp.busy ? '正在重試…' : '立即重試'}
+                    </button>
+                    <button onClick={openDiag} disabled={diagBusy}
+                      className="px-3 py-2 text-sm bg-slate-200 hover:bg-slate-300 disabled:opacity-60 text-slate-700 rounded-lg">
+                      重新讀取
+                    </button>
+                    <button onClick={() => setDiag(null)} className="px-3 py-2 text-sm bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg">關閉</button>
+                  </div>
+                </div>
+              </div>
+            )}
             {/* 送出後的上傳進度：照片沒進雲端硬碟就不放人走（唯一的出口要留下軌跡） */}
             {postSubmit && (
               <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4">
                 <div className="bg-white rounded-2xl shadow-xl max-w-md w-full p-5">
                   <div className="text-lg font-bold text-slate-800">
                     {postDone ? (postStat.orphan ? '⚠ 已上傳，但有照片需人工處理' : '✅ 全部完成')
-                      : '📤 照片上傳中，請留在現場'}
+                      : cloudSafe ? '☁️ 照片都在雲端了，可以離開現場'
+                        : '📤 還有照片沒進雲端，請留在現場'}
                   </div>
                   <div className="text-sm text-slate-600 mt-1">
                     {postSubmit.store}　得分 {postSubmit.total}/{TOTAL_MAX}（{postSubmit.grade}）
                   </div>
+                  {/* 每一張照片一個點：現場滑一眼就知道還有哪幾張沒進雲端，不必解讀數字。
+                      ☁️ 已在雲端（done/linked/orphan 都算）· ⏳ 還在傳（pending） */}
+                  {!!postShots.length && (
+                    <div className="mt-3">
+                      <div className="flex flex-wrap gap-1">
+                        {postShots.map(p => (
+                          <span key={p.id} title={(p.status === 'pending' ? '還在傳：' : '已在雲端：') + p.where}
+                            className={"w-5 h-5 rounded flex items-center justify-center text-[10px] "
+                              + (p.status === 'pending' ? 'bg-red-100 text-red-600 border border-red-300'
+                                : p.status === 'orphan' ? 'bg-amber-100 text-amber-700 border border-amber-300'
+                                  : 'bg-emerald-100 text-emerald-700 border border-emerald-300')}>
+                            {p.status === 'pending' ? '⏳' : p.status === 'orphan' ? '!' : '☁'}
+                          </span>
+                        ))}
+                      </div>
+                      {/* 還在傳的要指名是哪一題，否則使用者不知道該回去哪裡確認 */}
+                      {(() => {
+                        const bad = [...new Set(postShots.filter(p => p.status === 'pending').map(p => p.where))];
+                        return bad.length ? (
+                          <div className="text-[11px] text-red-600 mt-1">還沒進雲端：{bad.join('、')}</div>
+                        ) : null;
+                      })()}
+                    </div>
+                  )}
                   {postDone ? (
                     postStat.orphan ? (
                       <p className="text-sm text-amber-700 mt-3">
@@ -2280,11 +2569,21 @@ ${nm}
                         「已上傳、等寫入連結」的照片<b>檔案已經在雲端硬碟了</b>，只差最後一步把連結寫回紀錄 ——
                         這一步要整筆一起做，所以會停在這裡幾秒。
                       </p>
-                      <p className="text-xs text-slate-500 mt-1">
-                        還在上傳中的照片只存在這支手機上。<b>離開現場前請等它跑完</b> ——
-                        一旦這支手機沒再連上網路開這個 App 就補不回來，而缺失當下已經被改善、拍不回來。
-                        訊號不好時可以走到店外或連店裡的 Wi-Fi 再按「立即重試」。
-                      </p>
+                      {/* 措辭要跟著門檻走：pending 為 0 時照片已經安全，這時再說「離開現場前請等它跑完」
+                          就是假警報 —— 而假警報會訓練大家忽略警告 */}
+                      {cloudSafe ? (
+                        <p className="text-xs text-emerald-700 mt-1">
+                          <b>照片檔案都已經在雲端硬碟了，現在離開現場不會遺失任何照片。</b>
+                          剩下的只是把連結寫回紀錄；能讓 App 多開一下最好，若已經離開也補得回來
+                          （維護專區 →「照片連結修復」）。
+                        </p>
+                      ) : (
+                        <p className="text-xs text-red-600 mt-1">
+                          還沒進雲端的照片<b>只存在這支手機上</b>。<b>離開現場前請等它跑完</b> ——
+                          一旦這支手機沒再連上網路開這個 App 就補不回來，而缺失當下已經被改善、拍不回來。
+                          訊號不好時可以走到店外或連店裡的 Wi-Fi 再按「立即重試」。
+                        </p>
+                      )}
                       {!navigator.onLine && <p className="text-xs text-red-600 mt-1">⚠ 目前顯示為離線，恢復連線後會自動繼續。</p>}
                       {pendingUp.queuedRecords > 0 && <p className="text-xs text-slate-400 mt-1">另有紀錄 {pendingUp.queuedRecords} 筆待送出。</p>}
                     </>
@@ -2299,18 +2598,30 @@ ${nm}
                           className="px-3 py-2 text-sm bg-slate-200 hover:bg-slate-300 disabled:opacity-60 text-slate-700 rounded-lg">
                           {pendingUp.busy ? '正在重試…' : '立即重試'}
                         </button>
+                        {/* 傳不上去時最該做的事：看原因、截圖回報。放在這裡因為使用者就是在這一刻卡住 */}
+                        <button onClick={openDiag} disabled={diagBusy}
+                          className="px-3 py-2 text-sm bg-white border border-slate-300 hover:bg-slate-50 disabled:opacity-60 text-slate-700 rounded-lg">
+                          {diagBusy ? '讀取中…' : '查看原因'}
+                        </button>
+                        {/* 只有「真的還有照片沒進雲端」才需要確認與留軌跡。
+                            pending 為 0（照片都在雲端、只差連結）時關閉面板沒有風險，
+                            不該再要求使用者按「我知道風險」並記進異動紀錄。 */}
                         <button
                           onClick={() => {
-                            const n = (postStat && (postStat.pending + postStat.done)) || postSubmit.added;
-                            if (!confirm(`這一筆還有 ${n} 張照片沒有完成。\n\n確定現在離開嗎？離開後必須用「這支手機、這個瀏覽器」再開一次 App 才傳得上去，否則還在上傳中的照片會永久遺失。\n\n這個決定會記入異動紀錄。`)) return;
-                            if (CONFIGURED) {
-                              SqcApi.logEvent('leaveWithPendingPhotos',
-                                `${postSubmit.store}：還有 ${n} 張未完成（共 ${(postStat && postStat.total) || postSubmit.added} 張）`).catch(() => { });
+                            const n = (postStat && postStat.pending) || 0;
+                            if (n) {
+                              if (!confirm(`這一筆還有 ${n} 張照片沒有進到雲端。\n\n確定現在離開嗎？離開後必須用「這支手機、這個瀏覽器」再開一次 App 才傳得上去，否則這 ${n} 張會永久遺失。\n\n這個決定會記入異動紀錄。`)) return;
+                              if (CONFIGURED) {
+                                SqcApi.logEvent('leaveWithPendingPhotos',
+                                  `${postSubmit.store}：還有 ${n} 張未進雲端（共 ${(postStat && postStat.total) || postSubmit.added} 張）`).catch(() => { });
+                              }
                             }
                             setPostSubmit(null);
                           }}
-                          className="px-3 py-2 text-sm bg-white border border-red-300 text-red-700 hover:bg-red-50 rounded-lg">
-                          我知道風險，稍後再傳
+                          className={"px-3 py-2 text-sm rounded-lg border " + (cloudSafe
+                            ? "bg-white border-slate-300 text-slate-700 hover:bg-slate-50"
+                            : "bg-white border-red-300 text-red-700 hover:bg-red-50")}>
+                          {cloudSafe ? '關閉（連結會在背景寫完）' : '我知道風險，稍後再傳'}
                         </button>
                       </>
                     )}
@@ -2338,7 +2649,13 @@ ${nm}
             {(pendingUp.unfinished > 0 || pendingUp.queuedRecords > 0 || pendingUp.orphan > 0) && (
               <div className="bg-sky-50 border border-sky-300 text-sky-900 text-sm rounded-lg px-3 py-2 flex items-center justify-between gap-3">
                 <div>
-                  <span className="font-bold">📤 背景作業進行中，請保持頁面開啟</span>
+                  {/* 標題跟著「還有沒有照片沒進雲端」變：pending 為 0 時檔案都安全了，
+                      再說「請保持頁面開啟」會讓人以為照片還可能掉 */}
+                  <span className="font-bold">
+                    {pendingUp.pending > 0
+                      ? '📤 還有照片沒進雲端，請保持頁面開啟'
+                      : '☁️ 照片都在雲端了，背景正在寫入連結'}
+                  </span>
                   {/* 不可以把 pending 與 done 合稱「未完成」—— done 的檔案已經在雲端硬碟，
                       只差最後一步回寫連結。合起來講會讓人以為照片都傳不上去。 */}
                   <span className="text-xs ml-2">
@@ -2348,10 +2665,17 @@ ${nm}
                     {pendingUp.orphan > 0 && <span className="text-amber-700">需人工處理 <b>{pendingUp.orphan}</b> 張</span>}
                   </span>
                 </div>
-                <button onClick={() => SqcUploader.pump({ force: true })} disabled={pendingUp.busy}
-                  className="text-xs underline hover:text-sky-700 disabled:no-underline disabled:opacity-60 whitespace-nowrap">
-                  {pendingUp.busy ? '正在重試…' : '立即重試'}
-                </button>
+                <div className="flex items-center gap-3 shrink-0">
+                  <button onClick={() => SqcUploader.pump({ force: true })} disabled={pendingUp.busy}
+                    className="text-xs underline hover:text-sky-700 disabled:no-underline disabled:opacity-60 whitespace-nowrap">
+                    {pendingUp.busy ? '正在重試…' : '立即重試'}
+                  </button>
+                  {/* 傳不上去的時候，要看得到「為什麼」—— 而那個原因只存在這支手機裡 */}
+                  <button onClick={openDiag} disabled={diagBusy}
+                    className="text-xs underline hover:text-sky-700 disabled:opacity-60 whitespace-nowrap">
+                    {diagBusy ? '讀取中…' : '查看原因'}
+                  </button>
+                </div>
               </div>
             )}
             {tab === 'maintain' && sectionMismatch && !hideMismatch && (
@@ -2372,7 +2696,7 @@ ${nm}
               <div className="bg-white rounded-xl shadow-sm p-5 space-y-4">
                 <h2 className="font-bold text-slate-700">📋 基本資料</h2>
                 <div className="grid md:grid-cols-2 gap-4 text-sm">
-                  <div><label className="block text-xs text-slate-500 mb-1">點檢時間</label>
+                  <div id="basic-time" className={"rounded-lg " + flashCls('basic-time')}><label className="block text-xs text-slate-500 mb-1">點檢時間</label>
                     {/* 日期預設當天、時分預設空白且必填：datetime-local 做不到「只有日期」，故拆成三個欄位。
                         時與分各自保存在 timeParts（見 syncTime 的說明），兩邊都填了才會組成 basic.time ——
                         所以清掉「分」不會連帶清掉「時」，也不會幫沒填的那一邊硬湊 00。 */}
@@ -2399,12 +2723,12 @@ ${nm}
                   <div><label className="block text-xs text-slate-500 mb-1">課別</label>
                     <select value={basic.section} onChange={e => setBasic({ ...basic, section: e.target.value, storeCode: '', staffId: '' })} className="w-full px-3 py-2 border border-slate-300 rounded-lg">
                       <option value="">— 請選擇 —</option>{(DEPTS.find(d => d.dept === basic.dept)?.sections || allSections).map(s => <option key={s}>{s}</option>)}</select></div>
-                  <div><label className="block text-xs text-slate-500 mb-1">點檢人員<span className="text-slate-400">（依課別帶出）</span></label>
+                  <div id="basic-staff" className={"rounded-lg " + flashCls('basic-staff')}><label className="block text-xs text-slate-500 mb-1">點檢人員<span className="text-slate-400">（依課別帶出）</span></label>
                     <select value={basic.staffId} onChange={e => { const st = findStaff(e.target.value); setBasic({ ...basic, staffId: e.target.value, dept: st?.dept || basic.dept, section: st?.section || basic.section }); }} className="w-full px-3 py-2 border border-slate-300 rounded-lg">
                       <option value="">— 請選擇 —</option>{STAFFS.filter(s => !basic.section || s.section === basic.section).map(s => <option key={s.id} value={s.id}>{s.name}</option>)}</select></div>
                 </div>
 
-                <div>
+                <div id="basic-store" className={"rounded-lg " + flashCls('basic-store')}>
                   <label className="block text-xs text-slate-500 mb-1">應點檢店鋪<span className="text-slate-400">（單選；依課別自動帶出，亦可自行新增）</span></label>
                   {/* 一個課上百家店，下拉選單很難找 → 改為可搜尋的清單，並直接顯示完成進度 */}
                   <div className="border border-emerald-200 rounded-xl bg-emerald-50/40 overflow-hidden">
@@ -2481,11 +2805,15 @@ ${nm}
                     </div>
                     <button type="button" onClick={() => setBasic({ ...basic, storeCode: '__custom', customStore: '', customInfo: null })}
                       className={"w-full px-3 py-2 text-sm border-t border-emerald-100 " + (basic.storeCode === '__custom' ? "bg-emerald-100 text-emerald-800 font-bold" : "bg-emerald-50/60 text-emerald-700 hover:bg-emerald-100")}>
-                      ＋ 自行新增店鋪（名單外）
+                      ＋ 找不到？用店號／店名搜尋（限本月名單內）
                     </button>
                   </div>
                   {basic.storeCode === '__custom' && (
                     <div className="mt-2">
+                      <div className="text-[11px] text-slate-500 mb-1">
+                        主要用途是撈出「<b>在本月名單內、但主責課別不同</b>」的店（上方清單只顯示所選課別）。
+                        <b className="text-red-500">不在本月名單內的店不可點檢</b>；需要的話請管理者先加進本月名單。
+                      </div>
                       <div className="flex gap-2">
                         <input value={basic.customStore} onChange={e => setBasic({ ...basic, customStore: e.target.value, customInfo: null })}
                           onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); doLookup(); } }}
@@ -2496,7 +2824,7 @@ ${nm}
                       {!basic.customInfo && custResults.length > 0 && (
                         <div className="mt-1 border border-slate-200 rounded-lg divide-y max-h-48 overflow-y-auto">
                           {custResults.map(s => (
-                            <button type="button" key={s.code} onClick={() => { setBasic({ ...basic, customInfo: s, customStore: s.code + ' ' + s.name }); setCustResults([]); }}
+                            <button type="button" key={s.code} onClick={() => acceptCustomStore(s)}
                               className="w-full text-left px-3 py-2 text-sm hover:bg-emerald-50">{s.code} {s.name} <span className="text-slate-400">（營業課：{s.section}）</span></button>
                           ))}
                         </div>
@@ -2506,7 +2834,7 @@ ${nm}
                   )}
                 </div>
 
-                <div>
+                <div id="basic-phototype" className={"rounded-lg " + flashCls('basic-phototype')}>
                   <label className="block text-xs text-slate-500 mb-1">可否拍照<span className="text-red-500">（必選）</span><span className="text-slate-400"> — 決定是否需上傳缺失照片</span></label>
                   <div className="flex gap-2">
                     <button type="button" onClick={() => setBasic({ ...basic, storeType: 'photo', noPhotoReason: '', noPhotoOther: '' })} className={"flex-1 py-2.5 rounded-lg border font-medium " + (basic.storeType === 'photo' ? "bg-emerald-600 text-white border-emerald-600" : "bg-white text-slate-600 border-slate-300")}>📷 可拍照店鋪</button>
@@ -2553,11 +2881,11 @@ ${nm}
                 </div>
 
                 {checklist.categories.map(cat => {
-                  const cs = cat.items.reduce((s, it) => { const sc = scores[it.id]; return s + ((sc && sc.score != null) ? sc.score : it.max); }, 0);
+                  const cs = cat.items.reduce((s, it) => s + scoreOfItem(it, scores[it.id]), 0);
                   return (
                     <div key={cat.key} className="bg-white rounded-xl shadow-sm overflow-hidden">
                       <div className="bg-slate-700 text-white px-4 py-2.5 flex justify-between"><span className="font-bold">{cat.name}</span><span className="text-sm">{cs} / {cat.max}</span></div>
-                      {cat.items.map(it => <ItemRow key={it.id} item={it} state={scores[it.id]} setState={st => setItemState(it.id, st)} canPhoto={canPhoto} monthFolder={monthFolder} existingCount={existingCountAt([monthFolder, it.name, '缺失'])} existing={existingAt([monthFolder, it.name, '缺失'])} onRemoveExisting={i => removeExistingAt([monthFolder, it.name, '缺失'], i)} />)}
+                      {cat.items.map(it => <ItemRow key={it.id} item={it} state={scores[it.id]} setState={st => setItemState(it.id, st)} canPhoto={canPhoto} monthFolder={monthFolder} existingCount={existingCountAt([monthFolder, it.name, '缺失'])} existing={existingAt([monthFolder, it.name, '缺失'])} onRemoveExisting={i => removeExistingAt([monthFolder, it.name, '缺失'], i)} flash={flashCls(`item-${it.id}`)} />)}
                     </div>
                   );
                 })}
@@ -2568,7 +2896,12 @@ ${nm}
                   <div className="p-4 space-y-3">
                     {/* 重點觀察題：僅可拍照店鋪需拍照 */}
                     {canPhoto && checklist.keyObservations.map(k => (
-                      <PhotoUpload key={k.id} label={k.name} required photos={keyObs[k.id]} onChange={p => setKeyObs({ ...keyObs, [k.id]: p })} folderPath={`${DRIVE_ROOT}/${monthFolder}/${k.name}`} existingCount={existingCountAt([monthFolder, k.name])} existing={existingAt([monthFolder, k.name])} onRemoveExisting={i => removeExistingAt([monthFolder, k.name], i)} />
+                      <div key={k.id} id={`keyobs-${k.id}`} className={"rounded-lg " + flashCls(`keyobs-${k.id}`)}>
+                        {/* updater 形式，不可寫成 { ...keyObs, ... }：PhotoUpload 的 handleFile 是 async
+                            （每張照片壓縮幾百毫秒、最多 10 張），在 A 項目還在壓縮時去點 B 項目，
+                            B 拿到的是「還沒有 A 的照片」那份快照，後完成的那次就會把 A 的照片蓋掉。 */}
+                        <PhotoUpload label={k.name} required photos={keyObs[k.id]} onChange={p => setKeyObs(prev => ({ ...prev, [k.id]: p }))} folderPath={`${DRIVE_ROOT}/${monthFolder}/${k.name}`} existingCount={existingCountAt([monthFolder, k.name])} existing={existingAt([monthFolder, k.name])} onRemoveExisting={i => removeExistingAt([monthFolder, k.name], i)} />
+                      </div>
                     ))}
 
                     {/* 對外廁所觀察記錄（條件式顯示） */}
@@ -2578,9 +2911,12 @@ ${nm}
                         {checklist.toiletObservations.map(o => {
                           if (!obsVisible(o.show)) return null;
                           return (
-                            <div key={o.id} className="text-sm flex items-center justify-between gap-2">
+                            // 窄螢幕改成上下兩行：原本題目在左、按鈕在右擠在同一行，
+                            // 題目長的時候按鈕會被壓到很窄。按鈕本身從 py-1 text-xs（約 24px 高）
+                            // 放大到 py-2.5 text-sm（約 40px），接近手機觸控建議的 44px。
+                            <div key={o.id} id={`toilet-${o.id}`} className={"text-sm flex flex-col sm:flex-row sm:items-center sm:justify-between gap-1.5 rounded-lg " + flashCls(`toilet-${o.id}`)}>
                               <span className="text-slate-700">{o.name}<span className="text-red-500 ml-1">*</span></span>
-                              <div className="flex gap-1 shrink-0">{o.opts.map(v => <button key={v} onClick={() => setToilet({ ...toilet, [o.id]: v })} className={"px-3 py-1 text-xs rounded border " + (toilet[o.id] === v ? "bg-indigo-500 text-white border-indigo-500" : "bg-white text-slate-500 border-slate-300")}>{v}</button>)}</div>
+                              <div className="flex gap-1.5 shrink-0">{o.opts.map(v => <button key={v} onClick={() => setToilet(prev => ({ ...prev, [o.id]: v }))} className={"px-5 py-2.5 text-sm rounded-lg border " + (toilet[o.id] === v ? "bg-indigo-500 text-white border-indigo-500" : "bg-white text-slate-500 border-slate-300")}>{v}</button>)}</div>
                             </div>
                           );
                         })}
@@ -2590,24 +2926,27 @@ ${nm}
                         <div className="mt-3 space-y-2">
                           {checklist.toiletInspect.map(t => (
                             <div key={t.id} className="text-sm">
-                              <div className="flex items-center justify-between gap-2">
+                              <div id={`toilet-${t.id}`} className={"flex flex-col sm:flex-row sm:items-center sm:justify-between gap-1.5 rounded-lg " + flashCls(`toilet-${t.id}`)}>
                                 <span className="text-slate-700 flex-1">{t.name}</span>
-                                <div className="flex gap-1 shrink-0">{['符合', '不符合'].map(v => <button key={v} onClick={() => setToilet({ ...toilet, [t.id]: v })} className={"px-3 py-1 text-xs rounded border " + (toilet[t.id] === v ? (v === '符合' ? "bg-emerald-500 text-white border-emerald-500" : "bg-red-500 text-white border-red-500") : "bg-white text-slate-500 border-slate-300")}>{v}</button>)}</div>
+                                <div className="flex gap-1.5 shrink-0">{['符合', '不符合'].map(v => <button key={v} onClick={() => setToilet(prev => ({ ...prev, [t.id]: v }))} className={"px-5 py-2.5 text-sm rounded-lg border " + (toilet[t.id] === v ? (v === '符合' ? "bg-emerald-500 text-white border-emerald-500" : "bg-red-500 text-white border-red-500") : "bg-white text-slate-500 border-slate-300")}>{v}</button>)}</div>
                               </div>
                               {toilet[t.id] === '不符合' && t.opts && t.opts.length > 0 && (
-                                <div className="mt-1.5 bg-red-50 border border-red-200 rounded-lg p-2">
+                                <div id={`toilet-reasons-${t.id}`} className={"mt-1.5 bg-red-50 border border-red-200 rounded-lg p-2 " + flashCls(`toilet-reasons-${t.id}`)}>
                                   <div className="text-[11px] text-red-600 mb-1">請選擇不合格項目<span className="text-red-500">（必選）</span></div>
-                                  <div className="flex flex-wrap gap-1.5">
+                                  <div className="flex flex-wrap gap-2">
                                     {t.opts.map(r => {
                                       const on = (toiletReasons[t.id] || []).includes(r);
-                                      const toggle = () => { const cur = toiletReasons[t.id] || []; setToiletReasons({ ...toiletReasons, [t.id]: on ? cur.filter(x => x !== r) : [...cur, r] }); };
-                                      return <button key={r} type="button" onClick={toggle} className={"text-xs px-2 py-1 rounded-full border " + (on ? "bg-red-500 text-white border-red-500" : "bg-white text-slate-500 border-slate-300")}>{on ? '✓ ' : ''}{r}</button>;
+                                      const toggle = () => setToiletReasons(prev => {
+                                        const cur = prev[t.id] || [];
+                                        return { ...prev, [t.id]: cur.includes(r) ? cur.filter(x => x !== r) : [...cur, r] };
+                                      });
+                                      return <button key={r} type="button" onClick={toggle} className={"text-sm px-3 py-2 rounded-full border " + (on ? "bg-red-500 text-white border-red-500" : "bg-white text-slate-500 border-slate-300")}>{on ? '✓ ' : ''}{r}</button>;
                                     })}
                                   </div>
                                 </div>
                               )}
                               {toilet[t.id] === '不符合' && canPhoto && (
-                                <PhotoUpload label="缺失照片（不符合必須拍照）" required needShots={Math.max(1, (toiletReasons[t.id] || []).length)} photos={toiletPhotos[t.id]} onChange={p => setToiletPhotos({ ...toiletPhotos, [t.id]: p })} folderPath={`${DRIVE_ROOT}/${monthFolder}/廁所觀察/${t.name}/缺失`} existingCount={existingCountAt([monthFolder, '廁所觀察', t.name, '缺失'])} existing={existingAt([monthFolder, '廁所觀察', t.name, '缺失'])} onRemoveExisting={i => removeExistingAt([monthFolder, '廁所觀察', t.name, '缺失'], i)} />
+                                <PhotoUpload label="缺失照片（不符合必須拍照）" required needShots={Math.max(1, (toiletReasons[t.id] || []).length)} photos={toiletPhotos[t.id]} onChange={p => setToiletPhotos(prev => ({ ...prev, [t.id]: p }))} folderPath={`${DRIVE_ROOT}/${monthFolder}/廁所觀察/${t.name}/缺失`} existingCount={existingCountAt([monthFolder, '廁所觀察', t.name, '缺失'])} existing={existingAt([monthFolder, '廁所觀察', t.name, '缺失'])} onRemoveExisting={i => removeExistingAt([monthFolder, '廁所觀察', t.name, '缺失'], i)} />
                               )}
                             </div>
                           ))}
@@ -2626,7 +2965,11 @@ ${nm}
                     <div className="p-4">
                       <p className="text-xs text-slate-500 mb-2">店鋪無缺失：請拍下列指定區域，每區可上傳 10 張；相鄰區域可共拍一張。</p>
                       <div className="grid md:grid-cols-2 gap-2">
-                        {PERFECT_ZONES.map(z => <PhotoUpload key={z} label={z} required photos={perfectPhotos[z]} onChange={p => setPerfectPhotos({ ...perfectPhotos, [z]: p })} folderPath={`${DRIVE_ROOT}/${monthFolder}/滿分照片/${z}`} existingCount={existingCountAt([monthFolder, '滿分照片', z])} existing={existingAt([monthFolder, '滿分照片', z])} onRemoveExisting={i => removeExistingAt([monthFolder, '滿分照片', z], i)} />)}
+                        {PERFECT_ZONES.map(z => (
+                          <div key={z} id={`perfect-${z}`} className={"rounded-lg " + flashCls(`perfect-${z}`)}>
+                            <PhotoUpload label={z} required photos={perfectPhotos[z]} onChange={p => setPerfectPhotos(prev => ({ ...prev, [z]: p }))} folderPath={`${DRIVE_ROOT}/${monthFolder}/滿分照片/${z}`} existingCount={existingCountAt([monthFolder, '滿分照片', z])} existing={existingAt([monthFolder, '滿分照片', z])} onRemoveExisting={i => removeExistingAt([monthFolder, '滿分照片', z], i)} />
+                          </div>
+                        ))}
                       </div>
                     </div>
                   </div>
@@ -2637,16 +2980,16 @@ ${nm}
                   <div className="bg-slate-600 text-white px-4 py-2.5 font-bold">✍️ 簽核與紙本</div>
                   <div className="p-4 space-y-3">
                     <div className="grid md:grid-cols-2 gap-3 text-sm">
-                      <div><label className="block text-xs text-slate-500 mb-1">在店店員人數</label>
+                      <div id="sign-count" className={"rounded-lg " + flashCls('sign-count')}><label className="block text-xs text-slate-500 mb-1">在店店員人數</label>
                         <select value={sign.count} onChange={e => setSign({ ...sign, count: e.target.value })} className="w-full px-3 py-2 border border-slate-300 rounded-lg">
                           <option value="">— 請選擇 —</option>{Array.from({ length: 20 }, (_, i) => i + 1).map(n => <option key={n} value={n}>{n} 人</option>)}</select></div>
-                      <div><label className="block text-xs text-slate-500 mb-1">簽名店鋪人員身分別</label>
+                      <div id="sign-identity" className={"rounded-lg " + flashCls('sign-identity')}><label className="block text-xs text-slate-500 mb-1">簽名店鋪人員身分別</label>
                         <select value={sign.identity} onChange={e => setSign({ ...sign, identity: e.target.value })} className="w-full px-3 py-2 border border-slate-300 rounded-lg">
                           <option value="">— 請選擇 —</option>{IDENTITIES.map(i => <option key={i}>{i}</option>)}</select></div>
                     </div>
                     <div><label className="block text-xs text-slate-500 mb-1">備註<span className="text-slate-400">（選填，可記錄特殊情況）</span></label>
                       <textarea value={sign.remark} onChange={e => setSign({ ...sign, remark: e.target.value })} rows={2} className="w-full px-3 py-2 border border-slate-300 rounded-lg" placeholder="例：蕃薯機調理中、熱狗機已報修"></textarea></div>
-                    <div>
+                    <div id="paper-form" className={"rounded-lg " + flashCls('paper-form')}>
                       <div className="text-sm font-semibold text-slate-600">📄 紙本點檢表上傳<span className="text-red-500 text-xs"> *所有店皆必須上傳才能送出</span></div>
                       <PhotoUpload label="紙本點檢表照片" required photos={paperForm} onChange={setPaperForm} folderPath={`${DRIVE_ROOT}/${monthFolder}/SQC點檢表完成照片`} existingCount={existingCountAt([monthFolder, 'SQC點檢表完成照片'])} existing={existingAt([monthFolder, 'SQC點檢表完成照片'])} onRemoveExisting={i => removeExistingAt([monthFolder, 'SQC點檢表完成照片'], i)} />
                     </div>
@@ -3077,6 +3420,36 @@ ${nm}
         finally { setRepairing(false); }
       };
 
+      // 分數重算：修正「存下來的合計與明細對不起來」的紀錄（分區扣分題非同步寫回造成）
+      const [scoreMonth, setScoreMonth] = useState(curMonth);
+      const [scoring, setScoring] = useState(false);
+      const [scoreMsg, setScoreMsg] = useState('');
+      const runRecompute = async (write) => {
+        if (write && !confirm(`確定要重算 ${monthFolderOf(scoreMonth)} 的分數？\n會直接寫入點檢紀錄的「合計得分」「等第」「明細JSON」。\n建議先按「先試算」看清單再決定。`)) return;
+        setScoring(true); setScoreMsg('');
+        try {
+          const r = await SqcApi.recomputeScores(scoreMonth, write);
+          if (r.error) { setScoreMsg('⚠ ' + r.error); return; }
+          const lines = [
+            (write ? '✅ 已寫入' : '（僅試算，未寫入）') + `　月份 ${monthFolderOf(scoreMonth)}`,
+            `掃描 ${r.scanned} 筆｜分數不一致 ${r.changed} 筆` + (write ? `｜已更新 ${r.written} 筆` : ''),
+            r.truncated ? '※ 已達單次上限，請再按一次接續。' : '',
+            !r.changed ? '所有紀錄的合計與明細都一致，不需重算。' : '',
+            (r.detail || []).length ? '\n【分數不一致的紀錄】\n' + r.detail.slice(0, 60).join('\n') : '',
+            (r.hiddenWarn || []).length
+              ? '\n【有填名稱但沒勾選】報表原本會把它列成缺失、分數卻沒扣到；該保險已移除，這些紀錄的報表內容會改變：\n'
+              + r.hiddenWarn.slice(0, 30).join('\n') : '',
+            (r.spaceWarn || []).length
+              ? '\n【填寫的名稱含空白】重算沿用舊規則（空白算分隔符）。新版已改為不把空白當分隔符，'
+              + '所以這幾筆的「當初語意」需要人工確認是「兩個貨架」還是「一個含空格的名稱」：\n'
+              + r.spaceWarn.slice(0, 30).join('\n') : '',
+          ].filter(Boolean);
+          setScoreMsg(lines.join('\n'));
+          if (write && r.written) onReload();
+        } catch (e) { setScoreMsg('⚠ 重算失敗：' + e.message); }
+        finally { setScoring(false); }
+      };
+
       // 請求序號防呆：分頁切換太快時，較早但較慢回來的請求不可覆蓋較新分頁的資料
       const reqSeq = useRef(0);
       const load = () => {
@@ -3237,6 +3610,36 @@ ${nm}
                 </div>
               </div>
               {repairMsg && <div className="mt-3 text-sm whitespace-pre-wrap bg-slate-50 border border-slate-200 rounded-lg p-3 text-slate-700">{repairMsg}</div>}
+            </div>
+          )}
+
+          {/* 分數重算：分區扣分題的分數原本由非同步 effect 寫回，送出得太快會存到上一步的分數 */}
+          {!isLog && (
+            <div className="bg-white rounded-xl shadow-sm p-5 mb-4">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <h3 className="font-bold text-slate-700">🧮 分數重算</h3>
+                  <p className="text-xs text-slate-400">
+                    分區扣分題（如「商品豐富陳列」）的分數，舊版是等畫面繪製後才非同步寫回，
+                    改完立刻按送出就可能存到上一步的分數 —— 症狀是「填寫與上傳都是 88 分，點進編輯卻變 92 分」。
+                    這裡依各題的勾選內容重算合計與明細並修正。<b className="text-slate-600">請先「試算」看清單再寫入。</b>
+                  </p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <select value={scoreMonth} onChange={e => setScoreMonth(e.target.value)} className="px-3 py-1.5 border border-slate-300 rounded-lg text-sm">
+                    {monthOptions(curMonth).map(m => <option key={m} value={m}>{monthFolderOf(m)}</option>)}
+                  </select>
+                  <button onClick={() => runRecompute(false)} disabled={scoring || !configured}
+                    className="text-sm px-3 py-1.5 bg-slate-200 text-slate-700 rounded-lg hover:bg-slate-300 disabled:opacity-50">
+                    {scoring ? '處理中…' : '先試算'}
+                  </button>
+                  <button onClick={() => runRecompute(true)} disabled={scoring || !configured}
+                    className="text-sm px-3 py-1.5 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 disabled:opacity-50">
+                    {scoring ? '處理中…' : '重算並寫入'}
+                  </button>
+                </div>
+              </div>
+              {scoreMsg && <div className="mt-3 text-sm whitespace-pre-wrap bg-slate-50 border border-slate-200 rounded-lg p-3 text-slate-700">{scoreMsg}</div>}
             </div>
           )}
 

@@ -477,3 +477,144 @@ function sharePhotos_(monthFolderName, doApply) {
     + (failed ? '\n最後一個錯誤：' + lastErr + '\n若是政策限制，請請資訊人員開放「知道連結的人」分享' : ''));
   return { scanned: scanned, already: already, changed: changed, failed: failed, truncated: stopped };
 }
+
+// ============================================================
+// 維護：重算分區扣分題的分數，修正「存下來的合計與明細對不起來」的紀錄
+//
+//   為什麼需要（2026-08-27 現場回報：後壁安溪店應 92 分，填寫與上傳都是 88，
+//   點進編輯卻變 92）：分區扣分題的分數原本是由前端的 useEffect 非同步寫回 state，
+//   而合計／分類小計／送出的明細都讀那個寫回的值。useEffect 是 passive effect，
+//   在畫面繪製後才由排程器沖洗 —— 實測在取消勾選後的 microtask 階段，
+//   題目列已顯示 18、分類小計卻還是 14/18、合計還是 96。若送出落在那個窗口，
+//   存進去的分數就比 ngSubs 應得的多扣或少扣；編輯時是重算，分數又變了。
+//   前端已改為「一律現算、不儲存」，但已經送出的紀錄裡錯的值還在，報表也讀那個值。
+//
+//   重要：這裡刻意沿用「舊的」名稱分隔規則（空白也算分隔符）。
+//   前端已改成不把空白當分隔符（貨架名稱本身常有空格），但那是「往後的規則」；
+//   拿新規則回頭重算，會把當初刻意用空白分隔兩個貨架的紀錄改成一個、無故加回分數。
+//   這支只負責修「非同步造成的不一致」，不改變當初的語意。
+//   含空白的填寫型名稱會另外列出來，請人工判斷。
+//
+//   用法（維護專區有按鈕，也可在編輯器直接呼叫）：
+//     recomputeScores('11508')        ← 只試算，不寫入
+//     recomputeScores('11508', true)  ← 實際寫入（合計得分、等第、明細JSON）
+// ============================================================
+var RECOMPUTE_MAX_ROWS = 200;
+
+/** 舊規則的名稱切分（空白也算分隔符）—— 僅供重算既有紀錄使用 */
+function splitNamesLegacy_(v) {
+  return String(v == null ? '' : v).split(/[\s,，、;；\/|]+/).filter(function (x) { return x !== ''; });
+}
+
+/** 單一題目的單位數（與前端 ngUnitsOf 同一套邏輯，但用舊的切分規則） */
+function ngUnitsLegacy_(item, d) {
+  var ngSubs = (d && d.ngSubs) || [];
+  var customNames = (d && d.customNames) || {};
+  var sum = 0;
+  for (var i = 0; i < ngSubs.length; i++) {
+    var lbl = ngSubs[i], sub = null;
+    for (var j = 0; j < (item.subs || []).length; j++) {
+      if (item.subs[j].label === lbl) { sub = item.subs[j]; break; }
+    }
+    if (!sub) continue;                 // 題庫已無此子項 → 不計（與前端一致）
+    if (sub.custom) sum += Math.max(1, splitNamesLegacy_(customNames[lbl]).length);
+    else sum += (sub.units || 1);
+  }
+  return sum;
+}
+
+function gradeOfScore_(total, pass) {
+  return total >= 95 ? '優良' : (total >= pass ? '合格' : '不合格');
+}
+
+// 回填客端送來的月份字串前先截斷，錯誤訊息不該把任意長度的輸入原樣送回
+var RECOMPUTE_WARN_MAX = 300;   // spaceWarn／hiddenWarn 的筆數上限（changed 由 RECOMPUTE_MAX_ROWS 控制）
+
+function recomputeScores(month, doWrite) {
+  var mo = String(month == null ? '' : month).slice(0, 12);
+  var sh = ss().getSheetByName('點檢紀錄_' + mo);
+  if (!sh) { Logger.log('找不到活頁：點檢紀錄_' + mo); return { error: '找不到活頁：點檢紀錄_' + mo }; }
+  var checklist = getChecklist(mo);
+  if (!checklist.length) { Logger.log('找不到題庫_' + mo); return { error: '找不到題庫_' + mo + '，無法重算' }; }
+  var byId = {};
+  checklist.forEach(function (it) { byId[it.id] = it; });
+  var pass = Number(getSetting('及格分數') || 85);
+
+  var data = sh.getDataRange().getValues();
+  var head = data[0];
+  var idCol = head.indexOf('紀錄ID'), nameCol = head.indexOf('店名'), timeCol = head.indexOf('點檢時間');
+  var totalCol = head.indexOf('合計得分'), gradeCol = head.indexOf('等第'), detailCol = head.indexOf('明細JSON');
+  if (totalCol < 0 || detailCol < 0) { return { error: '活頁缺少「合計得分」或「明細JSON」欄' }; }
+
+  var changed = [], spaceWarn = [], hiddenWarn = [], scanned = 0, written = 0, stopped = false;
+
+  for (var r = 1; r < data.length; r++) {
+    if (changed.length >= RECOMPUTE_MAX_ROWS) {
+      stopped = true;
+      break;
+    }
+    var raw = String(data[r][detailCol] || '');
+    if (!raw) continue;
+    var detail;
+    try { detail = JSON.parse(raw); } catch (e) { continue; }
+    scanned++;
+
+    var where = '第' + (r + 1) + '列 ' + (nameCol >= 0 ? data[r][nameCol] : '')
+      + '（' + (timeCol >= 0 ? toYmd(data[r][timeCol]) : '') + '）';
+    var storedTotal = Number(data[r][totalCol]) || 0;
+    var newTotal = 0, diffs = [], touched = false;
+
+    checklist.forEach(function (it) {
+      var d = detail[it.id];
+      var storedScore = (d && d.score != null) ? Number(d.score) : it.max;
+      var newScore = storedScore;
+      if (it.type === 'subdeduct') {
+        newScore = Math.max(0, it.max - ngUnitsLegacy_(it, d) * it.perPoint);
+        if (newScore !== storedScore) {
+          diffs.push(it.name + ' ' + storedScore + '→' + newScore);
+          if (d) { d.score = newScore; touched = true; }
+        }
+        // 填寫型子項的名稱含空白 → 新舊規則會算出不同單位數，請人工確認
+        var cn = (d && d.customNames) || {};
+        Object.keys(cn).forEach(function (k) {
+          // 兩個提醒清單要有筆數上限：它們是在「每一題」的迴圈裡累加，
+          // 200 筆紀錄 × 每筆數十題的話回應會過大（changed 有 RECOMPUTE_MAX_ROWS 保護，這兩個沒有）
+          if (/\s/.test(String(cn[k] || '')) && spaceWarn.length < RECOMPUTE_WARN_MAX) {
+            spaceWarn.push(where + '｜' + it.name + '｜' + k + '：「' + cn[k] + '」');
+          }
+          // 有填名稱但沒被勾選 → 報表原本會把它列成缺失，分數卻沒扣；該段保險已移除
+          if (((d && d.ngSubs) || []).indexOf(k) < 0 && cn[k] && hiddenWarn.length < RECOMPUTE_WARN_MAX) {
+            hiddenWarn.push(where + '｜' + it.name + '｜' + k + '：「' + cn[k] + '」（未勾選）');
+          }
+        });
+      }
+      newTotal += newScore;
+    });
+
+    if (newTotal !== storedTotal || touched) {
+      changed.push(where + '：合計 ' + storedTotal + ' → ' + newTotal
+        + (diffs.length ? '｜' + diffs.join('、') : '｜（僅合計不一致，各題分數相同）'));
+      if (doWrite === true) {
+        sh.getRange(r + 1, totalCol + 1).setValue(newTotal);
+        if (gradeCol >= 0) sh.getRange(r + 1, gradeCol + 1).setValue(gradeOfScore_(newTotal, pass));
+        sh.getRange(r + 1, detailCol + 1).setValue(safeCell_(JSON.stringify(detail)));
+        written++;
+      }
+    }
+  }
+
+  var msg = (doWrite === true ? '【已寫入】' : '【試算，未寫入】')
+    + '掃描 ' + scanned + ' 筆｜分數不一致 ' + changed.length + ' 筆'
+    + (doWrite === true ? '｜已更新 ' + written + ' 筆' : '')
+    + (stopped ? '｜已達單次上限 ' + RECOMPUTE_MAX_ROWS + ' 筆，請再執行一次接續' : '');
+  Logger.log(msg);
+  changed.forEach(function (t) { Logger.log('  ' + t); });
+
+  return {
+    ok: true, wrote: doWrite === true, scanned: scanned, changed: changed.length, written: written,
+    truncated: stopped, message: msg,
+    detail: changed,
+    spaceWarn: spaceWarn,     // 名稱含空白，新舊分隔規則會算出不同單位數
+    hiddenWarn: hiddenWarn,   // 有填名稱但沒勾選（報表原本會多列一筆缺失）
+  };
+}

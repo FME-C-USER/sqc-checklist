@@ -27,17 +27,31 @@
         }
       };
       req.onsuccess = () => { _db = req.result; resolve(_db); };
-      req.onerror = () => reject(req.error);
+      req.onerror = () => reject(req.error || new Error('無法開啟本機資料庫（無痕視窗或瀏覽器設定可能封鎖了網站儲存空間）'));
     });
   }
 
+  /**
+   * 錯誤一定要留下可讀的原因。
+   *
+   * 原本只有 `t.onerror = () => reject(t.error)`：而 transaction.error 在 Safari 上
+   * 常常是 null，於是「照片存不進待傳佇列」的提示只能寫「原因：未知」——
+   * 2026-08-27 現場就是這樣，四家店 24 張照片存不進去，而我們查不出是儲存空間不足還是別的。
+   * 請求層的錯誤（req.error）才帶得到 QuotaExceededError 這類具體原因，所以要自己接；
+   * 兩層都拿不到時，至少給一句人看得懂的話，不要把 null 丟出去。
+   */
   function tx(store, mode, fn) {
     return open().then((db) => new Promise((resolve, reject) => {
       const t = db.transaction(store, mode);
       const os = t.objectStore(store);
       const out = fn(os);
+      let reqErr = null;
+      if (out && out.__req) out.__req.onerror = () => { reqErr = out.__req.error; };
+      const fail = (what) => reject(reqErr || t.error
+        || new Error('IndexedDB ' + what + '（瀏覽器沒有提供原因，最常見是儲存空間不足）'));
       t.oncomplete = () => resolve(out && out.__req ? out.__req.result : out);
-      t.onerror = () => reject(t.error);
+      t.onerror = () => fail('交易失敗');
+      t.onabort = () => fail('交易被中止');
     }));
   }
 
@@ -66,8 +80,41 @@
     }));
   }
 
+  /**
+   * 診斷用：整個照片佇列的狀態，但**不讀出 blob 與 thumb**。
+   *
+   * 為什麼要用游標而不是 allPhotos()：那支是 getAll，會把每一張的 blob（約 1MB）
+   * 與 thumb（整張 1920px 的 dataURL）全部讀進記憶體，幾十張就是好幾百 MB。
+   *
+   * 為什麼需要這支：每一次上傳失敗的原因其實都存進了 photo.error，
+   * 但介面只顯示張數，所以那個字串一直死在裝置上 —— 2026-08-27 那次要靠猜。
+   */
+  function photoDiagnostics() {
+    return open().then((db) => new Promise((resolve, reject) => {
+      const out = [];
+      const req = db.transaction('photoQueue', 'readonly').objectStore('photoQueue').openCursor();
+      req.onsuccess = () => {
+        const c = req.result;
+        if (!c) { resolve(out); return; }
+        const p = c.value || {};
+        out.push({
+          id: p.id, name: p.name, status: p.status, recordId: p.recordId, month: p.month,
+          where: (p.pathParts || []).slice(1).join('/'),
+          tries: p.tries || 0, error: p.error || '',
+          linkTries: p.linkTries || 0, netTries: p.netTries || 0, linkErr: p.linkErr || '',
+          nextAt: p.nextAt || 0, linkNextAt: p.linkNextAt || 0,
+          hasBlob: !!p.blob, blobSize: (p.blob && p.blob.size) || 0, fileId: p.fileId || '',
+          reported: !!p.reported,
+        });
+        c.continue();
+      };
+      req.onerror = () => reject(req.error || new Error('讀取佇列失敗'));
+    }));
+  }
+
   window.SqcDB = {
     // 照片佇列
+    photoDiagnostics,
     addPhoto: (photo) => put('photoQueue', photo),
     updatePhoto: (photo) => put('photoQueue', photo),
     getPhoto: (id) => get('photoQueue', id),

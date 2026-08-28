@@ -17,6 +17,9 @@ function makeFakeSheet(name) {
 }
 function makeRange(sheet, r, c, numRows, numCols) {
   return {
+    // 單格取值。attachPhotoLinks 改成「只讀命中那一列的照片JSON 一格」之後會用到 ——
+    // 真實 Apps Script 的 Range 一直都有 getValue()，是假環境少實作了
+    getValue() { return this.getValues()[0][0]; },
     getValues() {
       const out = [];
       for (let i = 0; i < numRows; i++) {

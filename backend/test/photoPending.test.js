@@ -121,8 +121,14 @@ assertEqual(/do \{ _again = false; await pumpOnce\(\); \} while \(_again && navi
 assertEqual(UP.includes('async function clearBackoff(recordId)'), true, 'force 要能清掉退避時間');
 assertEqual(/nextAt: 0, linkNextAt: 0/.test(UP), true, '上傳退避與連結回寫退避都要清');
 assertEqual(UP.includes('busy: _running'), true, '要對外回報忙碌狀態，按鈕才有回饋');
-assertEqual((APP.match(/pendingUp\.busy \? '正在重試…' : '立即重試'/g) || []).length, 2,
-  '進度畫面與橫幅的重試按鈕都要顯示「正在重試…」');
+// 不寫死顆數（2026-08-28 又多了診斷視窗裡的一顆），改成表達真正的意圖：
+// 畫面上每一顆「立即重試」都必須帶忙碌狀態。原本正在跑時按下去毫無反應，像壞掉。
+{
+  const all = (APP.match(/'立即重試'/g) || []).length;
+  const withBusy = (APP.match(/pendingUp\.busy \? '正在重試…' : '立即重試'/g) || []).length;
+  assertEqual(withBusy >= 2, true, '至少要有進度畫面與橫幅兩顆重試按鈕，實際 ' + withBusy);
+  assertEqual(all, withBusy, '每一顆「立即重試」都要帶忙碌狀態，不可有裸的（總共 ' + all + ' 顆、帶狀態 ' + withBusy + ' 顆）');
+}
 assertEqual((APP.match(/SqcUploader\.pump\(\{ force: true/g) || []).length >= 3, true,
   '重試與送出後的踢一次都要用 force（否則還是要等退避結束）');
 // 送出成功後立刻踢一次：照片比紀錄早傳完時第一次回寫必然失敗，不踢就要等 15 秒的輪詢

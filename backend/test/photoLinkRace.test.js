@@ -82,7 +82,7 @@ const settle = () => new Promise((r) => setTimeout(r, 300));
   // ===== 情境1：照片比紀錄更早完成（後端回「找不到紀錄」）=====
   let exists = false;
   const { uploader, photos, calls, uploads, sessionArgs } = loadUploader({ recordExists: () => exists });
-  await uploader.enqueue({ blob: 'b', name: 'a.jpg', pathParts: ['115年08月', '1.店外海報', '缺失'], recordId: 'R1', month: '11508' });
+  await uploader.enqueue({ blob: new Blob(['b']), name: 'a.jpg', pathParts: ['115年08月', '1.店外海報', '缺失'], recordId: 'R1', month: '11508' });
   await settle();
 
   let all = Array.from(photos.values());
@@ -120,7 +120,7 @@ const settle = () => new Promise((r) => setTimeout(r, 300));
 
   // ===== 情境4：紀錄永遠不存在(例如送出失敗)時要放棄，不可無限每輪重送佔用後端 =====
   const b = loadUploader({ recordExists: () => false });
-  await b.uploader.enqueue({ blob: 'b', name: 'z.jpg', pathParts: ['115年08月', 'X'], recordId: 'GHOST', month: '11508' });
+  await b.uploader.enqueue({ blob: new Blob(['b']), name: 'z.jpg', pathParts: ['115年08月', 'X'], recordId: 'GHOST', month: '11508' });
   await settle();
   for (let i = 0; i < 30; i++) {                     // 反覆觸發遠超過放棄上限的次數
     const p = Array.from(b.photos.values())[0];
@@ -136,7 +136,7 @@ const settle = () => new Promise((r) => setTimeout(r, 300));
   //   前端與後端無法同時更新，中間必然有空窗；這段期間照片只能延後上傳，絕不能被丟掉。
   let apiBroken = true;
   const c = loadUploader({ recordExists: () => true, sessionFails: () => apiBroken });
-  await c.uploader.enqueue({ blob: 'b', name: 'gap.jpg', pathParts: ['115年08月', 'Y'], recordId: 'R9', month: '11508' });
+  await c.uploader.enqueue({ blob: new Blob(['b']), name: 'gap.jpg', pathParts: ['115年08月', 'Y'], recordId: 'R9', month: '11508' });
   await settle();
   let gap = Array.from(c.photos.values())[0];
   assertEqual(gap.status, 'pending', '取不到上傳網址時照片應維持 pending（留在佇列裡）');
@@ -155,7 +155,7 @@ const settle = () => new Promise((r) => setTimeout(r, 300));
   // ===== 情境6：後端回報「這張已在 Drive」時，不可再上傳一次（否則重試會產生重複檔案）=====
   //   2026-08-20 的 CORS 失敗就是這種情形：Drive 已寫入成功(200)，但瀏覽器讀不到回應而重試。
   const d = loadUploader({ recordExists: () => true, existingIds: () => ({ 'dup.jpg': 'ALREADY_IN_DRIVE' }) });
-  await d.uploader.enqueue({ blob: 'b', name: 'dup.jpg', pathParts: ['115年08月', 'Z'], recordId: 'R7', month: '11508' });
+  await d.uploader.enqueue({ blob: new Blob(['b']), name: 'dup.jpg', pathParts: ['115年08月', 'Z'], recordId: 'R7', month: '11508' });
   await settle();
   const dup = Array.from(d.photos.values())[0];
   assertEqual(d.uploads.length, 0, '已存在的照片不應再對 Drive 發出上傳請求');
@@ -168,7 +168,7 @@ const settle = () => new Promise((r) => setTimeout(r, 300));
   //   照片在 Drive 但報表永遠點不到（2026-08-20 檢視時發現的缺口）。
   let netDown = true;
   const e = loadUploader({ recordExists: () => true, linkNetworkFails: () => netDown });
-  await e.uploader.enqueue({ blob: 'b', name: 'net.jpg', pathParts: ['115年08月', 'N'], recordId: 'R5', month: '11508' });
+  await e.uploader.enqueue({ blob: new Blob(['b']), name: 'net.jpg', pathParts: ['115年08月', 'N'], recordId: 'R5', month: '11508' });
   await settle();
   for (let i = 0; i < 40; i++) {                       // 遠超過 20 次上限
     const p = Array.from(e.photos.values())[0];

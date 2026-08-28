@@ -44,23 +44,54 @@ while ((m = memoRe.exec(APP))) {
 assertEqual(leaks, [], '所有用到 checklist 的 useMemo 都要把它列進依賴');
 
 // ===== 把算式抽出來實跑 =====
-// 直接取用 app.html 裡那一行，確保測的是同一份算式而不是我抄的版本
-const formula = /checklist\.categories\.forEach\(c => c\.items\.forEach\(it => \{ const s = scores\[it\.id\]; t \+= \(s && s\.score != null\) \? s\.score : it\.max; \}\)\);/.exec(APP);
-assertEqual(!!formula, true, '找得到合計的算式');
-const totalOf = new Function('checklist', 'scores', `let t = 0; ${formula ? formula[0] : ''} return t;`);
+// 直接取用 app.html 裡的那幾行，確保測的是同一份算式而不是我抄的版本。
+// 2026-08-27 起合計改成走 scoreOfItem（全 App 唯一的計分算式），
+// 不再讀 state 裡的 score —— 那個值原本是由非同步 useEffect 寫回的。
+const grab = (re, label) => { const m = re.exec(APP); if (!m) throw new Error('抓不到 ' + label); return m[0]; };
+assertEqual(/checklist\.categories\.forEach\(c => c\.items\.forEach\(it => \{ t \+= scoreOfItem\(it, scores\[it\.id\]\); \}\)\);/.test(APP), true,
+  '合計要用 scoreOfItem');
+assertEqual(/\(s\.score != null\) \? s\.score : it\.max/.test(APP), false,
+  '合計不可再直接讀 state 裡的 score');
+const deps = [
+  grab(/const subLabelOf = [^\n]*/, 'subLabelOf'),
+  grab(/const subIsCustom = [^\n]*/, 'subIsCustom'),
+  grab(/const subFixedUnits = [^\n]*/, 'subFixedUnits'),
+  grab(/const splitNames = [^\n]*/, 'splitNames'),
+  grab(/function ngUnitsOf\(item, st\) \{[\s\S]*?\n    \}/, 'ngUnitsOf'),
+  grab(/const scoreOfItem = \(item, st\) => \{[\s\S]*?\n    \};/, 'scoreOfItem'),
+].join('\n');
+const totalOf = new Function('checklist', 'scores', `${deps}
+  let t = 0;
+  checklist.categories.forEach(c => c.items.forEach(it => { t += scoreOfItem(it, scores[it.id]); }));
+  return t;`);
 
+const SUBS = [{ label: 'OC' }, { label: '其他貨架', custom: true }];
 const CHECKLIST = {
   categories: [
-    { key: '1.店外', max: 30, items: [{ id: 'A1', max: 20 }, { id: 'A2', max: 10 }] },
-    { key: '2.櫃台', max: 70, items: [{ id: 'B1', max: 70 }] },
+    { key: '1.店外', max: 30, items: [{ id: 'A1', max: 20, type: 'deduct' }, { id: 'A2', max: 10, type: 'deduct' }] },
+    { key: '2.櫃台', max: 70, items: [{ id: 'B1', max: 70, type: 'deduct' }] },
   ],
 };
 assertEqual(totalOf(CHECKLIST, {}), 100, '題庫已到、使用者還沒動過任何一題 → 應為滿分 100，不是 0');
 assertEqual(totalOf(CHECKLIST, { A1: { score: 15 } }), 95, '扣了 5 分 → 95');
 assertEqual(totalOf(CHECKLIST, { A1: { score: 0 }, B1: { score: 0 } }), 10, '兩題 0 分 → 只剩 A2 的 10 分');
-// 題庫還沒到（空 categories）本來就會是 0 —— 這正是原本卡住的那個值，
-// 差別在於「題庫到了以後要能重算」，所以依賴陣列才是關鍵。
 assertEqual(totalOf({ categories: [] }, {}), 0, '題庫未到時為 0（合理，但必須能被後續重算取代）');
+
+// 分區扣分題：合計必須由勾選內容現算，而且「state 裡殘留的舊 score 要被忽略」——
+// 這正是「填寫 88、編輯 92」的根因（存下來的 score 落後一步）
+const SUB_LIST = {
+  categories: [{ key: '商品陳列', max: 18, items: [{ id: 'B10', max: 18, type: 'subdeduct', perPoint: 2, subs: SUBS }] }],
+};
+assertEqual(totalOf(SUB_LIST, {}), 18, '沒勾任何子項 → 滿分');
+assertEqual(totalOf(SUB_LIST, { B10: { ngSubs: ['OC'] } }), 16, '勾一個固定子項 → 扣 2');
+assertEqual(totalOf(SUB_LIST, { B10: { ngSubs: ['其他貨架'], customNames: { 其他貨架: '日用品架、寵物架' } } }), 14,
+  '填寫型子項兩個名稱 → 扣 4');
+assertEqual(totalOf(SUB_LIST, { B10: { ngSubs: ['其他貨架'], customNames: { 其他貨架: 'TM 前貨架' } } }), 16,
+  '含空格的名稱算一個貨架 → 只扣 2（空白已不是分隔符）');
+assertEqual(totalOf(SUB_LIST, { B10: { score: 12, ngSubs: [] } }), 18,
+  '★ state 裡殘留的舊 score(12) 必須被忽略，一律由勾選現算 → 18');
+assertEqual(totalOf(SUB_LIST, { B10: { score: 18, ngSubs: ['OC', '其他貨架'], customNames: { 其他貨架: 'A、B' } } }), 12,
+  '★ 反向：殘留的 score(18) 也要被忽略 → 3 個單位扣 6 → 12');
 
 console.log(failed ? `\n✗ ${failed} 項未通過` : '\n✓ 全部通過');
 process.exit(failed ? 1 : 0);
