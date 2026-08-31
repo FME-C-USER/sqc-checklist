@@ -40,8 +40,11 @@ const APP = fs.readFileSync(path.join(ROOT, 'app.html'), 'utf8');
  */
 function load(photos, opts) {
   const ignoreStatus = !!(opts && opts.eachIgnoresStatus);
+  const updateFails = !!(opts && opts.updateAlwaysFails);
+  const deleteFails = !!(opts && opts.deleteAlwaysFails);
   const store = new Map(photos.map((p) => [p.id, { ...p }]));
-  const visited = [];   // 清理實際碰到了哪幾筆（驗證有沒有白讀 pending 的 blob）
+  const visited = [];      // 這一輪清理碰到了哪幾筆（驗證有沒有白讀 pending 的 blob）
+  const visitedAll = [];   // 累計（驗證「清不動」時下一輪還會再試）
   const sandbox = {
     console, setTimeout, clearTimeout, setInterval: () => 0, clearInterval: () => {},
     navigator: { onLine: true },
@@ -65,7 +68,15 @@ function load(photos, opts) {
     pendingRecords: async () => [],
     queueRecord: async () => {}, delQueuedRecord: async () => {},
     addPhoto: async (p) => { store.set(p.id, { ...p }); },
-    updatePhoto: async (p) => { store.set(p.id, { ...p }); },
+    updatePhoto: async (p) => {
+      // 模擬「空間已滿，任何寫入都被拒」——正是 released() 那條路徑會踩到的
+      if (updateFails) throw new Error('Error preparing Blob/File data to be stored in object store');
+      store.set(p.id, { ...p });
+    },
+    delPhoto: async (id) => {
+      if (deleteFails) throw new Error('delete failed');
+      store.delete(id);
+    },
     getPhoto: async (id) => { const p = store.get(id); return p ? { ...p } : null; },
     allPhotos: async () => Array.from(store.values()),
     pendingPhotos: async () => Array.from(store.values()).filter((p) => p.status === 'pending'),
@@ -78,13 +89,14 @@ function load(photos, opts) {
         if (!p) continue;
         if (!ignoreStatus && status !== undefined && p.status !== status) continue;
         visited.push(id);
+        visitedAll.push(id);
         await fn({ ...p });
       }
     },
   };
   vm.createContext(sandbox);
   vm.runInContext(UP, sandbox, { filename: 'uploader.js' });
-  return { uploader: sandbox.SqcUploader, store, visited };
+  return { uploader: sandbox.SqcUploader, store, visited, visitedAll };
 }
 
 /** 佇列目前佔多少位元組（blob + thumb 字串） */
@@ -132,6 +144,30 @@ const done = (id) => ({
     // 清理只該碰 linked：走全部的話，每 15 秒就會把 pending 那些 ~900KB 的 blob
     // 讀出來一次，正是我們要避免的記憶體壓力
     assertEqual(t.visited, [], '★ 沒有 linked 時清理不該讀任何一筆');
+  }
+
+  /**
+   * ===== 2b. ★ 寫不進去時要退回刪除，而且不可以自己關掉清理 =====
+   *
+   * 這是 2026-08-31 現場那支手機很可能的處境：儲存空間已滿 → 連「把 blob 拿掉
+   * 再存回去」這個寫入都失敗 → 舊版邏輯把 freed===0 當成「沒東西要清」→
+   * 清理功能第一輪就自我關閉 → 永遠卡住。
+   */
+  {
+    const t = load([done('a'), done('b')], { updateAlwaysFails: true });
+    await t.uploader.pump();
+    await new Promise((r) => setTimeout(r, 30));
+    assertEqual(t.store.size, 0, '★ 寫入失敗時要改用刪除，確實把空間騰出來');
+
+    // 再確認「清不動」不會讓清理自我關閉：換一支永遠寫不進、也刪不掉的
+    const t2 = load([done('a')], { updateAlwaysFails: true, deleteAlwaysFails: true });
+    await t2.uploader.pump();
+    await new Promise((r) => setTimeout(r, 30));
+    const first = t2.visitedAll.length;
+    await t2.uploader.pump();
+    await new Promise((r) => setTimeout(r, 30));
+    assertEqual(t2.visitedAll.length > first, true,
+      '★ 清不動時下一輪還要再試 —— 不可以把 freed===0 當成「沒東西要清」而關掉');
   }
 
   // ===== 3. 卸過貨的不要一直重寫 =====
@@ -184,8 +220,20 @@ const done = (id) => ({
   }
   assertEqual(/if \(p\.status !== 'linked'\) return;/.test(UP), true,
     '★ uploader 自己也要再確認狀態：卸錯貨等於照片永久遺失，不能只靠索引');
-  assertEqual(/if \(!freed\) _sweepNeeded = false;/.test(UP), true,
-    '舊資料清完後不必再掃 —— 新照片在變成 linked 的當下就卸貨了');
+  /**
+   * ★ 關掉清理的條件必須是「沒有東西要清」，不是「沒清成功」。
+   *
+   * 原本寫 if (!freed) —— 但 freed === 0 有兩種完全不同的意思：
+   * 沒東西要清，或每一筆都清不動。混為一談的結果是「因為空間不足而清不動」的手機
+   * 第一輪就把清理功能自己關掉，正是最需要它的那一支。
+   */
+  assertEqual(/if \(!candidates\) _sweepNeeded = false;/.test(UP), true,
+    '★ 只有「真的沒東西要清」才關掉清理');
+  assertEqual(/if \(!freed\) _sweepNeeded = false;/.test(UP), false,
+    '★ 不可用「沒清成功」當關閉條件 —— 那會讓清不動的手機永遠不再嘗試');
+  // put 失敗要退回 delete：騰出空間的動作本身需要空間，這是 catch-22
+  assertEqual(/async function releaseOne\(p\) \{[\s\S]*?delPhoto\(p\.id\)/.test(UP), true,
+    '★ 寫入失敗要退回整筆刪除（delete 不需要空間，一定成功）');
 
   // ===== 5. 縮圖要真的是縮圖 =====
   assertEqual(/const THUMB_EDGE = 320/.test(APP) || /THUMB_EDGE = 320/.test(APP), true, '要有縮圖尺寸上限');

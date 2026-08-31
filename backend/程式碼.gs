@@ -10,7 +10,7 @@
 // 後端版本：每次修改本檔就更新，並於前端「資料更新時間」旁顯示。
 // 用途：貼上程式碼後若忘記「部署 → 管理部署作業 → 新版本」，畫面上的後端版本就不會變，
 //       可立即分辨是「沒貼上」「貼了但沒部署」還是「已生效」。
-var GAS_VERSION = '20260831-1100';   // 台灣時間 YYYYMMDD-HHMM
+var GAS_VERSION = '20260831-1650';   // 台灣時間 YYYYMMDD-HHMM
 
 var SPREADSHEET_ID = '1GRZZsZRgakMGENspOxmlx96NfckC8UYOe0ipuNNEoh0';
 var DRIVE_ROOT_ID  = '122nQjldImn5Zh5AUguxZF0YzobThgdc9';
@@ -268,10 +268,24 @@ function issueToken(staff, ad) {
     JSON.stringify({ role: staff.role || '點檢員', name: staff.name, empId: staff.empId, ad: ad }), 21600);
   return token;
 }
+/**
+ * 取出連線階段，並順便延長它（滑動效期）。
+ *
+ * 原本只是 get：token 從發出那一刻起算 6 小時，中間一直在用也照樣到期。
+ * 早上 7 點登入的人下午 1 點就會突然被踢出去 —— 2026-08-31 現場就發生了，
+ * 而當時前端遇到 AUTH 會直接跳轉回登入頁，正在填的表單有全部消失的風險。
+ *
+ * 每次通過驗證就把 6 小時重新計算：有在用就不會過期，停用滿 6 小時才失效。
+ * 注意 CacheService 是快取而不是儲存空間，Google 可能提早清除
+ * （重新部署 Apps Script 也會清掉），所以這只是降低頻率，不是保證。
+ */
 function getSession(token) {
   if (!token) return null;
-  var c = CacheService.getScriptCache().get('sess_' + token);
-  return c ? JSON.parse(c) : null;
+  var cache = CacheService.getScriptCache();
+  var c = cache.get('sess_' + token);
+  if (!c) return null;
+  cache.put('sess_' + token, c, 21600);
+  return JSON.parse(c);
 }
 
 function findStaffByAd(ad) {

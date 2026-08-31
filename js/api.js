@@ -47,6 +47,12 @@
     if (RETRY_LONGER[action]) return [TIMEOUT_MS, RETRY_LONGER[action]];
     return [TIMEOUT_MS, TIMEOUT_MS, TIMEOUT_MS, TIMEOUT_MS];
   };
+  // 連線階段過期：只記狀態並通知畫面，絕不自己跳轉（見下方 AUTH 的說明）
+  let _authLost = false;
+  const _authListeners = new Set();
+  const onAuthLost = (fn) => { _authListeners.add(fn); return () => _authListeners.delete(fn); };
+  const authLost = () => _authLost;
+
   const _retryListeners = new Set();
   const onRetry = (fn) => { _retryListeners.add(fn); return () => _retryListeners.delete(fn); };
   const emitRetry = (info) => _retryListeners.forEach((fn) => { try { fn(info); } catch (e) {} });
@@ -84,9 +90,20 @@
       throw err;
     }
     if (!data.ok) {
-      if (data.code === 'AUTH') { // 連線逾時/未登入 → 回登入頁
-        sessionStorage.removeItem('sqc_user');
-        if (!location.pathname.endsWith('index.html')) location.href = 'index.html';
+      /**
+       * 連線階段過期。
+       *
+       * 原本這裡直接 location.href = 'index.html' —— 但這條路徑對「任何」呼叫都會走，
+       * 包含 setInterval(pump, 15000) 的背景補傳。也就是說：有人正在填點檢表、
+       * 連線階段剛好過期，15 秒內的背景重試就會把整頁換掉，表單全部消失
+       * （而本系統目前沒有草稿保存，是真的全沒）。
+       *
+       * 改成只發出事件，由畫面顯示橫幅讓使用者自己決定何時重新登入。
+       * 也不清掉 sessionStorage —— 保留使用者名稱，橫幅才講得出「誰的連線過期了」。
+       */
+      if (data.code === 'AUTH') {
+        _authLost = true;
+        _authListeners.forEach((fn) => { try { fn(); } catch (e) {} });
       }
       throw new Error(data.error || 'API 錯誤');
     }
@@ -131,6 +148,7 @@
   window.SqcApi = {
     call,
     onRetry, // 供UI顯示「重試中 n/m」，避免暫時性失敗看起來像卡住
+    onAuthLost, authLost, // 連線階段過期：由畫面顯示橫幅，並讓背景補傳停手（打了也是白打）
     login: (userId, password) => call('login', { userId, password }),
     // light=true：不含門市名單（名單改由 getStoreList 在背景取，開場才不會被近 200KB 拖住）
     getBootstrap: (month, section, light) => call('getBootstrap', { month, section, light: light === true }),

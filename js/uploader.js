@@ -175,11 +175,26 @@
    * 逐筆讀、逐筆寫，任何一筆失敗都跳過繼續 —— 能清幾筆是幾筆，
    * 清掉的每一筆都讓下一筆更有機會成功。
    */
-  let _sweepNeeded = true;   // 還有沒有舊資料要清（掃過一輪沒東西可清就關掉）
+  /**
+   * 卸掉一張已完成照片的內容。先試 put，失敗就整筆刪掉。
+   *
+   * 為什麼要有退路：released() 的做法是「把 blob 拿掉再存回去」—— 那是一次寫入，
+   * 而這支存在的理由正是「空間滿到寫不進去」。這是個 catch-22：
+   * 要騰出空間必須先寫入，但寫不進去。
+   * delete 不需要空間，一定成功 —— 代價是這一筆的統計消失。
+   * 對一張「檔案已在雲端、連結也寫回紀錄」的照片來說，
+   * 統計價值遠低於「讓後面的照片傳得出去」。
+   */
+  async function releaseOne(p) {
+    if (await safeUpdate(released(p, 'linked'))) return true;
+    try { await window.SqcDB.delPhoto(p.id); return true; } catch (e) { return false; }
+  }
+
+  let _sweepNeeded = true;   // 還有沒有舊資料要清
   async function releaseFinished() {
     if (!_sweepNeeded) return 0;
     if (!window.SqcDB.eachPhoto) return 0;   // 舊版 db.js
-    let freed = 0;
+    let candidates = 0, freed = 0;
     // 只走 linked：走全部的話，每一輪都會把 pending 那些還帶著 ~900KB blob 的
     // 照片讀出來一次（每 15 秒一次），那正是我們要避免的記憶體壓力。
     await window.SqcDB.eachPhoto(async (p) => {
@@ -187,14 +202,42 @@
       // 而缺失當下已經被改善、拍不回來。索引萬一過時或實作換掉，這道才擋得住。
       if (p.status !== 'linked') return;
       if (!p.blob && !p.thumb) return;       // 已經卸過貨了
-      if (await safeUpdate(released(p, 'linked'))) freed++;
+      candidates++;
+      if (await releaseOne(p)) freed++;
     }, 'linked');
-    // 掃完一輪沒有東西可清 → 之後不必再掃。
-    // 新的照片在變成 linked 的那一刻就會卸貨（見 flushLinksIfDone），
-    // 所以「舊資料清完」之後這支就沒有工作了，留著只是每 15 秒白跑一次索引游標。
-    if (!freed) _sweepNeeded = false;
-    else emit();
+    /**
+     * 只有「真的沒有東西要清」才關掉這支。
+     *
+     * 原本寫 if (!freed) —— 但 freed === 0 有兩種完全不同的意思：
+     * 沒東西要清，或每一筆都清不動。把兩者混為一談的結果是：
+     * 「因為空間不足而清不動」的手機，第一輪就把清理功能自己關掉了 ——
+     * 正是最需要它的那一支。2026-08-31 現場那支手機很可能就是這樣。
+     */
+    if (!candidates) _sweepNeeded = false;
+    if (freed) emit();
     return freed;
+  }
+
+  /**
+   * 清空佇列。kind:
+   *   'finished' —— 只刪已完成的（安全：檔案在雲端、連結也已寫回紀錄）
+   *   'all'      —— 全部刪掉（會遺失還沒進雲端的照片，呼叫端必須先明確警告）
+   * 回傳實際刪掉的筆數。
+   */
+  async function purge(kind) {
+    if (!window.SqcDB.eachPhoto || !window.SqcDB.delPhoto) return 0;
+    let n = 0;
+    const drop = async (p) => {
+      try { await window.SqcDB.delPhoto(p.id); n++; } catch (e) { /* 刪不掉就跳過 */ }
+    };
+    if (kind === 'all') {
+      await window.SqcDB.eachPhoto(drop);
+    } else {
+      await window.SqcDB.eachPhoto(drop, 'linked');
+    }
+    _storeBroken = '';
+    emit();
+    return n;
   }
 
   async function pumpOnce() {
@@ -315,6 +358,19 @@
       if (opts && opts.force) await clearBackoff(opts.recordId);
     } catch (e) { /* 清退避失敗不該擋住這一輪上傳 */ }
     if (!navigator.onLine) { emit(); return; }
+    /**
+     * 連線階段過期時停手。
+     *
+     * 每一次呼叫都會被後端回 AUTH，打了也是白打 —— 而每 15 秒一輪，
+     * 等於用註定失敗的請求持續消耗後端（今天已經吃過一次「後端被自己的
+     * 重試機制拖垮」的教訓）。使用者重新登入後，下一輪就會自己接上。
+     * 例外：清理本機空間不需要後端，還是要做。
+     */
+    if (window.SqcApi && window.SqcApi.authLost && window.SqcApi.authLost()) {
+      await releaseFinished().catch(() => 0);
+      emit();
+      return;
+    }
     if (_running) { _again = true; emit(); return; }
     _running = true;
     emit();                       // 讓畫面立刻顯示「正在重試…」，按鈕才有回饋
@@ -457,5 +513,5 @@
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') pump(); });
   setInterval(pump, 15000); // 週期性嘗試補傳
 
-  window.SqcUploader = { enqueue, pump, pumpRecords, counts, countsOfRecord, onChange };
+  window.SqcUploader = { enqueue, pump, pumpRecords, counts, countsOfRecord, onChange, purge };
 })();

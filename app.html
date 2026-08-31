@@ -44,7 +44,7 @@
     const { useState, useMemo, useEffect, useRef } = React;
     // 版本字串一律用「台灣時間」的 YYYYMMDD-HHMM。與部署關卡無關 ——
     // 那道關卡看的是資安報告的檔名日期，而 GitHub runner 跑 UTC，兩者不要混在一起。
-    const APP_VERSION = '20260831-1510'; // 每次部署更新，用來確認瀏覽器跑的是哪一版（台灣時間）
+    const APP_VERSION = '20260831-1650'; // 每次部署更新，用來確認瀏覽器跑的是哪一版（台灣時間）
     // 這一版前端「至少」需要的後端版本。前後端是各自演進的，版本號本來就不會相等
     // （只改前端時後端不動，反之亦然），所以不能用「兩者相等」當健康指標 ——
     // 要比的是「線上後端有沒有舊到缺少本前端需要的 API」。
@@ -59,7 +59,9 @@
     // 20260831-1100 起還需要：recordExists（待送佇列改用只讀一欄的確認，
     // 取代會讀整張活頁的 queryRecords —— 送出逾時的人越多、全表讀取越頻繁，
     // 後端會被自己的重試機制拖垮，2026-08-28 現場就是這個形狀）
-    const NEEDS_GAS = '20260831-1100';
+    // 20260831-1650 起還需要：連線階段的滑動效期（getSession 每次通過驗證就把
+    // 6 小時重新計算）。沒有它的話，早上登入的人下午會突然被踢出去。
+    const NEEDS_GAS = '20260831-1650';
 
     /**
      * 從 LINE 等 App 內建瀏覽器開啟時，回傳那個 App 的名字，否則空字串。
@@ -1263,6 +1265,19 @@
       const [bootAt, setBootAt] = useState(null);   // 目前這份開場資料是何時取得的（供現場判斷名單夠不夠新）
       const [gasVer, setGasVer] = useState('');     // 後端版本；貼上 程式碼.gs 卻沒重新部署時，這裡不會變
       const [gasStale, setGasStale] = useState(false); // gasVer 目前來自開場快取（尚未真的連上後端）
+      /**
+       * 連線階段過期。
+       *
+       * 以前 api.js 遇到 AUTH 會直接跳轉回登入頁，但那條路徑對背景補傳也成立 ——
+       * 有人正在填點檢表、連線階段剛好過期，15 秒內的背景重試就會把整頁換掉，
+       * 表單全部消失（本系統沒有草稿保存）。改成顯示橫幅，由使用者自己決定何時登入。
+       */
+      const [authLost, setAuthLost] = useState(false);
+      useEffect(() => {
+        if (!window.SqcApi || !SqcApi.onAuthLost) return;
+        if (SqcApi.authLost()) setAuthLost(true);   // 這個元件掛載前就過期了
+        return SqcApi.onAuthLost(() => setAuthLost(true));
+      }, []);
       // 背景待處理量：照片沒傳完就關掉 App 會延後上傳，點檢員必須看得到
       const [pendingUp, setPendingUp] = useState({ pending: 0, done: 0, unfinished: 0, orphan: 0, queuedRecords: 0, busy: false, lastError: '' });
       useEffect(() => {
@@ -1302,6 +1317,32 @@
           setDiag(list);
         } catch (e) {
           setDiag([{ id: 'err', name: '(讀取佇列失敗)', status: '?', where: '', tries: 0, error: String(e && e.message || e) }]);
+        } finally { setDiagBusy(false); }
+      };
+      /**
+       * 手動清空待傳佇列。
+       * 'finished' 只刪已完成的（檔案在雲端、連結已寫回，刪掉不會遺失任何東西）。
+       * 'all' 會遺失還沒進雲端的照片，所以確認訊息必須把「幾張會不見」講出來 ——
+       * 「確定要清空嗎」這種問法在現場等於沒問。
+       */
+      const purgeQueue = async (kind) => {
+        const lost = diag.filter(p => p.status === 'pending').length;
+        const linkOnly = diag.filter(p => p.status === 'done' || p.status === 'orphan').length;
+        if (kind === 'all') {
+          const lines = ['即將清空這支手機的整個待傳佇列。', ''];
+          if (lost) lines.push('⚠ ' + lost + ' 張還沒進雲端的照片會永久遺失，無法補回。');
+          if (linkOnly) lines.push('・' + linkOnly + ' 張已在雲端，但會失去連結（可用「維護專區 → 照片連結修復」補回）。');
+          if (!lost && !linkOnly) lines.push('目前沒有未完成的照片，這個動作不會遺失任何東西。');
+          lines.push('', '確定要清空嗎？');
+          if (!confirm(lines.join('\n'))) return;
+        }
+        setDiagBusy(true);
+        try {
+          const n = await SqcUploader.purge(kind);
+          await openDiag();
+          setToast(kind === 'all' ? `🗑 已清空佇列（${n} 筆）` : `🧹 已清掉 ${n} 筆已完成的照片`);
+        } catch (e) {
+          alert('清理失敗：' + (e && e.message || e));
         } finally { setDiagBusy(false); }
       };
       useEffect(() => {
@@ -1770,7 +1811,14 @@ ${nm}
               staff: x.staffName, version: x.month, total: Number(x.total), grade: x.grade,
               pendingPhotos: Number(x.pendingPhotos) || 0, _raw: x,
             })));
-            if (bad.length) alert('⚠ ' + warnTextOf(bad) + '\n\n下方的筆數與統計並不完整，請重新查詢一次。');
+            // 連線階段過期時不可以說「請重新查詢一次」—— 重查一定也是失敗，
+            // 而 2026-08-31 現場就是照著這句話一直重查。這種情況要講的是「重新登入」，
+            // 上方也會同時出現橫幅。
+            if (bad.length) {
+              const isAuth = bad.some(b => /未登入|連線逾時/.test((b.error && b.error.message) || ''));
+              alert('⚠ ' + warnTextOf(bad) + '\n\n下方的筆數與統計並不完整。'
+                + (isAuth ? '\n請按畫面上方的「重新登入」，登入後再查詢。' : '\n請重新查詢一次。'));
+            }
           })
           .catch(e => { if (!silent) alert('查詢失敗：' + e.message); })
           .finally(() => { if (!silent) setQueryLoading(false); });
@@ -2509,7 +2557,13 @@ ${nm}
                     </div>
                     <button onClick={() => setDiag(null)} className="text-slate-400 hover:text-slate-600 text-xl leading-none px-1">×</button>
                   </div>
-                  <div className="text-xs text-slate-500 mt-2 font-mono break-all">來源網址：{location.origin}</div>
+                  {/* 版本一定要在這裡：這個視窗就是給人截圖回報用的，而「他到底有沒有拿到
+                      修正版」是每次回報第一個要確認的事。2026-08-31 就因為少了這一行，
+                      收到截圖後還得多猜一輪。 */}
+                  <div className="text-xs text-slate-500 mt-2 font-mono break-all">
+                    前端 {APP_VERSION}　佇列 {diag.length} 筆<br />
+                    來源網址：{location.origin}
+                  </div>
                   {/* 整輪失敗的原因（例如 IndexedDB 寫不進去）。這種失敗不屬於任何單一張照片，
                       沒有這一塊就完全看不到 —— 而它正是「所有照片都停住」時最該先知道的事。 */}
                   {pendingUp && pendingUp.lastError && (
@@ -2554,6 +2608,34 @@ ${nm}
                       重新讀取
                     </button>
                     <button onClick={() => setDiag(null)} className="px-3 py-2 text-sm bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg">關閉</button>
+                  </div>
+                  {/**
+                   * 手動清理。
+                   *
+                   * 為什麼需要「人自己按」：待傳佇列只存在這支手機裡，後端與其他人
+                   * 完全碰不到它。一旦這支手機的儲存空間被佔滿，新照片就存不進去，
+                   * 而現場的人正需要繼續點檢下一家店 —— 必須有一個他當下就能按的出口。
+                   * 兩顆按鈕嚴格分開：上面那顆不會遺失任何東西，下面那顆會。
+                   */}
+                  <div className="mt-4 pt-3 border-t border-slate-200 space-y-2">
+                    <button
+                      onClick={() => purgeQueue('finished')}
+                      className="w-full px-3 py-2 text-sm bg-emerald-50 hover:bg-emerald-100 border border-emerald-300 text-emerald-800 rounded-lg text-left">
+                      🧹 <b>清掉已完成的照片</b>（安全，不會遺失任何東西）
+                      <div className="text-xs text-emerald-700 mt-0.5">
+                        這些檔案已經在雲端硬碟、連結也寫回紀錄了，留在手機上只是佔空間。
+                        空間不足導致新照片存不進去時，先按這個。
+                      </div>
+                    </button>
+                    <button
+                      onClick={() => purgeQueue('all')}
+                      className="w-full px-3 py-2 text-sm bg-red-50 hover:bg-red-100 border border-red-300 text-red-800 rounded-lg text-left">
+                      🗑 <b>清空整個佇列</b>（最後手段，會遺失照片）
+                      <div className="text-xs text-red-700 mt-0.5">
+                        還沒進雲端的照片會<b>永久遺失、無法補回</b>。只有在確定那些照片不再需要、
+                        而且要讓這支手機能繼續點檢下一家店時才用。
+                      </div>
+                    </button>
                   </div>
                 </div>
               </div>
@@ -2742,6 +2824,21 @@ ${nm}
                   <div className="text-xs mt-1 text-amber-700">課別名稱兩邊必須完全相同（含全形/空白）才會被視為同一課。</div>
                 </div>
                 <button onClick={() => setHideMismatch(true)} className="text-amber-500 shrink-0">✕</button>
+              </div>
+            )}
+            {/* 連線階段過期：不自己跳轉，讓使用者先把手上的事處理完再登入。
+                位置放在最上面 —— 過期後任何操作都會失敗，這件事優先於其他提示。 */}
+            {authLost && (
+              <div className="bg-amber-50 border-2 border-amber-300 text-amber-900 text-sm rounded-lg px-3 py-2.5">
+                <div className="font-bold mb-1">⚠ 連線階段已過期，需要重新登入</div>
+                <div className="leading-relaxed">
+                  在這之前的操作都不會成功。<b>已經拍好的照片與已排入的紀錄都還留在這支手機上</b>，
+                  重新登入後會自動繼續上傳，不會遺失。
+                  {' '}如果正在填表，建議先把畫面上的內容抄下來或拍照留存，再重新登入。
+                </div>
+                <button
+                  onClick={() => { sessionStorage.removeItem('sqc_user'); location.href = 'index.html'; }}
+                  className="mt-2 px-3 py-1.5 bg-amber-600 text-white rounded-lg font-semibold">重新登入</button>
               </div>
             )}
             {IN_APP_BROWSER && (
