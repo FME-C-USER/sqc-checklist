@@ -103,7 +103,9 @@
           tries: p.tries || 0, error: p.error || '',
           linkTries: p.linkTries || 0, netTries: p.netTries || 0, linkErr: p.linkErr || '',
           nextAt: p.nextAt || 0, linkNextAt: p.linkNextAt || 0,
-          hasBlob: !!p.blob, blobSize: (p.blob && p.blob.size) || 0, fileId: p.fileId || '',
+          // blobSize 要能在 blob 被釋放後仍然看得到：完成的照片會把 blob 丟掉省空間，
+          // 但診斷畫面若因此顯示「內容 0 KB」，會被誤讀成「照片內容不見了」。
+          hasBlob: !!p.blob, blobSize: (p.blob && p.blob.size) || p.bytes || 0, fileId: p.fileId || '',
           reported: !!p.reported,
         });
         c.continue();
@@ -112,9 +114,43 @@
     }));
   }
 
+  /**
+   * 逐筆走訪照片佇列（游標），每筆交給 fn 處理完才前進。
+   *
+   * 為什麼不是 allPhotos()：那支是 getAll，會把每一張的 blob 與 thumb 一次全部
+   * 讀進記憶體 —— 而呼叫這支的目的正是要清掉那些東西，用 getAll 等於在
+   * 「因為空間不夠而失敗」的裝置上先把記憶體吃爆一次。
+   *
+   * 讀取用獨立的唯讀交易、寫入由 fn 自己開新交易：IndexedDB 的交易會在
+   * 沒有待處理請求時自動結束，在游標中間 await 一個跨交易的寫入會讓游標失效。
+   * 所以先用游標把整份「輕量快照」收集完（不含 blob/thumb 的參照另外處理），
+   * 再逐筆呼叫 fn —— 逐筆處理才不會一次持有全部內容。
+   */
+  function eachPhoto(fn) {
+    return open().then((db) => new Promise((resolve, reject) => {
+      const ids = [];
+      const req = db.transaction('photoQueue', 'readonly').objectStore('photoQueue').openKeyCursor();
+      req.onsuccess = () => {
+        const c = req.result;
+        if (!c) { resolve(ids); return; }
+        ids.push(c.primaryKey);
+        c.continue();
+      };
+      req.onerror = () => reject(req.error || new Error('讀取佇列失敗'));
+    })).then(async (ids) => {
+      for (const id of ids) {
+        try {
+          const p = await get('photoQueue', id);
+          if (p) await fn(p);
+        } catch (e) { /* 單筆失敗不可中斷整輪：能清幾筆是幾筆 */ }
+      }
+    });
+  }
+
   window.SqcDB = {
     // 照片佇列
     photoDiagnostics,
+    eachPhoto,
     addPhoto: (photo) => put('photoQueue', photo),
     updatePhoto: (photo) => put('photoQueue', photo),
     getPhoto: (id) => get('photoQueue', id),

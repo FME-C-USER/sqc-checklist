@@ -44,7 +44,7 @@
     const { useState, useMemo, useEffect, useRef } = React;
     // 版本字串一律用「台灣時間」的 YYYYMMDD-HHMM。與部署關卡無關 ——
     // 那道關卡看的是資安報告的檔名日期，而 GitHub runner 跑 UTC，兩者不要混在一起。
-    const APP_VERSION = '20260831-1200'; // 每次部署更新，用來確認瀏覽器跑的是哪一版（台灣時間）
+    const APP_VERSION = '20260831-1330'; // 每次部署更新，用來確認瀏覽器跑的是哪一版（台灣時間）
     // 這一版前端「至少」需要的後端版本。前後端是各自演進的，版本號本來就不會相等
     // （只改前端時後端不動，反之亦然），所以不能用「兩者相等」當健康指標 ——
     // 要比的是「線上後端有沒有舊到缺少本前端需要的 API」。
@@ -99,7 +99,9 @@
     //   目標 800KB~1200KB / 長邊1920px / 品質0.92起 每次-0.1 至<1200KB / 下限0.3 / JPEG
     //   縮圖：固定品質 0.7，僅供畫面顯示
     // ============================================================
-    const MAX_EDGE = 1920, MAX_KB = 1200, MIN_Q = 0.3, START_Q = 0.92, THUMB_Q = 0.7;
+    // THUMB_EDGE 320：縮圖只用來畫 64×64 的方框，在 3 倍解析度的手機上 192px 就夠，
+    // 取 320 留點餘裕。原本是直接把 1920px 畫布轉 dataURL，等於存了第二份原圖。
+    const MAX_EDGE = 1920, MAX_KB = 1200, MIN_Q = 0.3, START_Q = 0.92, THUMB_Q = 0.7, THUMB_EDGE = 320;
 
     function loadImage(file) {
       return new Promise((res, rej) => {
@@ -109,10 +111,13 @@
         img.src = URL.createObjectURL(file);
       });
     }
-    function drawScaled(img) {
+    // edge 省略時用 MAX_EDGE（上傳用的尺寸）；畫縮圖時傳 THUMB_EDGE。
+    // 也接受 canvas 當來源（縮圖是從已縮好的畫布再縮一次，不必重新解一次原檔）。
+    function drawScaled(img, edge) {
+      const max = edge || MAX_EDGE;
       let { width: w, height: h } = img;
-      if (Math.max(w, h) > MAX_EDGE) {
-        const r = MAX_EDGE / Math.max(w, h);
+      if (Math.max(w, h) > max) {
+        const r = max / Math.max(w, h);
         w = Math.round(w * r); h = Math.round(h * r);
       }
       const c = document.createElement('canvas');
@@ -132,7 +137,16 @@
         q = Math.round((q - 0.1) * 100) / 100;
         blob = await canvasToBlob(canvas, q);
       }
-      const thumb = canvas.toDataURL('image/jpeg', THUMB_Q);
+      /**
+       * 縮圖要真的是縮圖。
+       *
+       * 原本這裡是 canvas.toDataURL(...) —— 而 canvas 就是那張完整的 1920px 畫布，
+       * 所以「縮圖」其實是一張 1920px 的 JPEG 再轉成 base64（體積再 ×1.33），
+       * 常常比 blob 本身還大。而它只被拿去畫一個 64×64 的小方框。
+       * 兩份都存進 IndexedDB 的結果就是一張照片吃掉 1.5~2MB，
+       * 一支手機測幾天累積數百 MB，最後在配額較小的瀏覽器上整個寫不進去。
+       */
+      const thumb = drawScaled(canvas, THUMB_EDGE).toDataURL('image/jpeg', THUMB_Q);
       return { name: file.name.replace(/\.[^.]+$/, '') + '.jpg', sizeKB: Math.round(blob.size / 1024), quality: q, thumb, blob };
     }
 

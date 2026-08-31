@@ -126,6 +126,32 @@
    * 這裡的寫入只是記錄重試次數與原因，失敗了不該中斷整輪上傳，也不該彈系統錯誤，
    * 所以吞掉並保留原因（下一輪還會再試）。
    */
+  /**
+   * 把一張已經完成的照片「卸下貨」——留下狀態，丟掉佔空間的內容。
+   *
+   * 這是 2026-08-31 那次「Chrome 傳不上去、Safari 很順」的根因所在：
+   * 佇列只進不出（delPhoto 寫好了卻從來沒有人呼叫），每張照片同時存著
+   *   blob  —— 壓縮後仍有 600~950 KB
+   *   thumb —— 竟然是「整張 1920px 的 JPEG 再轉 base64」，比 blob 還大
+   * 而它只被拿來畫一個 64×64 的小方框。
+   * 一支手機測幾天就累積數百 MB；iOS 上第三方瀏覽器（WKWebView）的配額
+   * 遠小於 Safari 本體，於是 Chrome 先撞牆，丟出
+   * Error preparing Blob/File data to be stored in object store，
+   * 而 Safari 因為配額大、累積量也不同，看起來「很順」。
+   *
+   * 已經 linked 的照片，檔案在雲端硬碟、連結也寫回紀錄了，本機這兩份純屬廢料。
+   * 保留整筆（而不是 delPhoto 整筆刪掉）是因為統計、診斷、countsOfRecord
+   * 都還要靠它 —— 只是每筆從 ~1.6MB 降到幾百位元組。
+   * bytes 留著，診斷畫面才不會把它顯示成「內容 0 KB」（那會被誤讀成照片不見了）。
+   */
+  function released(photo, status) {
+    const bytes = (photo.blob && photo.blob.size) || photo.bytes || 0;
+    const out = { ...photo, status, bytes };
+    delete out.blob;
+    delete out.thumb;
+    return out;
+  }
+
   let _storeBroken = '';   // 最近一次寫回佇列失敗的原因（空字串 = 正常）
   async function safeUpdate(photo) {
     try {
@@ -138,8 +164,34 @@
     }
   }
 
+  /**
+   * 把佇列裡「已完成但還帶著內容」的舊資料卸下貨。
+   *
+   * 只改新照片沒有用 —— 現場的手機上已經堆了好幾天的完成照片，
+   * 那些才是把配額吃光、害新照片存不進去的東西。所以每輪 pump 開頭先掃一次。
+   *
+   * 用游標逐筆處理而不是 getAll：getAll 會把每一張的 blob 與 thumb 全部讀進
+   * 記憶體（正是我們要清掉的那些），幾百張就是好幾百 MB，很可能當場當掉。
+   * 逐筆讀、逐筆寫，任何一筆失敗都跳過繼續 —— 能清幾筆是幾筆，
+   * 清掉的每一筆都讓下一筆更有機會成功。
+   */
+  async function releaseFinished() {
+    if (!window.SqcDB.eachPhoto) return 0;   // 舊版 db.js
+    let freed = 0;
+    await window.SqcDB.eachPhoto(async (p) => {
+      if (p.status !== 'linked') return;
+      if (!p.blob && !p.thumb) return;       // 已經卸過貨了
+      if (await safeUpdate(released(p, 'linked'))) freed++;
+    });
+    if (freed) emit();
+    return freed;
+  }
+
   async function pumpOnce() {
     try {
+      // 先騰出空間再做事：佇列滿到寫不進去的話，後面每一步都會失敗
+      await releaseFinished().catch(() => 0);
+      _storeBroken = '';     // 清完重新判斷，不要拿上一輪的結論擋住這一輪
       await pumpRecords();   // 先把紀錄補送成功，照片的連結才有地方可寫
       // 套用退避：失敗過的照片有 nextAt，時間沒到就不要再打後端。
       // （原本只有迴圈內第二輪之後有過濾，第一輪沒有 —— 等於每 15 秒必定
@@ -346,7 +398,7 @@
       // 照片是在紀錄送出「之前」就開始上傳的，所以可能比紀錄本身更早完成 → 後端會回「找不到紀錄」。
       // 這種情況必須維持 done、等下次 pump 週期紀錄存在後再送，不可標記 linked(否則連結永久遺失)。
       if (res && res.ok === false) { await backoff(res.message || '找不到紀錄', true); return; }
-      await Promise.all(toLink.map((p) => window.SqcDB.updatePhoto({ ...p, status: 'linked' })));
+      await Promise.all(toLink.map((p) => safeUpdate(released(p, 'linked'))));
       // 標記 linked 之後才分享，且不等它 —— 分享失敗不該讓照片回到「未完成」狀態，
       // 那些檔案已經在雲端硬碟、連結也已經寫回紀錄了。真的沒分享成功時，
       // 維護專區的「照片連結修復」會再補一次（它也會設定分享）。

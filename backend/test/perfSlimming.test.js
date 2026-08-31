@@ -78,7 +78,9 @@ assertEqual(GS.includes('function sharePhotoLinks(links) {'), true, '要有獨�
 assertEqual(GS.includes('sharePhotoLinks: function () { return sharePhotoLinks(p.links); },'), true, '要註冊路由');
 assertEqual(UP.includes('attachPhotoLinks(month, recordId, links, true)'), true, '上傳器要帶 deferShare');
 // 順序很重要：先標記 linked 再分享，且不等它
-const idxLinked = UP.indexOf("status: 'linked'");
+// （標記動作現在是 released(p, 'linked') —— 那支同時把 blob/thumb 卸掉，
+//   因為完成的照片留在本機只是白佔配額，見 uploader.js 的 released()）
+const idxLinked = UP.indexOf("safeUpdate(released(p, 'linked'))");
 const idxShare = UP.indexOf('SqcApi.sharePhotoLinks(links)');
 assertEqual(idxLinked > 0 && idxShare > idxLinked, true, '要先標記 linked 才分享（分享失敗不該讓照片回到未完成）');
 assertEqual(UP.includes('window.SqcApi.sharePhotoLinks(links).catch(() => { });'), true, '分享不等它、失敗也不影響流程');

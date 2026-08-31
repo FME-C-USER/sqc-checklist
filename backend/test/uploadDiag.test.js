@@ -52,8 +52,12 @@ assertEqual(/openCursor\(\)/.test(DB), true, '要用游標逐筆取，不可用 
   const fn = /function photoDiagnostics\(\)[\s\S]*?\n  \}/.exec(DB)[0];
   assertEqual(/out\.push\(\{[\s\S]*?blob:/.test(fn), false, '不可把 blob 放進結果');
   assertEqual(/out\.push\(\{[\s\S]*?thumb:/.test(fn), false, '不可把 thumb 放進結果（整張 1920px 的 dataURL）');
-  assertEqual(/blobSize: \(p\.blob && p\.blob\.size\) \|\| 0/.test(fn), true,
-    '要回內容大小 —— 0 代表照片在本機就已經不見了，這是關鍵訊號');
+  // 內容大小是關鍵訊號：0 代表照片在本機就已經不見了。
+  // 但完成的照片會把 blob 卸掉省空間（見 uploader.js 的 released()），
+  // 若只看 p.blob.size 會把那些顯示成「內容 0 KB」而被誤讀成照片不見了，
+  // 所以卸貨時記下的 p.bytes 必須列入。
+  assertEqual(/blobSize: \(p\.blob && p\.blob\.size\) \|\| p\.bytes \|\| 0/.test(fn), true,
+    '要回內容大小，且 blob 卸掉後仍要看得到原本多大');
   assertEqual(/error: p\.error \|\| ''/.test(fn), true, '要回上傳錯誤');
   assertEqual(/linkErr: p\.linkErr \|\| ''/.test(fn), true, '要回回寫連結的錯誤');
 }
