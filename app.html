@@ -44,7 +44,7 @@
     const { useState, useMemo, useEffect, useRef } = React;
     // 版本字串一律用「台灣時間」的 YYYYMMDD-HHMM。與部署關卡無關 ——
     // 那道關卡看的是資安報告的檔名日期，而 GitHub runner 跑 UTC，兩者不要混在一起。
-    const APP_VERSION = '20260828-1559'; // 每次部署更新，用來確認瀏覽器跑的是哪一版（台灣時間）
+    const APP_VERSION = '20260831-1100'; // 每次部署更新，用來確認瀏覽器跑的是哪一版（台灣時間）
     // 這一版前端「至少」需要的後端版本。前後端是各自演進的，版本號本來就不會相等
     // （只改前端時後端不動，反之亦然），所以不能用「兩者相等」當健康指標 ——
     // 要比的是「線上後端有沒有舊到缺少本前端需要的 API」。
@@ -56,7 +56,27 @@
     // 以及報表不再把「有填名稱但沒勾選」的文字列成缺失（分數與報表要一致）
     // 20260828-1559 起還需要：Cloud Run 新格式網址進白名單、Origin 不合法時明確報錯、
     // 以及放行 photoUploadStuck 事件（否則卡住的原因會被後端丟掉，等於沒做）
-    const NEEDS_GAS = '20260828-1559';
+    // 20260831-1100 起還需要：recordExists（待送佇列改用只讀一欄的確認，
+    // 取代會讀整張活頁的 queryRecords —— 送出逾時的人越多、全表讀取越頻繁，
+    // 後端會被自己的重試機制拖垮，2026-08-28 現場就是這個形狀）
+    const NEEDS_GAS = '20260831-1100';
+
+    /**
+     * 從 LINE 等 App 內建瀏覽器開啟時，回傳那個 App 的名字，否則空字串。
+     *
+     * 為什麼要擋：內建瀏覽器是被託管的 WKWebView，儲存空間可能在 App 關閉時就被清掉 ——
+     * 而本系統把待傳照片放在 IndexedDB，等於照片會無聲消失（點檢紀錄還在，照片欄是空的）。
+     * 2026-08-28 有兩位同事是從 LINE 的連結進來的。
+     * 只認明確的內建瀏覽器，不用「沒有 Safari/ 就算」這種推測，避免誤判 Chrome。
+     */
+    const IN_APP_BROWSER = (function () {
+      const ua = navigator.userAgent || '';
+      if (/\bLine\//i.test(ua)) return 'LINE';
+      if (/FBAN|FBAV|FB_IAB/i.test(ua)) return 'Facebook';
+      if (/Instagram/i.test(ua)) return 'Instagram';
+      if (/MicroMessenger/i.test(ua)) return '微信';
+      return '';
+    })();
 
     // 全域錯誤攔截：任何未預期錯誤（含 async 事件處理器的未捕捉 rejection）都要顯示出來，
     // 否則按鈕會「按了沒反應」而完全查不到原因
@@ -1228,6 +1248,7 @@
       const [bootWarn, setBootWarn] = useState(''); // 用快取撐著時的提示（非阻斷式）
       const [bootAt, setBootAt] = useState(null);   // 目前這份開場資料是何時取得的（供現場判斷名單夠不夠新）
       const [gasVer, setGasVer] = useState('');     // 後端版本；貼上 程式碼.gs 卻沒重新部署時，這裡不會變
+      const [gasStale, setGasStale] = useState(false); // gasVer 目前來自開場快取（尚未真的連上後端）
       // 背景待處理量：照片沒傳完就關掉 App 會延後上傳，點檢員必須看得到
       const [pendingUp, setPendingUp] = useState({ pending: 0, done: 0, unfinished: 0, orphan: 0, queuedRecords: 0, busy: false });
       useEffect(() => {
@@ -1431,7 +1452,7 @@
           if (hasStores) setStoresState({ loaded: true, err: '' });
           writeBootCache(mo, b);
           setBootErr(''); setBootWarn(''); setBootAt(Date.now());
-          setGasVer(b.gasVersion || '(舊版後端)');
+          setGasVer(b.gasVersion || '(舊版後端)'); setGasStale(false);
           if (!hasStores) loadStores(mo).catch(() => { });   // 背景補名單，失敗有自己的提示
           return b;
         });
@@ -1468,7 +1489,11 @@
         const cached = readBootCache(workMonth);
         if (cached && cached.b) {
           applyBoot(cached.b, workMonth); setBootAt(cached.at || null);
-          setGasVer(cached.b.gasVersion || '(舊版後端)'); setLoading(false); // 先用快取讓畫面立即可用
+          // 快取裡的後端版本是「上次連上時」的，不能拿它去比對 NEEDS_GAS：
+          // 2026-08-28 後端明明已經更新，但開場那一趟還沒回來（後端忙時要 30~45 秒），
+          // 畫面就先掛著「⚠ 需 20260828-1559 以上」，讓人跑去重貼一份其實已經貼好的後端。
+          setGasVer(cached.b.gasVersion || '(舊版後端)'); setGasStale(true);
+          setLoading(false); // 先用快取讓畫面立即可用
           // 快取裡有名單就算「已載入」，選店不必等背景那一趟；沒有才顯示「名單載入中」
           if (cached.b.stores && cached.b.stores.length) setStoresState({ loaded: true, err: '' });
         }
@@ -2421,16 +2446,25 @@ ${nm}
                 <span className="text-slate-300">|</span>
                 {/* 載入失敗時整份開場資料是 localStorage 的快取，這個版本號也是 ——
                     不標示的話會被當成線上的即時值，使用者會以為後端沒貼成功而白忙。 */}
-                <span title={bootWarn
-                  ? '這是「上次成功載入時」看到的後端版本，不是現在線上的版本 —— 因為這次載入失敗，畫面顯示的是快取。請先按「重新載入」成功後再看這個數字。'
-                  : (gasVer && gasVer < NEEDS_GAS
-                    ? '線上後端比本前端需要的版本舊（需 ' + NEEDS_GAS + '）：請貼上 程式碼.gs 並「部署→管理部署作業→新版本」'
-                    : '後端版本（YYYYMMDD-HHMM，台灣時間）。前後端各自演進，版本號不需相同；只要不低於 ' + NEEDS_GAS + ' 就是正常')}
-                  className={bootWarn ? 'text-slate-400' : (gasVer && gasVer < NEEDS_GAS ? 'text-amber-600 font-semibold' : '')}>
-                  後端 {gasVer || '—'}{bootWarn ? '（上次載入時）' : ''}
-                  {/* 載入失敗時 gasVer 是快取值，拿它去比對會叫使用者去貼一份其實已經貼好的後端 */}
-                  {!bootWarn && gasVer && gasVer < NEEDS_GAS && <span className="ml-1">⚠ 需 {NEEDS_GAS} 以上</span>}
-                </span>
+                {/* 只有真的連上後端拿到的版本號才能拿去比對：
+                    bootWarn = 這次載入失敗、顯示的是快取；
+                    gasStale = 開場那一趟還沒回來、先用快取墊著（後端忙時要 30~45 秒）。
+                    兩種情況都不可以掛警告，否則會叫人去重貼一份其實已經貼好的後端。 */}
+                {(() => {
+                  const cachedVer = bootWarn || gasStale;
+                  const outdated = !cachedVer && gasVer && gasVer < NEEDS_GAS;
+                  return (
+                    <span title={cachedVer
+                      ? '這是「上次成功載入時」看到的後端版本，不是現在線上的版本。等這次載入完成後才會是即時值。'
+                      : (outdated
+                        ? '線上後端比本前端需要的版本舊（需 ' + NEEDS_GAS + '）：請貼上 程式碼.gs 並「部署→管理部署作業→新版本」'
+                        : '後端版本（YYYYMMDD-HHMM，台灣時間）。前後端各自演進，版本號不需相同；只要不低於 ' + NEEDS_GAS + ' 就是正常')}
+                      className={cachedVer ? 'text-slate-400' : (outdated ? 'text-amber-600 font-semibold' : '')}>
+                      後端 {gasVer || '—'}{cachedVer ? '（上次載入時）' : ''}
+                      {outdated && <span className="ml-1">⚠ 需 {NEEDS_GAS} 以上</span>}
+                    </span>
+                  );
+                })()}
                 {/* 店鋪名單、人員與「本月已點檢」都只在開 App 時載入一次；
                     主管中途重新匯入名單、或同事剛點完別的店時，要有辦法手動更新 */}
                 <button title="重新向後端取店鋪名單、人員與「本月已點檢」清單"
@@ -2687,6 +2721,24 @@ ${nm}
                   <div className="text-xs mt-1 text-amber-700">課別名稱兩邊必須完全相同（含全形/空白）才會被視為同一課。</div>
                 </div>
                 <button onClick={() => setHideMismatch(true)} className="text-amber-500 shrink-0">✕</button>
+              </div>
+            )}
+            {IN_APP_BROWSER && (
+              <div className="bg-red-50 border-2 border-red-300 text-red-800 text-sm rounded-lg px-3 py-2.5">
+                <div className="font-bold mb-1">⚠ 請不要用 {IN_APP_BROWSER} 內建的瀏覽器點檢</div>
+                <div className="leading-relaxed">
+                  內建瀏覽器的儲存空間可能在關閉後就被清掉，<b>待上傳的照片會直接消失，而且不會有任何提示</b>。
+                  請複製網址，改用 Safari 開啟（並加到主畫面）。
+                </div>
+                <button
+                  onClick={() => {
+                    const url = location.href;
+                    const done = () => alert('網址已複製，請開啟 Safari 貼上：\n\n' + url);
+                    if (navigator.clipboard && navigator.clipboard.writeText) {
+                      navigator.clipboard.writeText(url).then(done, () => alert('請手動複製網址：\n\n' + url));
+                    } else alert('請手動複製網址：\n\n' + url);
+                  }}
+                  className="mt-2 px-3 py-1.5 bg-red-600 text-white rounded-lg font-semibold">複製網址</button>
               </div>
             )}
             {bootWarn && <div className="bg-amber-50 border border-amber-200 text-amber-700 text-sm rounded-lg px-3 py-2 flex justify-between items-center gap-3"><span>⚠ {bootWarn}</span><span className="flex items-center gap-2 shrink-0"><button onClick={() => { setLoading(true); reloadBoot(workMonth).catch(e => setBootWarn(bootFailMsg(e))).finally(() => setLoading(false)); }} className="text-amber-700 underline">重新載入</button><button onClick={() => setBootWarn('')} className="text-amber-400">✕</button></span></div>}

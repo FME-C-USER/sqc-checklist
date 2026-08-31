@@ -33,6 +33,12 @@
   const RETRY_LONGER = {
     getBootstrap: 45000,
     queryRecords: 30000,
+    /**
+     * 建立上傳工作階段：一次要向 Drive 開 6 個 resumable session，後端忙的時候
+     * 12 秒不夠。2026-08-27 現場整批照片卡住就是這裡 —— 四次都用 12 秒逾時，
+     * 等於連一次成功的機會都沒有。
+     */
+    createUploadSessions: 45000,
   };
   const RETRY_DELAYS = [700, 1500, 3000];
   /** 每次嘗試各自的逾時；慢的動作只嘗試兩次，避免真的失敗時要等好幾分鐘 */
@@ -84,9 +90,15 @@
       }
       throw new Error(data.error || 'API 錯誤');
     }
-    // 後端回 ok 但沒帶 result（多半是線上部署版本較舊、該動作尚未存在或回傳空值）
+    /**
+     * 後端回 ok 但沒帶 result。
+     * 原本這裡寫「請確認 Apps Script 已重新部署新版本」—— 但 2026-08-28 現場出現時
+     * 後端明明就是最新版，結果大家照著這句話去查部署，方向完全錯了。
+     * 實際上後端忙碌時也會回出這種殘缺回應，而那才是比較常見的原因，所以改成先講負載。
+     */
     if (data.result === undefined) {
-      throw new Error('後端未回傳資料（動作：' + action + '），請確認 Apps Script 已重新部署新版本');
+      throw new Error('後端回應不完整（動作：' + action + '）。多半是後端忙碌造成，'
+        + '請稍候再試；若一直如此，才需要確認 Apps Script 是否已重新部署。');
     }
     return data.result;
   }
@@ -125,6 +137,8 @@
     getStoreList: (month, section) => call('getStoreList', { month, section }),
     // 只回店號清單（防重複點檢用）。舊版後端沒這支，前端會退回 queryRecords
     getInspectedCodes: (month) => call('getInspectedCodes', { month }),
+    /** 只讀「紀錄ID」一欄，供待送佇列在重送前確認是否其實已經寫進去了 */
+    recordExists: (month, id) => call('recordExists', { month, id }),
     // 只回傳「單檔上傳網址」，權杖留在後端（見 uploader.js 開頭說明）
     createUploadSessions: (items, origin) => call('createUploadSessions', { items, origin }),
     submitRecord: (record) => call('submitRecord', { record }),

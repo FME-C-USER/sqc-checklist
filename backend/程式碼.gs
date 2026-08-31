@@ -10,7 +10,7 @@
 // 後端版本：每次修改本檔就更新，並於前端「資料更新時間」旁顯示。
 // 用途：貼上程式碼後若忘記「部署 → 管理部署作業 → 新版本」，畫面上的後端版本就不會變，
 //       可立即分辨是「沒貼上」「貼了但沒部署」還是「已生效」。
-var GAS_VERSION = '20260828-1559';   // 台灣時間 YYYYMMDD-HHMM
+var GAS_VERSION = '20260831-1100';   // 台灣時間 YYYYMMDD-HHMM
 
 var SPREADSHEET_ID = '1GRZZsZRgakMGENspOxmlx96NfckC8UYOe0ipuNNEoh0';
 var DRIVE_ROOT_ID  = '122nQjldImn5Zh5AUguxZF0YzobThgdc9';
@@ -47,6 +47,7 @@ function doPost(e) {
       getBootstrap: function () { return getBootstrap(p.month, p.section, p.light === true); },
       getStoreList: function () { return getStoreList(p.month, p.section); },
       getInspectedCodes: function () { return getInspectedCodes(p.month); },
+      recordExists: function () { return recordExists(p.month, p.id); },
       createUploadSessions: function () { return { sessions: createUploadSessions(p.items, p.origin) }; },
       submitRecord: function () { return submitRecord(p.record); },
       attachPhotoLinks: function () { return attachPhotoLinks(p.month, p.recordId, p.links, p.deferShare === true); },
@@ -746,6 +747,36 @@ function repairRecordPhotos(month, recordId) {
  * 月底上千筆、每筆帶幾十張照片連結時，這是好幾 MB 的浪費，而且每次開 App 都做一次。
  * 這裡只讀「店號」一欄。
  */
+/**
+ * 這筆紀錄是否已經寫進後端？只讀「紀錄ID」一欄。
+ *
+ * 為什麼要獨立一支：待送佇列在重送前要先確認「是不是其實已經送成功、只是回應遺失」，
+ * 原本是呼叫 queryRecords(month, {from:day, to:day}) —— 但 queryRecords 的第一行是
+ * readSheet(整張活頁)，from/to 是讀完才過濾的，完全沒有減少讀取量。
+ * 月底 200 多筆、每筆帶三個大 JSON 欄，一次十幾 MB；而送出逾時的人越多、
+ * 待送佇列越多、這種全表讀取就越頻繁 —— 後端被自己的重試機制拖垮。
+ * 2026-08-28 現場多人同時卡住時就是這個形狀。
+ *
+ * 這支不拿鎖：只是讀一欄做判斷，就算和寫入並行、最壞情況也只是回報「還沒有」，
+ * 而 submitRecord 本身是等冪的（同一個紀錄ID 不會寫成兩列），所以沒有正確性風險。
+ */
+function recordExists(month, id) {
+  var sh = ssBook().getSheetByName('點檢紀錄_' + month);
+  if (!sh) return { exists: false };
+  var lastRow = sh.getLastRow();
+  if (lastRow < 2) return { exists: false };
+  var head = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0];
+  var col = head.indexOf('紀錄ID');
+  if (col < 0) return { exists: false };
+  var target = String(id == null ? '' : id);
+  if (!target) return { exists: false };
+  var ids = sh.getRange(2, col + 1, lastRow - 1, 1).getValues();
+  for (var i = 0; i < ids.length; i++) {
+    if (String(ids[i][0]) === target) return { exists: true };
+  }
+  return { exists: false };
+}
+
 function getInspectedCodes(month) {
   var sh = ssBook().getSheetByName('點檢紀錄_' + month);
   if (!sh) return { codes: [] };

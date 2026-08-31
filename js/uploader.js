@@ -11,11 +11,15 @@
 // ============================================================
 (function () {
   const CONCURRENCY = 3;   // 同時進行的 PUT 數（行動網路上不宜過多）
-  // 一次向後端索取幾張的上傳網址（往返次數 = 張數 / BATCH）。
-  // 一家店約 19 張：BATCH 6 要 4 次往返、每次 1~2 秒；改成 10 只要 2 次，省 2~4 秒。
-  // 後端 UPLOAD_SESSION_MAX 是 20，所以 10 還有餘裕。多開的工作階段若沒用到也無害
-  // （Drive 的 resumable session 網址有效期以天計，過期自動失效）。
-  const BATCH = 10;
+  /**
+   * 一次向後端索取幾張的上傳網址（往返次數 = 張數 / BATCH）。
+   *
+   * 曾經為了少跑兩趟往返把它調到 10，但那是把單次請求變重 67% ——
+   * 而後端要為每一張向 Drive 開一個 resumable session，這裡正好就是瓶頸本身。
+   * 2026-08-27 現場整批卡在 createUploadSessions 逾時，改回 6：
+   * 單次請求輕一點、比較容易在逾時內完成，失敗時重做的成本也小。
+   */
+  const BATCH = 6;
   let _running = false;
   let _again = false;      // 跑到一半又被要求重試 → 跑完再跑一輪，不要直接丟掉
   const _listeners = new Set();
@@ -70,15 +74,27 @@
     for (const q of list) {
       if (q.nextAt && q.nextAt > Date.now()) continue;
       try {
-        // 先確認是不是「其實已經送出成功、只是回應遺失」，否則重送會變成兩筆
-        const day = String((q.record && q.record.time) || '').slice(0, 10);
-        if (day) {
-          const r = await window.SqcApi.queryRecords(q.month, { from: day, to: day });
-          if ((r.records || []).some((x) => String(x.id) === String(q.id))) {
-            await window.SqcDB.delQueuedRecord(q.id);
-            emit();
-            continue;
-          }
+        /**
+         * 先確認是不是「其實已經送出成功、只是回應遺失」。
+         *
+         * 原本這裡呼叫 queryRecords(month, {from:day,to:day})，但後端的 queryRecords
+         * 第一行就是讀整張活頁，from/to 是讀完才過濾的 —— 送出逾時的人越多、待送佇列越多，
+         * 這種全表讀取就越頻繁，後端被自己的重試機制拖垮，於是更多人逾時。
+         * 改用只讀「紀錄ID」一欄的 recordExists。
+         *
+         * 後端還是舊版時 recordExists 會回「未知動作」：這時直接跳過確認、往下送就好，
+         * 因為 submitRecord 本身是等冪的（同一個紀錄ID 不會寫成兩列），
+         * 這個確認只是省一次寫入嘗試，不是正確性的必要條件。
+         */
+        let known = false;
+        try {
+          const r = await window.SqcApi.recordExists(q.month, q.id);
+          known = !!(r && r.exists);
+        } catch (e) { /* 舊後端沒有這支：交給 submitRecord 的等冪保護 */ }
+        if (known) {
+          await window.SqcDB.delQueuedRecord(q.id);
+          emit();
+          continue;
         }
         const res = await window.SqcApi.submitRecord(q.record);
         if (res && res.ok === false) {
@@ -101,10 +117,34 @@
     }
   }
 
+  /**
+   * 寫回佇列狀態時本身也可能失敗。
+   *
+   * updatePhoto 會把整個物件（含照片本體）重新寫回 IndexedDB，而 WebKit 在
+   * 「把 Blob 存進 object store」這條路徑上會丟 Error preparing Blob/File data ——
+   * 2026-08-28 有三支手機跳出全域錯誤視窗，就是這個例外從 Promise.all 裡漏出來。
+   * 這裡的寫入只是記錄重試次數與原因，失敗了不該中斷整輪上傳，也不該彈系統錯誤，
+   * 所以吞掉並保留原因（下一輪還會再試）。
+   */
+  let _storeBroken = '';   // 最近一次寫回佇列失敗的原因（空字串 = 正常）
+  async function safeUpdate(photo) {
+    try {
+      await window.SqcDB.updatePhoto(photo);
+      _storeBroken = '';
+      return true;
+    } catch (e) {
+      _storeBroken = String((e && e.message) || e);
+      return false;
+    }
+  }
+
   async function pumpOnce() {
     try {
       await pumpRecords();   // 先把紀錄補送成功，照片的連結才有地方可寫
-      let pend = await window.SqcDB.pendingPhotos();
+      // 套用退避：失敗過的照片有 nextAt，時間沒到就不要再打後端。
+      // （原本只有迴圈內第二輪之後有過濾，第一輪沒有 —— 等於每 15 秒必定
+      //   對 createUploadSessions 打一次，後端越忙這件事越傷。）
+      let pend = (await window.SqcDB.pendingPhotos()).filter((p) => !p.nextAt || p.nextAt <= Date.now());
       while (pend.length && navigator.onLine) {
         // 一次向後端取 BATCH 張的上傳網址（往返次數減半），實際 PUT 仍每次 CONCURRENCY 張並行，
         // 避免在行動網路上同時塞太多連線反而更容易失敗
@@ -117,7 +157,7 @@
         } catch (e) {
           await Promise.all(batch.map((p) => {
             const tries = (p.tries || 0) + 1;
-            return window.SqcDB.updatePhoto({ ...p, tries, error: String(e.message || e), nextAt: Date.now() + Math.min(60000, 2000 * tries) });
+            return safeUpdate({ ...p, tries, error: String(e.message || e), nextAt: Date.now() + Math.min(60000, 2000 * tries) });
           }));
           emit();
           break;
@@ -127,15 +167,24 @@
           await Promise.all(wave.map(async (p, k) => {
             try {
               const fileId = await uploadOne(p, sessions[off + k]);
-              await window.SqcDB.updatePhoto({ ...p, status: 'done', fileId, error: '' });
+              await safeUpdate({ ...p, status: 'done', fileId, error: '' });
             } catch (e) {
               const tries = (p.tries || 0) + 1;
-              await window.SqcDB.updatePhoto({ ...p, tries, error: String(e.message || e), nextAt: Date.now() + Math.min(60000, 2000 * tries) });
+              await safeUpdate({ ...p, tries, error: String(e.message || e), nextAt: Date.now() + Math.min(60000, 2000 * tries) });
             }
           }));
           emit();
         }
         await Promise.all([...new Set(batch.map((p) => p.recordId))].map(flushLinksIfDone));
+        /**
+         * 佇列寫不回去時必須跳出本輪。
+         *
+         * 這個迴圈是靠「照片狀態被改掉、下一輪就不再是 pending」來收斂的；
+         * 寫入失敗時狀態不會變，同一批會被無限重取、無限重打 createUploadSessions ——
+         * 比原本讓例外冒出去更糟（原本至少會停）。
+         * 等 setInterval 下一輪再試：那時記憶體壓力可能已經緩解。
+         */
+        if (_storeBroken) { emit(); break; }
         await new Promise((r) => setTimeout(r, 300));
         pend = (await window.SqcDB.pendingPhotos()).filter((p) => !p.nextAt || p.nextAt <= Date.now());
       }
@@ -200,18 +249,29 @@
    *      連結常會收到「找不到紀錄」而進入退避；不清掉的話按重試也還是要等退避結束。
    */
   async function pump(opts) {
-    if (opts && opts.force) await clearBackoff(opts.recordId);
+    try {
+      if (opts && opts.force) await clearBackoff(opts.recordId);
+    } catch (e) { /* 清退避失敗不該擋住這一輪上傳 */ }
     if (!navigator.onLine) { emit(); return; }
     if (_running) { _again = true; emit(); return; }
     _running = true;
     emit();                       // 讓畫面立刻顯示「正在重試…」，按鈕才有回饋
     try {
       do { _again = false; await pumpOnce(); } while (_again && navigator.onLine);
+    } catch (e) {
+      /**
+       * pump 是被 setInterval / online / visibilitychange 呼叫的，沒有人 await 它 ——
+       * 一旦丟出例外就是 unhandledrejection，會觸發全域錯誤視窗，
+       * 現場看到的是「系統發生未預期錯誤」而不是任何有用的訊息。
+       * 上傳失敗本來就會逐張記進 photo.error 並由診斷視窗呈現，這裡吞掉即可。
+       */
+      _lastPumpError = String((e && e.message) || e);
     } finally {
       _running = false;
       emit();
     }
   }
+  let _lastPumpError = '';
 
   /** 清掉退避：上傳重試(nextAt)與連結回寫重試(linkNextAt)都歸零，讓下一輪立刻重試 */
   async function clearBackoff(recordId) {
@@ -322,6 +382,11 @@
       unfinished: pending + done,
       queuedRecords: recs.length,
       busy: _running,
+      // 吞掉例外是為了不彈「系統發生未預期錯誤」，但原因不能就此消失 —— 診斷視窗要看得到。
+      // 佇列寫不回去是最要緊的一種：這支手機從現在起無法保存任何上傳進度。
+      lastError: _storeBroken
+        ? ('照片存不進本機待傳佇列，多半是手機儲存空間不足：' + _storeBroken)
+        : _lastPumpError,
     };
   }
 

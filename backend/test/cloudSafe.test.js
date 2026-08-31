@@ -33,8 +33,11 @@ assertEqual(/\}, \[pendingUp\.pending, pendingUp\.queuedRecords\]\);/.test(CODE)
 // ===== 2. 啟動即補傳 ＋ 批次提高 =====
 assertEqual(/if \(CONFIGURED && window\.SqcUploader\) SqcUploader\.pump\(\);/.test(CODE), true,
   '一進 App 就要踢一次 pump（原本要等 setInterval 最多 15 秒）');
-assertEqual(/const BATCH = 10;/.test(UP), true, 'BATCH 要提高到 10');
-assertEqual(/const BATCH = 6;/.test(UP), false, '舊的 BATCH 6 應已移除');
+// BATCH 曾經為了少跑兩趟往返調到 10，但後端要為每一張向 Drive 開一個 resumable session，
+// 那裡正好就是瓶頸 —— 調大等於把單次請求變重 67%，剛好壓在最容易逾時的地方。
+// 2026-08-27 現場整批卡在 createUploadSessions 逾時後改回 6。
+assertEqual(/const BATCH = 6;/.test(UP), true, 'BATCH 要維持 6：createUploadSessions 是瓶頸，單次請求不可再變重');
+assertEqual(/const BATCH = 10;/.test(UP), false, '不可再調回 10');
 // 不可超過後端上限，否則多要的會被 slice 掉而白跑
 {
   const GS = fs.readFileSync(path.join(ROOT, 'backend', '程式碼.gs'), 'utf8');

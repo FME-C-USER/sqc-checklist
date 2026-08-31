@@ -14,8 +14,12 @@ function assertEqual(actual, expected, label) {
   if (!ok) failed++;
 }
 
-/** 載入 uploader.js，注入假的 SqcApi/SqcDB；recordExists 控制後端是否已有該筆紀錄 */
-function loadUploader({ recordExists, sessionFails, existingIds, linkNetworkFails, queryRecords, submitRecord }) {
+/**
+ * 載入 uploader.js，注入假的 SqcApi/SqcDB。
+ *   recordExists   —— 控制 attachPhotoLinks 時後端是否已有該筆紀錄（連結回寫用）
+ *   recordOnServer —— 控制 API 的 recordExists 路由；不傳 = 模擬舊後端沒有這支
+ */
+function loadUploader({ recordExists, sessionFails, existingIds, linkNetworkFails, queryRecords, submitRecord, recordOnServer }) {
   sessionFails = sessionFails || (() => false);
   existingIds = existingIds || (() => ({}));
   linkNetworkFails = linkNetworkFails || (() => false);
@@ -23,6 +27,8 @@ function loadUploader({ recordExists, sessionFails, existingIds, linkNetworkFail
   const calls = [];
   const uploads = [];
   const sessionArgs = [];
+  const queryCalls = [];
+  const existsCalls = [];
   const sandbox = {
     console, setTimeout, clearTimeout, setInterval: () => 0, clearInterval: () => {},
     navigator: { onLine: true },
@@ -38,7 +44,20 @@ function loadUploader({ recordExists, sessionFails, existingIds, linkNetworkFail
   sandbox.addEventListener = () => {};
   sandbox.SqcApi = {
     // 後端只回單檔上傳網址，不再回傳 OAuth 權杖
-    queryRecords: async (month, filter) => (queryRecords ? queryRecords(month, filter) : { records: [] }),
+    queryRecords: async (month, filter) => {
+      queryCalls.push({ month, filter });
+      return queryRecords ? queryRecords(month, filter) : { records: [] };
+    },
+    /**
+     * 只讀「紀錄ID」一欄的輕量確認。傳 recordOnServer=null 表示模擬「後端還是舊版、沒有這支」。
+     * 待送佇列在重送前用它取代 queryRecords —— queryRecords 會讀整張活頁，
+     * 送出逾時的人越多、待送佇列越多，全表讀取就越頻繁，後端被自己的重試拖垮。
+     */
+    recordExists: async (month, id) => {
+      if (!recordOnServer) throw new Error('未知動作：recordExists');
+      existsCalls.push({ month, id });
+      return { exists: recordOnServer(id) };
+    },
     submitRecord: async (rec) => (submitRecord ? submitRecord(rec) : { ok: true }),
     createUploadSessions: async (items, origin) => {
       sessionArgs.push({ items, origin });
@@ -71,7 +90,7 @@ function loadUploader({ recordExists, sessionFails, existingIds, linkNetworkFail
   vm.createContext(sandbox);
   const src = fs.readFileSync(path.join(__dirname, '..', '..', 'js', 'uploader.js'), 'utf8');
   vm.runInContext(src, sandbox, { filename: 'uploader.js' });
-  return { uploader: sandbox.SqcUploader, photos, calls, uploads, sessionArgs, recordQueue, api: sandbox.SqcApi };
+  return { uploader: sandbox.SqcUploader, photos, calls, uploads, sessionArgs, recordQueue, api: sandbox.SqcApi, queryCalls, existsCalls };
 }
 
 // enqueue() 內部會自行觸發一次未 await 的 pump()，且 pump 有 _running 互斥鎖，
@@ -191,30 +210,62 @@ const settle = () => new Promise((r) => setTimeout(r, 300));
 
   // ===== 情境8：送出失敗的紀錄要自動重送，且不可變成兩筆 =====
   const submitted = [];
-  let recordOnServer = false;
+  let onServer = false;
+  const QREC = { id: 'RQ1', status: 'pending', month: '11508', tries: 0, record: { id: 'RQ1', time: '2026-08-20 10:00' } };
   const f = loadUploader({
     recordExists: () => true,
-    queryRecords: async () => ({ records: recordOnServer ? [{ id: 'RQ1' }] : [] }),
-    submitRecord: async (rec) => { submitted.push(rec); recordOnServer = true; return { ok: true }; },
+    recordOnServer: (id) => onServer && id === 'RQ1',
+    queryRecords: async () => ({ records: onServer ? [{ id: 'RQ1' }] : [] }),
+    submitRecord: async (rec) => { submitted.push(rec); onServer = true; return { ok: true }; },
   });
   await f.api.__noop;
   // 模擬 app.html 在送出前排入佇列、但送出當下失敗
-  await f.recordQueue.set('RQ1', { id: 'RQ1', status: 'pending', month: '11508', tries: 0, record: { id: 'RQ1', time: '2026-08-20 10:00' } });
+  await f.recordQueue.set('RQ1', { ...QREC });
   await f.uploader.pumpRecords();
   assertEqual(submitted.length, 1, '待送佇列裡的紀錄應被自動重送');
   assertEqual(f.recordQueue.size, 0, '重送成功後應從佇列移除');
 
-  // 已經在後端存在時不可再送一次（避免同一筆變兩筆）
+  // 已經在後端存在時不可再送一次（避免白白佔用後端的鎖）
   submitted.length = 0;
-  recordOnServer = true;
-  f.recordQueue.set('RQ1', { id: 'RQ1', status: 'pending', month: '11508', tries: 0, record: { id: 'RQ1', time: '2026-08-20 10:00' } });
+  onServer = true;
+  f.recordQueue.set('RQ1', { ...QREC });
   await f.uploader.pumpRecords();
   assertEqual(submitted.length, 0, '後端已有同一筆(相同紀錄ID)時不可重複送出');
   assertEqual(f.recordQueue.size, 0, '確認已存在後應把佇列清掉');
 
+  /**
+   * ★ 確認這件事必須用只讀一欄的 recordExists，不可以再用 queryRecords。
+   *
+   * queryRecords 的後端實作第一行就是讀整張活頁，from/to 是讀完才過濾的 ——
+   * 送出逾時的人越多、待送佇列越多、全表讀取就越頻繁，後端被自己的重試機制拖垮，
+   * 於是更多人逾時。2026-08-28 現場多人同時卡住就是這個正回饋迴圈。
+   */
+  assertEqual(f.existsCalls.length, 2, '每次重送前都要先用 recordExists 確認');
+  assertEqual(f.existsCalls[0].id, 'RQ1', '要帶紀錄ID 過去');
+  assertEqual(f.queryCalls.length, 0, '★ 不可再用 queryRecords 做這個確認（那會讀整張活頁）');
+
+  /**
+   * 後端還是舊版、沒有 recordExists 這支時：跳過確認直接送。
+   * 這樣安全，因為 submitRecord 本身是等冪的 —— 同一個紀錄ID 只會回 {resent:true}，
+   * 不會寫成第二列（見 程式碼.gs 的 sameId 判斷）。確認只是省一次寫入嘗試，
+   * 不是正確性的必要條件；不可以因為確認失敗就把紀錄卡在佇列裡送不出去。
+   */
+  const oldSubmitted = [];
+  const h = loadUploader({
+    recordExists: () => true,
+    // 不傳 recordOnServer → API 的 recordExists 會丟「未知動作」
+    submitRecord: async (rec) => { oldSubmitted.push(rec); return { ok: true, resent: true }; },
+  });
+  h.recordQueue.set('RQ3', { id: 'RQ3', status: 'pending', month: '11508', tries: 0, record: { id: 'RQ3', time: '2026-08-20 10:00' } });
+  await h.uploader.pumpRecords();
+  assertEqual(oldSubmitted.length, 1, '舊後端沒有 recordExists 時要照送，不可卡住');
+  assertEqual(h.queryCalls.length, 0, '舊後端也不可退回去讀整張活頁');
+  assertEqual(h.recordQueue.size, 0, '送出成功後要從佇列移除');
+
   // 後端明確拒絕(例如同店本月已有紀錄) → 標記 blocked，不再無限重送
   const g = loadUploader({
     recordExists: () => true,
+    recordOnServer: () => false,
     queryRecords: async () => ({ records: [] }),
     submitRecord: async () => ({ ok: false, message: '同店本月已有紀錄' }),
   });

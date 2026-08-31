@@ -71,13 +71,27 @@ assertEqual(/setTimeout\(\(\) => ctrl\.abort\(\), TIMEOUT_MS\)/.test(API), false
 assertEqual(API.includes('if (i + 1 < maxAttempts) {'), true, '最後一次失敗後不可再多睡一輪');
 assertEqual(API.includes('const TIMEOUT_BY_ACTION'), false, '舊的單一分類已被取代，不留死碼');
 
-// ===== 2. 載入失敗時，版本號要標明是快取值 =====
-assertEqual(APP.includes("後端 {gasVer || '—'}{bootWarn ? '（上次載入時）' : ''}"), true,
-  '載入失敗時要在版本號後面標「（上次載入時）」');
+// ===== 2. 版本號來自快取時，要標明、要灰掉、而且絕不可掛「需 xxx 以上」 =====
+//   快取值有兩種來源，兩種都不可以拿去比對 NEEDS_GAS：
+//     bootWarn —— 這次載入失敗，畫面顯示的是上次的資料
+//     gasStale —— 開場那一趟還在路上，先用快取墊著（後端忙時要 30~45 秒）
+//   2026-08-28 現場踩到的是第二種：後端明明已經更新，畫面卻掛著「⚠ 需 20260828-1559 以上」，
+//   同事照著那句話去重貼一份其實已經貼好的後端。
+assertEqual(/const cachedVer = bootWarn \|\| gasStale;/.test(APP), true,
+  '兩種快取來源都要算「不是即時值」');
+assertEqual(APP.includes("後端 {gasVer || '—'}{cachedVer ? '（上次載入時）' : ''}"), true,
+  '版本號來自快取時要標「（上次載入時）」');
 assertEqual(APP.includes('這是「上次成功載入時」看到的後端版本'), true, '滑過去要說清楚那是快取值');
-assertEqual(/\{!bootWarn && gasVer && gasVer < NEEDS_GAS &&/.test(APP), true,
-  '載入失敗時不可顯示「需 xxx 以上」—— 拿快取值比對會叫人去貼一份其實已經貼好的後端');
-assertEqual(/className=\{bootWarn \? 'text-slate-400'/.test(APP), true, '快取值要灰掉，視覺上就看得出不是即時的');
+assertEqual(/const outdated = !cachedVer && gasVer && gasVer < NEEDS_GAS;/.test(APP), true,
+  '快取值不可拿去比對 NEEDS_GAS');
+assertEqual(/\{outdated && <span className="ml-1">⚠ 需 \{NEEDS_GAS\} 以上<\/span>\}/.test(APP), true,
+  '「需 xxx 以上」只在確定是即時值且真的偏舊時才出現');
+assertEqual(/className=\{cachedVer \? 'text-slate-400'/.test(APP), true, '快取值要灰掉，視覺上就看得出不是即時的');
+// 用快取墊畫面的那一行必須把 gasStale 設起來，否則上面的判斷永遠是 false
+assertEqual(/setGasVer\(cached\.b\.gasVersion \|\| '\(舊版後端\)'\); setGasStale\(true\);/.test(APP), true,
+  '套用開場快取時要標記 gasVer 不是即時值');
+assertEqual(/setGasVer\(b\.gasVersion \|\| '\(舊版後端\)'\); setGasStale\(false\);/.test(APP), true,
+  '真的連上後端拿到版本號時要解除標記');
 
 // ===== 2b. 失敗訊息要對得上原因，不可一律叫「連線不穩」 =====
 //   逾時的成因是 Google 服務回應過慢，說「連線不穩」會讓使用者去檢查自己的網路（白忙）
