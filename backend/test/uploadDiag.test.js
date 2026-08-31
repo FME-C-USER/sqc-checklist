@@ -71,8 +71,42 @@ assertEqual((CODE.match(/onClick=\{openDiag\}/g) || []).length >= 2, true,
   '藍色細條與送出後面板都要有入口（使用者卡住的那一刻就在面板上）');
 assertEqual(/來源網址：\{location\.origin\}/.test(APP), true,
   '要顯示來源網址 —— 網址不在白名單時照片會全滅，而那從伺服器端看不出來');
-assertEqual(/內容 \{p\.blobSize \? Math\.round\(p\.blobSize \/ 1024\) \+ ' KB' : '0（照片不見了）'\}/.test(APP), true,
+/**
+ * 內容大小有三種完全不同的意思，畫面必須分得出來：
+ *   有內容         → 還佔著這支手機的空間
+ *   完成且已釋放   → 檔案在雲端、本機副本已清掉（正常，而且是好事）
+ *   沒內容但未完成 → 照片在本機就不見了，只能重拍（最嚴重）
+ * 2026-08-31 之前三種長得一樣，導致從截圖完全看不出清理有沒有生效。
+ */
+assertEqual(/\{p\.hasBlob \? \(/.test(APP), true, '要用 hasBlob 分辨「還握著內容」與「已釋放」');
+assertEqual(/內容 \{Math\.round\(p\.blobSize \/ 1024\)\} KB/.test(APP), true, '還握著內容時顯示大小');
+assertEqual(/已釋放\{p\.blobSize \? '（原 ' \+ Math\.round\(p\.blobSize \/ 1024\) \+ ' KB）' : ''\}/.test(APP), true,
+  '已釋放要標明原本多大，才看得出清掉了多少');
+assertEqual(/內容 0（照片不見了）<\/span>/.test(APP), true,
   '內容 0 要用紅字標示（那是「本機就沒了」而不是網路問題）');
+/**
+ * ★ 「不見了」的判斷要看 fileId，不是 status。
+ *
+ * 兩個方向都不能錯：
+ *   用 status === 'linked' 判斷 → done / orphan 的檔案其實已經在雲端硬碟裡
+ *     （只差連結），卻會被說成「照片不見了」，現場白跑一趟重拍。
+ *   完全不判斷、一律顯示「已釋放」→ 把「照片真的沒了、只能重拍」
+ *     說成「一切正常」，那是更嚴重的方向。
+ * fileId 有值＝檔案已在雲端，這就是「本機不留也沒關係」的唯一依據。
+ */
+assertEqual(/\) : p\.fileId \? \(/.test(APP), true, '★ 「已釋放」要以 fileId（檔案已在雲端）為依據');
+assertEqual(/\) : p\.status === 'linked' \? \(/.test(APP), false,
+  '★ 不可用 status 判斷 —— done/orphan 的檔案也在雲端，會被誤報成照片不見了');
+{
+  const i = APP.indexOf('{p.hasBlob ? (');
+  const seg = APP.slice(i, APP.indexOf('</span>', APP.indexOf('照片不見了', i)));
+  assertEqual(seg.indexOf('已釋放') < seg.indexOf('照片不見了'), true,
+    '★ 順序：先判「雲端有」才落到「照片不見了」');
+}
+// 佔用總量：判斷「是不是空間問題」的唯一依據，只能算還握著 blob 的那些
+assertEqual(/diag\.filter\(p => p\.hasBlob\)\.reduce\(\(s, p\) => s \+ \(p\.blobSize \|\| 0\), 0\)/.test(APP), true,
+  '★ 佔用量只算還握著內容的（已釋放的不再佔空間）');
+assertEqual(/前端 \{APP_VERSION\}　佇列 \{diag\.length\} 筆/.test(APP), true, '要顯示版本與筆數');
 assertEqual(/這是<b>這支手機<\/b>待傳佇列的內容/.test(APP), true, '要講清楚佇列是每支手機各自獨立的');
 
 // ===== 4. 照片內容不見了要當場講清楚 =====

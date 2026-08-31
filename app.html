@@ -44,7 +44,7 @@
     const { useState, useMemo, useEffect, useRef } = React;
     // 版本字串一律用「台灣時間」的 YYYYMMDD-HHMM。與部署關卡無關 ——
     // 那道關卡看的是資安報告的檔名日期，而 GitHub runner 跑 UTC，兩者不要混在一起。
-    const APP_VERSION = '20260831-1650'; // 每次部署更新，用來確認瀏覽器跑的是哪一版（台灣時間）
+    const APP_VERSION = '20260831-1730'; // 每次部署更新，用來確認瀏覽器跑的是哪一版（台灣時間）
     // 這一版前端「至少」需要的後端版本。前後端是各自演進的，版本號本來就不會相等
     // （只改前端時後端不動，反之亦然），所以不能用「兩者相等」當健康指標 ——
     // 要比的是「線上後端有沒有舊到缺少本前端需要的 API」。
@@ -2560,8 +2560,16 @@ ${nm}
                   {/* 版本一定要在這裡：這個視窗就是給人截圖回報用的，而「他到底有沒有拿到
                       修正版」是每次回報第一個要確認的事。2026-08-31 就因為少了這一行，
                       收到截圖後還得多猜一輪。 */}
+                  {/* 佔用量是判斷「是不是空間問題」的唯一依據 ——
+                      少了它，每次回報都只能從「有幾筆、每筆幾 KB」自己加。
+                      只算還握著 blob 的（已釋放的那些不再佔空間）。 */}
                   <div className="text-xs text-slate-500 mt-2 font-mono break-all">
-                    前端 {APP_VERSION}　佇列 {diag.length} 筆<br />
+                    前端 {APP_VERSION}　佇列 {diag.length} 筆
+                    {(() => {
+                      const held = diag.filter(p => p.hasBlob).reduce((s, p) => s + (p.blobSize || 0), 0);
+                      return held ? '（佔用 ' + (held / 1048576).toFixed(1) + ' MB）' : '（未佔用空間）';
+                    })()}
+                    <br />
                     來源網址：{location.origin}
                   </div>
                   {/* 整輪失敗的原因（例如 IndexedDB 寫不進去）。這種失敗不屬於任何單一張照片，
@@ -2586,10 +2594,26 @@ ${nm}
                             </span>
                             <span className="text-slate-600">{p.where || '(無題目)'}</span>
                             {p.tries > 0 && <span className="text-slate-500">已重試 <b>{p.tries}</b> 次</span>}
-                            {/* 內容大小是關鍵：0 代表照片本身在本機就已經不見了，不是網路問題 */}
-                            <span className={p.blobSize ? 'text-slate-500' : 'text-red-700 font-bold'}>
-                              內容 {p.blobSize ? Math.round(p.blobSize / 1024) + ' KB' : '0（照片不見了）'}
-                            </span>
+                            {/**
+                              * 內容大小是這個視窗最關鍵的一欄，但它有三種完全不同的意思，
+                              * 以前全部長得一樣（都顯示成「內容 N KB」或「內容 0」）：
+                              *   還握著內容        → 佔著這支手機的空間
+                              *   本機沒了、雲端有  → 正常，而且是好事（清理過或系統自己釋放）
+                              *   本機沒了、雲端也沒 → 照片真的不見了，只能重拍（最嚴重）
+                              *
+                              * 判斷「不見了」要看 fileId 而不是 status：
+                              * done 與 orphan 的檔案其實已經在雲端硬碟裡（只差連結），
+                              * 用 status 判斷會把它們說成「照片不見了」而讓現場白跑一趟重拍。
+                              */}
+                            {p.hasBlob ? (
+                              <span className="text-slate-500">內容 {Math.round(p.blobSize / 1024)} KB</span>
+                            ) : p.fileId ? (
+                              <span className="text-slate-400">
+                                已釋放{p.blobSize ? '（原 ' + Math.round(p.blobSize / 1024) + ' KB）' : ''}
+                              </span>
+                            ) : (
+                              <span className="text-red-700 font-bold">內容 0（照片不見了）</span>
+                            )}
                           </div>
                           <div className="text-slate-400 mt-1 font-mono break-all">{p.name}</div>
                           {p.error && <div className="text-red-700 mt-1 font-mono break-all">上傳錯誤：{p.error}</div>}
