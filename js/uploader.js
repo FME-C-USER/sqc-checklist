@@ -175,15 +175,25 @@
    * 逐筆讀、逐筆寫，任何一筆失敗都跳過繼續 —— 能清幾筆是幾筆，
    * 清掉的每一筆都讓下一筆更有機會成功。
    */
+  let _sweepNeeded = true;   // 還有沒有舊資料要清（掃過一輪沒東西可清就關掉）
   async function releaseFinished() {
+    if (!_sweepNeeded) return 0;
     if (!window.SqcDB.eachPhoto) return 0;   // 舊版 db.js
     let freed = 0;
+    // 只走 linked：走全部的話，每一輪都會把 pending 那些還帶著 ~900KB blob 的
+    // 照片讀出來一次（每 15 秒一次），那正是我們要避免的記憶體壓力。
     await window.SqcDB.eachPhoto(async (p) => {
+      // 索引已經只給 linked 了，但這裡再確認一次：卸錯貨的代價是照片永久遺失，
+      // 而缺失當下已經被改善、拍不回來。索引萬一過時或實作換掉，這道才擋得住。
       if (p.status !== 'linked') return;
       if (!p.blob && !p.thumb) return;       // 已經卸過貨了
       if (await safeUpdate(released(p, 'linked'))) freed++;
-    });
-    if (freed) emit();
+    }, 'linked');
+    // 掃完一輪沒有東西可清 → 之後不必再掃。
+    // 新的照片在變成 linked 的那一刻就會卸貨（見 flushLinksIfDone），
+    // 所以「舊資料清完」之後這支就沒有工作了，留著只是每 15 秒白跑一次索引游標。
+    if (!freed) _sweepNeeded = false;
+    else emit();
     return freed;
   }
 

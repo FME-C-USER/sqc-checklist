@@ -115,21 +115,27 @@
   }
 
   /**
-   * 逐筆走訪照片佇列（游標），每筆交給 fn 處理完才前進。
+   * 逐筆走訪照片佇列，每筆交給 fn 處理完才前進。傳 status 則只走該狀態的。
    *
    * 為什麼不是 allPhotos()：那支是 getAll，會把每一張的 blob 與 thumb 一次全部
    * 讀進記憶體 —— 而呼叫這支的目的正是要清掉那些東西，用 getAll 等於在
    * 「因為空間不夠而失敗」的裝置上先把記憶體吃爆一次。
    *
-   * 讀取用獨立的唯讀交易、寫入由 fn 自己開新交易：IndexedDB 的交易會在
-   * 沒有待處理請求時自動結束，在游標中間 await 一個跨交易的寫入會讓游標失效。
-   * 所以先用游標把整份「輕量快照」收集完（不含 blob/thumb 的參照另外處理），
-   * 再逐筆呼叫 fn —— 逐筆處理才不會一次持有全部內容。
+   * status 一定要傳：清理只關心 linked，但如果走訪全部，每一輪都會把 pending
+   * 那些還帶著 ~900KB blob 的照片讀出來一次 —— 每 15 秒一次，正是我們要
+   * 避免的記憶體壓力。用 byStatus 索引的 key 游標就只會碰到該狀態的鍵。
+   *
+   * 先用 key 游標收完鍵（只有鍵，不含內容），再逐筆 get；
+   * 因為 IndexedDB 的交易在沒有待處理請求時就會自動結束，
+   * 在游標中間 await 一個跨交易的寫入會讓游標失效。
    */
-  function eachPhoto(fn) {
+  function eachPhoto(fn, status) {
     return open().then((db) => new Promise((resolve, reject) => {
       const ids = [];
-      const req = db.transaction('photoQueue', 'readonly').objectStore('photoQueue').openKeyCursor();
+      const os = db.transaction('photoQueue', 'readonly').objectStore('photoQueue');
+      const req = status === undefined
+        ? os.openKeyCursor()
+        : os.index('byStatus').openKeyCursor(IDBKeyRange.only(status));
       req.onsuccess = () => {
         const c = req.result;
         if (!c) { resolve(ids); return; }

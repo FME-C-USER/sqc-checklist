@@ -33,9 +33,15 @@ const UP = fs.readFileSync(path.join(ROOT, 'js', 'uploader.js'), 'utf8');
 const DB = fs.readFileSync(path.join(ROOT, 'js', 'db.js'), 'utf8');
 const APP = fs.readFileSync(path.join(ROOT, 'app.html'), 'utf8');
 
-/** 載入 uploader.js，注入一個會記錄「實際存了多少位元組」的假 SqcDB */
-function load(photos) {
+/**
+ * 載入 uploader.js，注入假的 SqcDB。
+ * opts.eachIgnoresStatus：讓假的 eachPhoto 不管 status 一律吐出來，
+ * 用來模擬「索引壞了／實作被換掉」，驗證 uploader 自己那道保險擋不擋得住。
+ */
+function load(photos, opts) {
+  const ignoreStatus = !!(opts && opts.eachIgnoresStatus);
   const store = new Map(photos.map((p) => [p.id, { ...p }]));
+  const visited = [];   // 清理實際碰到了哪幾筆（驗證有沒有白讀 pending 的 blob）
   const sandbox = {
     console, setTimeout, clearTimeout, setInterval: () => 0, clearInterval: () => {},
     navigator: { onLine: true },
@@ -64,16 +70,21 @@ function load(photos) {
     allPhotos: async () => Array.from(store.values()),
     pendingPhotos: async () => Array.from(store.values()).filter((p) => p.status === 'pending'),
     photosOfRecord: async (rid) => Array.from(store.values()).filter((p) => p.recordId === rid),
-    eachPhoto: async (fn) => {
+    // 真實的 eachPhoto 用 byStatus 索引過濾；假的也要照做，否則測到的不是真實契約
+    eachPhoto: async (fn, status) => {
+      visited.length = 0;
       for (const id of Array.from(store.keys())) {
         const p = store.get(id);
-        if (p) await fn({ ...p });
+        if (!p) continue;
+        if (!ignoreStatus && status !== undefined && p.status !== status) continue;
+        visited.push(id);
+        await fn({ ...p });
       }
     },
   };
   vm.createContext(sandbox);
   vm.runInContext(UP, sandbox, { filename: 'uploader.js' });
-  return { uploader: sandbox.SqcUploader, store };
+  return { uploader: sandbox.SqcUploader, store, visited };
 }
 
 /** 佇列目前佔多少位元組（blob + thumb 字串） */
@@ -113,13 +124,14 @@ const done = (id) => ({
       { ...done('o'), status: 'orphan' },
     ];
     const t = load(keep);
-    // 只跑清理，不跑上傳（上傳會把 pending 傳掉，看不出清理有沒有誤傷）
-    await t.uploader.releaseFinished ? null : null;
     await t.uploader.pump();
     await new Promise((r) => setTimeout(r, 30));
 
     assertEqual(!!t.store.get('d').blob, true, '★ done（已上傳、只差連結）不可卸貨');
     assertEqual(!!t.store.get('o').blob, true, '★ orphan（待人工處理）不可卸貨');
+    // 清理只該碰 linked：走全部的話，每 15 秒就會把 pending 那些 ~900KB 的 blob
+    // 讀出來一次，正是我們要避免的記憶體壓力
+    assertEqual(t.visited, [], '★ 沒有 linked 時清理不該讀任何一筆');
   }
 
   // ===== 3. 卸過貨的不要一直重寫 =====
@@ -132,6 +144,26 @@ const done = (id) => ({
     await new Promise((r) => setTimeout(r, 30));
     assertEqual(writes, 0, '已經卸過貨的不該再寫一次（每次 pump 都重寫等於白費配額與時間）');
   }
+
+  /**
+   * ===== 3b. ★ 雙重保險：索引萬一沒過濾好，仍不可卸掉未完成的照片 =====
+   *
+   * releaseFinished 已經用 byStatus 索引只取 linked，但這裡刻意讓 eachPhoto
+   * 把所有狀態都吐出來（模擬索引過時或實作被換掉），驗證 uploader 自己那道
+   * `if (p.status !== 'linked') return;` 擋不擋得住。
+   * 為什麼值得多一道：卸錯貨等於照片永久遺失，而缺失當下已經被改善、拍不回來。
+   */
+  {
+    const t = load([
+      { ...done('o'), status: 'orphan' },
+      { ...done('d'), status: 'done' },
+    ], { eachIgnoresStatus: true });
+    await t.uploader.pump();
+    await new Promise((r) => setTimeout(r, 30));
+    assertEqual(t.visited.length, 2, '前提：這個情境下 eachPhoto 確實把非 linked 的也吐出來了');
+    assertEqual(!!t.store.get('o').blob, true, '★ 即使索引沒過濾，orphan 仍不可被卸貨');
+    assertEqual(!!t.store.get('d').blob, true, '★ 即使索引沒過濾，done 仍不可被卸貨');
+  }
 })().then(() => {
   // ===== 4. 原始碼層面：確認機制真的接上去了 =====
   assertEqual(/function released\(photo, status\)/.test(UP), true, '要有卸貨函式');
@@ -142,12 +174,18 @@ const done = (id) => ({
     '要先騰出空間再做事：佇列滿到寫不進去的話，後面每一步都會失敗');
 
   // 清理必須用游標逐筆，不可用 getAll —— 那會把要清掉的東西先全部讀進記憶體
-  assertEqual(/openKeyCursor\(\)/.test(DB), true, '★ eachPhoto 要用 key 游標，不可 getAll');
   {
-    const fn = /function eachPhoto\(fn\)[\s\S]*?\n  \}/.exec(DB);
+    const fn = /function eachPhoto\(fn, status\)[\s\S]*?\n  \}/.exec(DB);
     assertEqual(!!fn, true, '應能取出 eachPhoto');
     assertEqual(/getAll/.test(fn[0]), false, '★ eachPhoto 內不可出現 getAll');
+    assertEqual(/openKeyCursor/.test(fn[0]), true, '★ 要用 key 游標（只讀鍵，不讀內容）');
+    assertEqual(/index\('byStatus'\)\.openKeyCursor\(IDBKeyRange\.only\(status\)\)/.test(fn[0]), true,
+      '★ 要用 byStatus 索引過濾 —— 走全部的話每 15 秒會把 pending 的 blob 全讀一次');
   }
+  assertEqual(/if \(p\.status !== 'linked'\) return;/.test(UP), true,
+    '★ uploader 自己也要再確認狀態：卸錯貨等於照片永久遺失，不能只靠索引');
+  assertEqual(/if \(!freed\) _sweepNeeded = false;/.test(UP), true,
+    '舊資料清完後不必再掃 —— 新照片在變成 linked 的當下就卸貨了');
 
   // ===== 5. 縮圖要真的是縮圖 =====
   assertEqual(/const THUMB_EDGE = 320/.test(APP) || /THUMB_EDGE = 320/.test(APP), true, '要有縮圖尺寸上限');
