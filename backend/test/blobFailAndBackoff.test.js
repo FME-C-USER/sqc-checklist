@@ -95,7 +95,15 @@ const PHOTO = (over) => ({
     assertEqual(t.unhandled, [], '★ 也不可留下未捕捉的 rejection（setInterval 呼叫的 pump 沒有人 await）');
     // 原因仍然要有地方看得到，不能就這樣消失
     const c = await t.uploader.counts();
-    assertEqual(/Blob/.test(c.lastError || ''), true, '整輪失敗的原因要能從 counts() 取得，供診斷視窗顯示');
+    assertEqual(/Blob/.test(c.lastError || ''), true, '整輪失敗的原因要能從 counts() 取得');
+    assertEqual(/儲存空間不足/.test(c.lastError || ''), true, '要用現場看得懂的話說明，不能只丟英文原文');
+    // ★ 光是回傳還不夠 —— 一定要有地方把它畫出來，否則等於沒做
+    assertEqual(/\{pendingUp && pendingUp\.lastError && \(/.test(APP), true,
+      '★ 診斷視窗要顯示整體錯誤（這種失敗不屬於任何單一張照片，沒畫出來就完全看不到）');
+    assertEqual(/<b>整體錯誤：<\/b>\{pendingUp\.lastError\}/.test(APP), true, '要標示得出來這是整體性的錯誤');
+    // pendingUp 來自 counts()（有 lastError）；postStat 來自 countsOfRecord()（沒有），不可搞混
+    assertEqual(/\{postStat && postStat\.lastError/.test(APP), false,
+      'lastError 只在 counts() 裡，用 postStat 會永遠是 undefined');
   }
 
   // ===== 2. 照片佇列第一輪要套用退避 =====

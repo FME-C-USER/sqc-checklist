@@ -537,7 +537,45 @@ function createUploadSessions(items, origin) {
 
 /** 依 [月份, 題目, 區域...] 取得目標資料夾 ID（自動建立、Script Properties 快取）
  *  多人同時是「該路徑第一次上傳」時，用鎖避免各自建出同名資料夾 */
+/**
+ * 檢查用戶端送來的資料夾路徑是否在合理範圍內。
+ *
+ * pathParts 完全由用戶端決定，而 getUploadFolderId 會照著它在雲端硬碟建資料夾，
+ * 並把結果寫進 ScriptProperties 當快取。沒有任何上限的話，一個已登入的一般點檢人員
+ * 就能無限建立資料夾、並把 ScriptProperties 塞爆（總量上限 500KB、單一鍵值 9KB）——
+ * 快取一壞，所有人的照片上傳都會受影響。
+ *
+ * 只限制「層數」與「長度」，不改寫任何字元：
+ * 題目名稱本來就可能含有斜線（例如「14.4˚C/18˚C/中島櫃」），若在這裡清理掉，
+ * 算出來的資料夾就跟先前已經上傳的那些對不起來，等於把舊照片變成孤兒。
+ */
+var PATH_MAX_DEPTH = 8;     // 實際最深是 4 層（月份/類別/題目/缺失），留餘裕
+var PATH_MAX_PART = 120;    // 單層名稱長度
+var PATH_MAX_TOTAL = 400;   // 組成的快取鍵長度
+function safePathParts_(pathParts) {
+  if (!pathParts || Object.prototype.toString.call(pathParts) !== '[object Array]') {
+    throw new Error('照片路徑格式不正確');
+  }
+  if (pathParts.length > PATH_MAX_DEPTH) {
+    throw new Error('照片路徑層數過多（上限 ' + PATH_MAX_DEPTH + ' 層）');
+  }
+  var out = [];
+  for (var i = 0; i < pathParts.length; i++) {
+    var part = String(pathParts[i] == null ? '' : pathParts[i]).trim();
+    if (!part) throw new Error('照片路徑中有空白的層級');
+    if (part.length > PATH_MAX_PART) {
+      throw new Error('照片路徑的名稱過長（上限 ' + PATH_MAX_PART + ' 字）');
+    }
+    out.push(part);
+  }
+  if (out.join('/').length > PATH_MAX_TOTAL) {
+    throw new Error('照片路徑整體過長（上限 ' + PATH_MAX_TOTAL + ' 字）');
+  }
+  return out;
+}
+
 function getUploadFolderId(pathParts) {
+  pathParts = safePathParts_(pathParts);
   var props = PropertiesService.getScriptProperties();
   var key = 'folder:' + pathParts.join('/');
   var cached = props.getProperty(key);

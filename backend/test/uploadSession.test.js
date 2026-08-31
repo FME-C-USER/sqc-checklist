@@ -212,5 +212,58 @@ lookups = [];
 post('createUploadSessions', { items: [items[0]], origin: 'https://fme-c-user.github.io' }, token);
 assertEqual(lookups, ['a.jpg'], '沒帶 retry 的舊版前端要維持安全行為(照樣查詢)');
 
+/**
+ * ===== 14. 資料夾路徑要有上限（2026-08-31 資安檢測 Medium）=====
+ *
+ * pathParts 完全由用戶端決定，而後端會照著它在雲端硬碟建資料夾、
+ * 並把結果寫進 ScriptProperties 當快取（總量上限 500KB）。
+ * 沒有上限的話，一個已登入的一般點檢人員就能無限建立資料夾、把快取塞爆，
+ * 而快取一壞，所有人的照片上傳都會受影響。
+ */
+const okOrigin = 'https://fme-c-user.github.io';
+const sess1 = (pathParts) => post('createUploadSessions',
+  { items: [{ pathParts: pathParts, name: 'x.jpg' }], origin: okOrigin }, token);
+
+{
+  const deep = [];
+  for (let i = 0; i < 40; i++) deep.push('lv' + i);
+  const r = sess1(deep);
+  assertEqual(r.ok, false, '★ 層數過多要被擋下來（否則可無限建立資料夾）');
+  assertEqual(/層數過多/.test(r.error || ''), true, '要說清楚是層數的問題');
+}
+{
+  const r = sess1(['115年08月', 'x'.repeat(5000), '缺失']);
+  assertEqual(r.ok, false, '★ 單層名稱過長要被擋（ScriptProperties 單一鍵值上限 9KB）');
+}
+{
+  const many = [];
+  for (let i = 0; i < 8; i++) many.push('n'.repeat(100));
+  const r = sess1(many);
+  assertEqual(r.ok, false, '★ 層數與單層都合格、但加起來過長也要擋');
+}
+{
+  const r = sess1(['115年08月', '   ', '缺失']);
+  assertEqual(r.ok, false, '空白層級要擋（會建出無名資料夾）');
+}
+{
+  const r = post('createUploadSessions', { items: [{ pathParts: 'not-an-array', name: 'x.jpg' }], origin: okOrigin }, token);
+  assertEqual(r.ok, false, '非陣列要擋，不可讓它走到 DriveApp');
+}
+
+/**
+ * ★ 反面同樣重要：真實資料一定要照過。
+ * 題目名稱本來就可能含有斜線（例如「14.4˚C/18˚C/中島櫃」）——
+ * 如果在這裡把字元清掉，算出來的資料夾就跟先前已上傳的那些對不起來，
+ * 等於把舊照片全部變成孤兒。所以只限制長度與層數，不改寫字元。
+ */
+{
+  const r = sess1(['115年08月', '14.4˚C/18˚C/中島櫃', '缺失']);
+  assertEqual(r.ok, true, '★ 含斜線的題目名稱必須照常可用，不可被清理');
+}
+{
+  const r = sess1(['115年08月', '廁所觀察', '洗手台是否清潔', '缺失']);
+  assertEqual(r.ok, true, '實際最深的 4 層路徑要能通過');
+}
+
 console.log(failed === 0 ? '\n✅ 全部通過' : `\n❌ ${failed} 項失敗`);
 process.exit(failed === 0 ? 0 : 1);

@@ -1250,7 +1250,7 @@
       const [gasVer, setGasVer] = useState('');     // 後端版本；貼上 程式碼.gs 卻沒重新部署時，這裡不會變
       const [gasStale, setGasStale] = useState(false); // gasVer 目前來自開場快取（尚未真的連上後端）
       // 背景待處理量：照片沒傳完就關掉 App 會延後上傳，點檢員必須看得到
-      const [pendingUp, setPendingUp] = useState({ pending: 0, done: 0, unfinished: 0, orphan: 0, queuedRecords: 0, busy: false });
+      const [pendingUp, setPendingUp] = useState({ pending: 0, done: 0, unfinished: 0, orphan: 0, queuedRecords: 0, busy: false, lastError: '' });
       useEffect(() => {
         if (!window.SqcUploader) return;
         let alive = true;
@@ -2496,6 +2496,13 @@ ${nm}
                     <button onClick={() => setDiag(null)} className="text-slate-400 hover:text-slate-600 text-xl leading-none px-1">×</button>
                   </div>
                   <div className="text-xs text-slate-500 mt-2 font-mono break-all">來源網址：{location.origin}</div>
+                  {/* 整輪失敗的原因（例如 IndexedDB 寫不進去）。這種失敗不屬於任何單一張照片，
+                      沒有這一塊就完全看不到 —— 而它正是「所有照片都停住」時最該先知道的事。 */}
+                  {pendingUp && pendingUp.lastError && (
+                    <div className="mt-2 text-xs bg-red-50 border border-red-200 text-red-700 rounded-lg p-2.5 break-all">
+                      <b>整體錯誤：</b>{pendingUp.lastError}
+                    </div>
+                  )}
                   {!diag.length ? (
                     <p className="text-sm text-emerald-700 mt-3">佇列是空的 —— 這支手機沒有待傳的照片。</p>
                   ) : (
