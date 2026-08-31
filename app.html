@@ -44,7 +44,7 @@
     const { useState, useMemo, useEffect, useRef } = React;
     // 版本字串一律用「台灣時間」的 YYYYMMDD-HHMM。與部署關卡無關 ——
     // 那道關卡看的是資安報告的檔名日期，而 GitHub runner 跑 UTC，兩者不要混在一起。
-    const APP_VERSION = '20260831-1400'; // 每次部署更新，用來確認瀏覽器跑的是哪一版（台灣時間）
+    const APP_VERSION = '20260831-1510'; // 每次部署更新，用來確認瀏覽器跑的是哪一版（台灣時間）
     // 這一版前端「至少」需要的後端版本。前後端是各自演進的，版本號本來就不會相等
     // （只改前端時後端不動，反之亦然），所以不能用「兩者相等」當健康指標 ——
     // 要比的是「線上後端有沒有舊到缺少本前端需要的 API」。
@@ -3130,7 +3130,11 @@ ${nm}
                           </td>
                           <td className="text-slate-500">{r.section}</td><td className="text-slate-500">{r.staff}</td>
                           <td className={"font-bold " + (r.total < PASS_SCORE ? "text-red-600" : "")}>{r.total}</td>
-                          <td className="px-3 whitespace-nowrap"><button onClick={() => openEdit(r)} className="text-xs text-blue-600 mr-2">編輯</button><button onClick={() => delRecord(r.id, r.version, r.time)} className="text-xs text-red-600">刪除</button></td>
+                          <td className="px-3 whitespace-nowrap"><button onClick={() => openEdit(r)} className="text-xs text-blue-600 mr-2">編輯</button>{/* 點檢時間要從 _raw 拿：清單用的物件是映射過的，只有 date 沒有 time。
+    原本寫 r.time 得到 undefined → 前端的 isCrossWeek 判成「同一週」→ 不問密碼
+    → 後端擋下，使用者只看到「需輸入正確密碼」卻永遠沒有輸入的機會。
+    跟 openEdit 一致，都取 (row._raw || row).time。 */}
+<button onClick={() => delRecord(r.id, r.version, (r._raw || r).time)} className="text-xs text-red-600">刪除</button></td>
                         </tr>
                       ))}
                       {filtered.length === 0 && <tr><td colSpan="6" className="py-8 text-center text-slate-400">無符合條件的紀錄</td></tr>}
