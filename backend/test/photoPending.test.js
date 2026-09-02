@@ -38,7 +38,21 @@ assertEqual(P({ a: [{ fileId: 'F' }] }), 0, '沒有檔名的雜項不計（不�
 // ===== 2. 同步狀態欄要反映實情（原本寫死「已同步」等於騙人）=====
 assertEqual(ctx.syncStateOf({ a: [{ name: 'x.jpg', fileId: 'F' }] }), '已同步', '齊了就是已同步');
 assertEqual(ctx.syncStateOf({ a: ['x.jpg', 'y.jpg'] }), '照片未齊（缺2張）', '未齊要寫出缺幾張');
-assertEqual(ctx.syncStateOf({}), '已同步', '沒有照片的紀錄不算未齊');
+/**
+ * ★ 「一張都沒有」不是「都齊了」。
+ *
+ * 兩者的 photoPendingCount 都是 0，於是空照片的紀錄以前會被寫成「已同步」，
+ * 清單上也沒有任何警示 —— 2026-09-01 板橋金鑽店就是這個形狀：
+ * 清單乾淨、報表卻完全沒有照片連結，從畫面上完全看不出哪裡不對。
+ * 紙本點檢表對所有店（含不可拍照店）都是必填，所以空照片一定是異常。
+ */
+assertEqual(ctx.syncStateOf({}), '⚠ 無照片', '★ 一張照片都沒有要視為異常，不可寫成「已同步」');
+assertEqual(ctx.syncStateOf({ a: [] }), '⚠ 無照片', '有鍵但陣列是空的也一樣');
+assertEqual(ctx.photoStateOf({}), 'none', 'photoStateOf：空的是 none');
+assertEqual(ctx.photoStateOf({ a: ['x.jpg'] }), 'pending', '有檔名沒 fileId 是 pending');
+assertEqual(ctx.photoStateOf({ a: [{ name: 'x.jpg', fileId: 'F' }] }), 'ok', '都有 fileId 是 ok');
+// pendingPhotos 的語意不變（它是「缺幾張」的數字），none 另外用 photoState 傳出去
+assertEqual(P({}), 0, 'photoPendingCount 對空照片仍回 0（語意是缺幾張，不是有沒有照片）');
 
 // ===== 3. 送出→回寫連結 的整段流程 =====
 const rec = (id, photos) => ({

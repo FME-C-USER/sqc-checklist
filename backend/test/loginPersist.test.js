@@ -136,7 +136,17 @@ const USER = { name: '林秀真', empId: 'E1', role: '管理者', dept: '一部'
   const appCode = strip(APP), idxCode = strip(IDX);
   assertEqual(/sessionStorage/.test(appCode), false,
     '★ app.html 不可直接碰 sessionStorage —— 一定要走 SqcSession，否則升級搬移會漏');
-  assertEqual(/sessionStorage/.test(idxCode), false, '★ index.html 也不可直接碰');
+  /**
+   * index.html 允許一條「有防護的退路」：Service Worker 有可能讓這一頁是新版、
+   * js/api.js 卻是舊版快取，而這裡是登入路徑 —— 一拋錯就完全進不來。
+   * 退路寫回舊位置，新版 app.html 讀取時會把它搬過來，所以仍然接得上。
+   * 但正常路徑一定要走 SqcSession，且退路必須在 else 分支裡（不可無條件執行）。
+   */
+  // \s* 會跨行，所以換行與縮排都涵蓋在內
+  assertEqual(/if \(window\.SqcSession\) window\.SqcSession\.write\(r\.user\);\s*else sessionStorage\.setItem\('sqc_user'/.test(idxCode), true,
+    '★ index.html 只能在 SqcSession 不存在時才退回 sessionStorage');
+  assertEqual((idxCode.match(/sessionStorage/g) || []).length, 1,
+    '★ 退路只能有那一處，不可有其他地方直接碰 sessionStorage');
   assertEqual(/window\.SqcSession\.write\(r\.user\)/.test(idxCode), true, '登入成功要用 SqcSession.write');
   assertEqual(/const currentUser = \(window\.SqcSession \? SqcSession\.read\(\) : \{\}\) \|\| \{\};/.test(appCode), true,
     'app.html 要用 SqcSession.read');

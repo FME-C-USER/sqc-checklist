@@ -88,9 +88,17 @@
         // 由 GAS 後端呼叫 CheckUserId 驗證並取得角色
         const r = await window.SqcApi.login(userId, password);
         if (r.ok) {
-          // 存在 localStorage（見 api.js 的 SqcSession）：點檢一天要跑十幾家店，
-          // 存 sessionStorage 的話關掉分頁或瀏覽器就得重新登入
-          window.SqcSession.write(r.user);
+          /**
+           * 存在 localStorage（見 api.js 的 SqcSession）：點檢一天要跑十幾家店，
+           * 存 sessionStorage 的話關掉分頁或瀏覽器就得重新登入。
+           *
+           * 要防 SqcSession 不存在：Service Worker 有可能讓這一頁是新版、js/api.js
+           * 卻是舊版的快取（兩檔都在殼層清單裡，理論上同世代，但部分命中並非不可能）。
+           * 這裡是登入路徑 —— 一拋錯就完全進不來，所以留一條寫回舊位置的退路：
+           * app.html 的新版讀取會把它搬到新位置，等於仍然接得上。
+           */
+          if (window.SqcSession) window.SqcSession.write(r.user);
+          else sessionStorage.setItem('sqc_user', JSON.stringify(r.user));
           window.location.href = 'app.html';
         } else {
           showError(r.message || '登入失敗');

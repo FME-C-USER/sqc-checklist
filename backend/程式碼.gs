@@ -10,7 +10,7 @@
 // 後端版本：每次修改本檔就更新，並於前端「資料更新時間」旁顯示。
 // 用途：貼上程式碼後若忘記「部署 → 管理部署作業 → 新版本」，畫面上的後端版本就不會變，
 //       可立即分辨是「沒貼上」「貼了但沒部署」還是「已生效」。
-var GAS_VERSION = '20260831-1650';   // 台灣時間 YYYYMMDD-HHMM
+var GAS_VERSION = '20260902-1226';   // 台灣時間 YYYYMMDD-HHMM
 
 var SPREADSHEET_ID = '1GRZZsZRgakMGENspOxmlx96NfckC8UYOe0ipuNNEoh0';
 var DRIVE_ROOT_ID  = '122nQjldImn5Zh5AUguxZF0YzobThgdc9';
@@ -1489,10 +1489,38 @@ function photoPendingCount(photos) {
   });
   return n;
 }
+/**
+ * 照片JSON 裡到底有沒有東西。
+ *
+ * 「一張都沒有」和「都齊了」是完全不同的兩件事，但兩者的 photoPendingCount 都是 0 ——
+ * 於是一筆照片全空的紀錄會被寫成「已同步」，清單上也沒有任何警示。
+ * 2026-09-01 板橋金鑽店就是這個形狀：清單沒有「缺N張」，報表卻沒有照片連結。
+ *
+ * 紙本點檢表對所有店（含不可拍照店）都是必填，所以照片JSON 為空一定是異常。
+ */
+function photoTotalCount(photos) {
+  var n = 0;
+  Object.keys(photos || {}).forEach(function (key) {
+    (photos[key] || []).forEach(function (e) {
+      var name = (typeof e === 'string') ? e : (e && e.name);
+      if (name) n++;
+    });
+  });
+  return n;
+}
+
+/** 照片狀態：'none'＝一張都沒有（異常）、'pending'＝有但連結沒齊、'ok'＝齊了 */
+function photoStateOf(photos) {
+  if (!photoTotalCount(photos)) return 'none';
+  return photoPendingCount(photos) ? 'pending' : 'ok';
+}
+
 /** 同步狀態欄的文字（寫死「已同步」等於騙人，要反映照片是否齊了） */
 function syncStateOf(photos) {
-  var n = photoPendingCount(photos);
-  return n ? ('照片未齊（缺' + n + '張）') : '已同步';
+  var st = photoStateOf(photos);
+  if (st === 'none') return '⚠ 無照片';
+  if (st === 'pending') return '照片未齊（缺' + photoPendingCount(photos) + '張）';
+  return '已同步';
 }
 
 /** 照片項目清單 → 逗號分隔的檔名字串（項目可能是字串或 {name, fileId} 物件） */
@@ -1531,6 +1559,8 @@ function rowToRecord(r) {
   return {
     // 現算而不是讀「同步狀態」欄：舊紀錄那一欄寫死「已同步」，直接沿用會漏掉全部既有問題
     pendingPhotos: photoPendingCount(photos),
+    // 'none' 要單獨傳出去：它的 pendingPhotos 也是 0，光看數字分不出「都齊了」和「一張都沒有」
+    photoState: photoStateOf(photos),
     id: r['紀錄ID'], time: toDateTimeStr(r['點檢時間']), dept: r['部別'], section: r['課別'], empId: r['員編'],
     staffName: r['點檢人員'], storeCode: r['店號'], storeName: r['店名'], storeType: r['店鋪型態'], note: r['備註'],
     month: r['題庫版本'], total: r['合計得分'], grade: r['等第'], staffCount: r['在店店員人數'],

@@ -44,7 +44,7 @@
     const { useState, useMemo, useEffect, useRef } = React;
     // 版本字串一律用「台灣時間」的 YYYYMMDD-HHMM。與部署關卡無關 ——
     // 那道關卡看的是資安報告的檔名日期，而 GitHub runner 跑 UTC，兩者不要混在一起。
-    const APP_VERSION = '20260902-0912'; // 每次部署更新，用來確認瀏覽器跑的是哪一版（台灣時間）
+    const APP_VERSION = '20260902-1215'; // 每次部署更新，用來確認瀏覽器跑的是哪一版（台灣時間）
     // 這一版前端「至少」需要的後端版本。前後端是各自演進的，版本號本來就不會相等
     // （只改前端時後端不動，反之亦然），所以不能用「兩者相等」當健康指標 ——
     // 要比的是「線上後端有沒有舊到缺少本前端需要的 API」。
@@ -61,7 +61,8 @@
     // 後端會被自己的重試機制拖垮，2026-08-28 現場就是這個形狀）
     // 20260831-1650 起還需要：連線階段的滑動效期（getSession 每次通過驗證就把
     // 6 小時重新計算）。沒有它的話，早上登入的人下午會突然被踢出去。
-    const NEEDS_GAS = '20260831-1650';
+    // 20260902 起還需要：photoState（照片JSON 為空要視為異常，不可寫成「已同步」）
+    const NEEDS_GAS = '20260902-1226';
 
     /**
      * 從 LINE 等 App 內建瀏覽器開啟時，回傳那個 App 的名字，否則空字串。
@@ -422,6 +423,28 @@
     // 依「照片資料夾名稱」比對取連結，不依賴觀察題活頁的題目名稱與上傳當時完全一致
     const groupLinks = (groups, pred) => Object.keys(groups || {}).filter(pred).reduce((acc, k) => acc.concat(groups[k] || []), []);
     const toiletDefectLinks = (r) => groupLinks(r.photoGroups, k => k.indexOf('廁所觀察/') === 0);
+    /**
+     * 缺失照片的連結。
+     *
+     * 原本只有 photoGroups[`${it.name}/缺失`] 這一條精準比對，而那個鍵是「送出當時的
+     * 題目名稱」，報表用的卻是「產出報表當時的題庫」。兩者只要有一個字不同，連結就會
+     * 靜默消失 —— 而且完全沒有警訊：pendingPhotos 是 0（照片確實有 fileId）、
+     * 同步狀態是「已同步」。2026-09-01 板橋金鑽店就是在換月匯入新題庫的那天出現這個現象。
+     *
+     * 重點觀察題早就有「用題號前綴退回比對」的退路，紙本與滿分照片用固定字串，
+     * 只有缺失照片沒有退路 —— 補上同樣的做法：題目名稱一律是「N.題名」或「N-M.題名」，
+     * 題號比題名穩定得多（改名很常見，改號等於換一題）。
+     */
+    const itemNoOf = (name) => (String(name || '').match(/^(\d+(?:-\d+)?)\./) || [])[1] || '';
+    const itemDefectLinks = (r, it) => {
+      const groups = r.photoGroups || {};
+      const exact = groups[`${it.name}/缺失`];
+      if (exact && exact.length) return exact;
+      const no = itemNoOf(it.name);
+      if (!no) return [];
+      // 只認「同一個題號 + 以 /缺失 結尾」，避免 1. 誤中 10.／15-1. 誤中 15.
+      return groupLinks(groups, k => k.indexOf(no + '.') === 0 && /\/缺失$/.test(k));
+    };
     // 重點觀察題照片：先用題名精準比對，再退回用「重點觀察題N」前綴（題名被改過時仍找得到）
     const keyObsLinks = (r, obsItem, idx) => {
       const groups = r.photoGroups || {};
@@ -486,7 +509,7 @@
         items.forEach(it => {
           line.push(r.itemScores[it.id]);
           if (it.type === 'subdeduct') line.push(r.itemExtra[it.id] || '');
-          line.push(joinLinks((r.photoGroups || {})[`${it.name}/缺失`]));
+          line.push(joinLinks(itemDefectLinks(r, it)));
         });
         const toilet = (r.觀察 || {}).toilet || {}, toiletReasons = (r.觀察 || {}).toiletReasons || {};
         const hasToilet = toilet['O1'] && toilet['O1'] !== '無';
@@ -1632,6 +1655,70 @@ ${nm}
       const [existingPhotos, setExistingPhotos] = useState({});      // 編輯時保留原有照片JSON
       const [editPass, setEditPass] = useState('');                  // 跨週編輯用的密碼（後端會再驗一次）
       const [editOrigStaff, setEditOrigStaff] = useState(null);      // 該筆原本的點檢人員（員編已不在名單時沿用，不擋住編輯）
+
+      /**
+       * ===== 自動更新 =====
+       *
+       * 為什麼需要：加到主畫面的 PWA 只要不關、不重新整理，可以掛好幾天；
+       * 手機也常把分頁留在背景。結果是「修好了但現場沒拿到」——
+       * 2026-08-31 那一整天的修正，隔天還有人停在舊版。
+       * 而舊版遇到連線階段過期會直接跳轉回登入頁，正在填的表單當場消失。
+       *
+       * 偵測方式：用 Range 只抓 app.html 的開頭 4KB 比對 APP_VERSION
+       * （它在第 2767 位元組）。不另外放 version.json 是刻意的 ——
+       * 版本號只有一個來源就不會走味；伺服器若忽略 Range，最壞情況是抓整份，結果一樣正確。
+       *
+       * 更新時機：絕不打斷正在點檢的人。表單只要有任何內容就先不動，
+       * 等送出完成、面板關掉之後才重新載入。
+       * 重新載入不會遺失照片（IndexedDB）也不會遺失待送紀錄（recordQueue），
+       * 唯一會丟的就是「填了還沒送出的表單」，所以判斷寧可保守。
+       */
+      const [newVer, setNewVer] = useState('');
+      const VER_CHECK_MS = 600000;                           // 10 分鐘
+      useEffect(() => {
+        if (!CONFIGURED) return;
+        let alive = true;
+        const check = async () => {
+          if (!alive || !navigator.onLine) return;
+          try {
+            const res = await fetch('app.html?v=' + Date.now(), {
+              cache: 'no-store', headers: { Range: 'bytes=0-4095' },
+            });
+            if (!res.ok && res.status !== 206) return;
+            const head = await res.text();
+            const m = head.match(/const APP_VERSION = '([0-9-]+)'/);
+            if (alive && m && m[1] && m[1] !== APP_VERSION) setNewVer(m[1]);
+          } catch (e) { /* 抓不到就下一輪再說，絕不打擾使用者 */ }
+        };
+        const t = setInterval(check, VER_CHECK_MS);
+        const onVis = () => { if (document.visibilityState === 'visible') check(); };
+        document.addEventListener('visibilitychange', onVis);
+        const first = setTimeout(check, 30000);   // 開場先讓 App 載入完，30 秒後才問
+        return () => { alive = false; clearInterval(t); clearTimeout(first); document.removeEventListener('visibilitychange', onVis); };
+      }, []);
+
+      /**
+       * 現在重新載入會不會弄掉東西？
+       *
+       * 判斷一律從嚴：只要「看起來像有人正在做一家店」就算有內容。
+       * 判斷錯的代價是把同事填好的一整份表單弄掉，而少更新一次完全沒有損失，
+       * 所以任何有疑慮的狀態都算 dirty。
+       * 點檢時間有預設值，不能拿它當依據。
+       */
+      const anyPhotos = (obj) => Object.keys(obj || {}).some(k => (obj[k] || []).length > 0);
+      const formDirty = !!(
+        editingRecordId || submitting || postSubmit
+        || basic.storeCode || basic.customStore
+        || Object.keys(scores).length || Object.keys(toilet).length
+        || paperForm.length || anyPhotos(keyObs) || anyPhotos(toiletPhotos) || anyPhotos(perfectPhotos)
+      );
+      // 有新版又沒有未送出內容 → 直接更新。有內容就記下來，等送出完成、面板關掉再說。
+      useEffect(() => {
+        if (!newVer) return;
+        if (formDirty) return;   // 橫幅直接讀 formDirty，狀態變乾淨時這支會自己再跑一次
+        const t = setTimeout(() => location.reload(), 4000);   // 留 4 秒讓人看到訊息、也能按「稍後」
+        return () => clearTimeout(t);
+      }, [newVer, formDirty]);
       /**
        * 送出被必填擋下時，要能直接帶使用者到出問題的地方。
        * 原本點檢作業頁的 8 項檢查只有 alert 就 return —— 而那一頁很長
@@ -1816,7 +1903,7 @@ ${nm}
             setRecords(all.map(x => ({
               id: x.id, date: String(x.time).slice(0, 10), store: x.storeName, section: x.section,
               staff: x.staffName, version: x.month, total: Number(x.total), grade: x.grade,
-              pendingPhotos: Number(x.pendingPhotos) || 0, _raw: x,
+              pendingPhotos: Number(x.pendingPhotos) || 0, photoState: x.photoState || '', _raw: x,
             })));
             // 連線階段過期時不可以說「請重新查詢一次」—— 重查一定也是失敗，
             // 而 2026-08-31 現場就是照著這句話一直重查。這種情況要講的是「重新登入」，
@@ -2859,6 +2946,28 @@ ${nm}
                 <button onClick={() => setHideMismatch(true)} className="text-amber-500 shrink-0">✕</button>
               </div>
             )}
+            {/* 有新版本。表單有內容時只提示不動作，等送出完成才更新（見 formDirty 的說明）。 */}
+            {newVer && (
+              <div className="bg-sky-50 border-2 border-sky-300 text-sky-900 text-sm rounded-lg px-3 py-2.5">
+                <div className="font-bold mb-1">
+                  {formDirty ? '🔄 有新版本，送出後會自動更新' : '🔄 正在更新到新版本…'}
+                </div>
+                <div className="leading-relaxed">
+                  {formDirty
+                    ? '目前有還沒送出的內容，所以先不動它。等這一家送出完成後會自動重新載入，不會打斷你。'
+                    : '幾秒後會自動重新載入。已拍好的照片與待送紀錄都不受影響。'}
+                  {' '}（{APP_VERSION} → {newVer}）
+                </div>
+                <div className="flex flex-wrap gap-2 mt-2">
+                  <button onClick={() => location.reload()}
+                    className="px-3 py-1.5 bg-sky-600 text-white rounded-lg font-semibold">立即更新</button>
+                  {/* 「稍後」只清掉這一輪的提示；下一次版本檢查（10 分鐘）還會再問，
+                      所以不會變成「按一次就永遠不更新」。 */}
+                  <button onClick={() => setNewVer('')}
+                    className="px-3 py-1.5 bg-white border border-sky-300 text-sky-700 rounded-lg">稍後</button>
+                </div>
+              </div>
+            )}
             {/* 連線階段過期：不自己跳轉，讓使用者先把手上的事處理完再登入。
                 位置放在最上面 —— 過期後任何操作都會失敗，這件事優先於其他提示。 */}
             {authLost && (
@@ -3268,6 +3377,10 @@ ${nm}
                           <td className="font-medium text-slate-800">
                             {r.store}
                             {r.pendingPhotos > 0 && <span className="ml-2 text-[10px] bg-red-100 text-red-700 border border-red-300 px-1.5 py-0.5 rounded whitespace-nowrap" title="照片還沒上傳完成，報表點不到這些照片">📷 缺 {r.pendingPhotos} 張</span>}
+                            {/* 「一張都沒有」的 pendingPhotos 也是 0，光看那個數字分不出來 ——
+                                而紙本點檢表對所有店都必填，所以這一定是異常，必須自己現形。
+                                2026-09-01 板橋金鑽店就是這樣：清單乾淨，報表卻沒有照片連結。 */}
+                            {r.photoState === 'none' && <span className="ml-2 text-[10px] bg-red-600 text-white px-1.5 py-0.5 rounded whitespace-nowrap" title="這筆紀錄的照片JSON 完全是空的。紙本點檢表對所有店都必填，所以這一定不正常 —— 報表會完全沒有照片連結。">⚠ 無照片</span>}
                           </td>
                           <td className="text-slate-500">{r.section}</td><td className="text-slate-500">{r.staff}</td>
                           <td className={"font-bold " + (r.total < PASS_SCORE ? "text-red-600" : "")}>{r.total}</td>
