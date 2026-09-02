@@ -123,13 +123,16 @@ assertEqual(/if \(data\.code === 'AUTH'\) \{\s*\n\s*_authLost = true;/.test(API)
 
     // ===== 4. 畫面：橫幅與正確的指示 =====
     assertEqual(/const \[authLost, setAuthLost\] = useState\(false\);/.test(APP), true, '要有橫幅狀態');
-    assertEqual(/return SqcApi\.onAuthLost\(\(\) => setAuthLost\(true\)\);/.test(APP), true, '要訂閱');
-    assertEqual(/if \(SqcApi\.authLost\(\)\) setAuthLost\(true\);/.test(APP), true,
+    assertEqual(/return SqcApi\.onAuthLost\(mark\);/.test(APP), true, '要訂閱');
+    assertEqual(/if \(SqcApi\.authLost\(\)\) mark\(\);/.test(APP), true,
       '掛載前就過期的情況也要顯示（訂閱是掛載後才建立的）');
+    assertEqual(/setAuthReason\(SqcApi\.authReason \? SqcApi\.authReason\(\) : ''\);/.test(APP), true,
+      '同時要記下是哪一種原因');
     assertEqual(/連線階段已過期，需要重新登入/.test(APP), true, '橫幅要講清楚發生什麼事');
     assertEqual(/已經拍好的照片與已排入的紀錄都還留在這支手機上/.test(APP), true,
       '★ 要先講「東西沒不見」—— 否則現場會以為白做了一家店');
-    assertEqual(/onClick=\{\(\) => \{ sessionStorage\.removeItem\('sqc_user'\); location\.href = 'index\.html'; \}\}/.test(APP), true,
+    // 清除改走 SqcSession.clear()（localStorage 與 sessionStorage 都要清），見 loginPersist.test.js
+    assertEqual(/onClick=\{\(\) => \{ SqcSession\.clear\(\); location\.href = 'index\.html'; \}\}/.test(APP), true,
       '跳轉改由使用者自己按');
     // 查詢失敗的指示不可再叫人重查
     assertEqual(/請按畫面上方的「重新登入」，登入後再查詢。/.test(APP), true,

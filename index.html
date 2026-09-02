@@ -88,7 +88,9 @@
         // 由 GAS 後端呼叫 CheckUserId 驗證並取得角色
         const r = await window.SqcApi.login(userId, password);
         if (r.ok) {
-          sessionStorage.setItem('sqc_user', JSON.stringify(r.user));
+          // 存在 localStorage（見 api.js 的 SqcSession）：點檢一天要跑十幾家店，
+          // 存 sessionStorage 的話關掉分頁或瀏覽器就得重新登入
+          window.SqcSession.write(r.user);
           window.location.href = 'app.html';
         } else {
           showError(r.message || '登入失敗');

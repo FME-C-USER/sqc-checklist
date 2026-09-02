@@ -3,8 +3,47 @@
 // 用 text/plain body 避開 CORS 預檢；回傳 { ok, result | error }
 // ============================================================
 (function () {
+  /**
+   * 登入身分的存放。
+   *
+   * 原本存在 sessionStorage —— 那是「一個分頁一份、分頁關掉就消失」：
+   *   ・關掉瀏覽器、開新分頁，都要重新登入
+   *   ・Android Chrome 會回收背景分頁，回來時登入資料可能已經不見
+   * 而點檢一天要跑十幾家店（9:00~18:00），這代表整天在重複登入。
+   * 更糟的是：照片佇列存在 IndexedDB（永久保留），但送照片需要 token ——
+   * 沒登入時照片就安靜地躺著沒人送。
+   *
+   * 改存 localStorage：跨分頁、跨重啟都留著，上限由後端的 6 小時滑動效期決定。
+   * 安全性取捨：前端只有一個 token（沒有密碼）、真正的權限判斷都在後端、
+   * 手機為個人專屬且有鎖屏。2026-09-01 確認過「手機不是共用」才這樣改。
+   *
+   * 讀取一定要保留 sessionStorage 的退路：升級前登入的人，token 還在舊位置，
+   * 只讀新位置會讓所有人在拿到新版的那一刻被登出一次 —— 那正是這次要消除的事。
+   * 讀到舊位置時順手搬過去，之後就走新路徑。
+   */
+  const SESS_KEY = 'sqc_user';
+  function readUser() {
+    try {
+      const fresh = localStorage.getItem(SESS_KEY);
+      if (fresh) return JSON.parse(fresh) || {};
+      const legacy = sessionStorage.getItem(SESS_KEY);
+      if (!legacy) return {};
+      localStorage.setItem(SESS_KEY, legacy);   // 一次性搬移，不再依賴舊位置
+      return JSON.parse(legacy) || {};
+    } catch (e) { return {}; }
+  }
+  function writeUser(user) {
+    try { localStorage.setItem(SESS_KEY, JSON.stringify(user)); } catch (e) {}
+  }
+  function clearUser() {
+    // 兩邊都清：登出必須真的登出，不可以留下舊位置的殘值讓下一次又被讀回來
+    try { localStorage.removeItem(SESS_KEY); } catch (e) {}
+    try { sessionStorage.removeItem(SESS_KEY); } catch (e) {}
+  }
+  window.SqcSession = { read: readUser, write: writeUser, clear: clearUser };
+
   function token() {
-    try { return (JSON.parse(sessionStorage.getItem('sqc_user')) || {}).token || ''; } catch (e) { return ''; }
+    return readUser().token || '';
   }
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -49,9 +88,13 @@
   };
   // 連線階段過期：只記狀態並通知畫面，絕不自己跳轉（見下方 AUTH 的說明）
   let _authLost = false;
+  // 'missing'＝這支手機上沒有登入資料（沒帶 token 出去）
+  // 'expired'＝有帶 token，是後端說它已經失效
+  let _authReason = '';
   const _authListeners = new Set();
   const onAuthLost = (fn) => { _authListeners.add(fn); return () => _authListeners.delete(fn); };
   const authLost = () => _authLost;
+  const authReason = () => _authReason;
 
   const _retryListeners = new Set();
   const onRetry = (fn) => { _retryListeners.add(fn); return () => _retryListeners.delete(fn); };
@@ -102,7 +145,14 @@
        * 也不清掉 sessionStorage —— 保留使用者名稱，橫幅才講得出「誰的連線過期了」。
        */
       if (data.code === 'AUTH') {
+        /**
+         * 兩種原因，後端回的訊息一模一樣，但解法完全不同 ——
+         * 2026-09-01 有人 13:58 還正常、14:29 就被要求重新登入，
+         * 而我們無從判斷是「這支手機根本沒有登入資料」還是「後端說階段過期」。
+         * 差別在於這次請求有沒有帶 token 出去，所以在這裡就記下來。
+         */
         _authLost = true;
+        _authReason = token() ? 'expired' : 'missing';
         _authListeners.forEach((fn) => { try { fn(); } catch (e) {} });
       }
       throw new Error(data.error || 'API 錯誤');
@@ -148,7 +198,7 @@
   window.SqcApi = {
     call,
     onRetry, // 供UI顯示「重試中 n/m」，避免暫時性失敗看起來像卡住
-    onAuthLost, authLost, // 連線階段過期：由畫面顯示橫幅，並讓背景補傳停手（打了也是白打）
+    onAuthLost, authLost, authReason, // 連線階段過期：由畫面顯示橫幅，並讓背景補傳停手（打了也是白打）
     login: (userId, password) => call('login', { userId, password }),
     // light=true：不含門市名單（名單改由 getStoreList 在背景取，開場才不會被近 200KB 拖住）
     getBootstrap: (month, section, light) => call('getBootstrap', { month, section, light: light === true }),

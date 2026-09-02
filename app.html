@@ -44,7 +44,7 @@
     const { useState, useMemo, useEffect, useRef } = React;
     // 版本字串一律用「台灣時間」的 YYYYMMDD-HHMM。與部署關卡無關 ——
     // 那道關卡看的是資安報告的檔名日期，而 GitHub runner 跑 UTC，兩者不要混在一起。
-    const APP_VERSION = '20260831-1730'; // 每次部署更新，用來確認瀏覽器跑的是哪一版（台灣時間）
+    const APP_VERSION = '20260902-0912'; // 每次部署更新，用來確認瀏覽器跑的是哪一版（台灣時間）
     // 這一版前端「至少」需要的後端版本。前後端是各自演進的，版本號本來就不會相等
     // （只改前端時後端不動，反之亦然），所以不能用「兩者相等」當健康指標 ——
     // 要比的是「線上後端有沒有舊到缺少本前端需要的 API」。
@@ -1243,7 +1243,9 @@
     // 主應用
     // ============================================================
     function App() {
-      const currentUser = (() => { try { return JSON.parse(sessionStorage.getItem('sqc_user')) || {}; } catch (e) { return {}; } })();
+      // 統一走 SqcSession（api.js）—— 它會讀 localStorage，並把升級前留在
+      // sessionStorage 的舊登入搬過來，所以拿到新版的人不會被登出一次
+      const currentUser = (window.SqcSession ? SqcSession.read() : {}) || {};
       const user = currentUser.name || '';
       const isManager = currentUser.role === '管理者';
       const [tab, setTab] = useState('basic');
@@ -1273,10 +1275,15 @@
        * 表單全部消失（本系統沒有草稿保存）。改成顯示橫幅，由使用者自己決定何時登入。
        */
       const [authLost, setAuthLost] = useState(false);
+      const [authReason, setAuthReason] = useState('');   // 'missing' | 'expired'
       useEffect(() => {
         if (!window.SqcApi || !SqcApi.onAuthLost) return;
-        if (SqcApi.authLost()) setAuthLost(true);   // 這個元件掛載前就過期了
-        return SqcApi.onAuthLost(() => setAuthLost(true));
+        const mark = () => {
+          setAuthLost(true);
+          setAuthReason(SqcApi.authReason ? SqcApi.authReason() : '');
+        };
+        if (SqcApi.authLost()) mark();   // 這個元件掛載前就過期了
+        return SqcApi.onAuthLost(mark);
       }, []);
       // 背景待處理量：照片沒傳完就關掉 App 會延後上傳，點檢員必須看得到
       const [pendingUp, setPendingUp] = useState({ pending: 0, done: 0, unfinished: 0, orphan: 0, queuedRecords: 0, busy: false, lastError: '' });
@@ -1842,7 +1849,9 @@ ${nm}
       // 若由呼叫端展開 render 快照組好再傳進來，那一層照樣會蓋掉期間的其他變更。
       // 兩層都用 prev 才是真的安全。
       const setItemState = (id, fn) => setScores(prev => ({ ...prev, [id]: fn(prev[id] || {}) }));
-      const logout = () => { sessionStorage.removeItem('sqc_user'); location.href = 'index.html'; };
+      // SqcSession.clear() 會把 localStorage 與 sessionStorage 兩邊都清掉 ——
+      // 登出必須真的登出，留下舊位置的殘值會在下一次被讀回來
+      const logout = () => { SqcSession.clear(); location.href = 'index.html'; };
 
       /**
        * 自行新增店鋪：主檔查到之後還要通過三道檢查才算選定。
@@ -2854,14 +2863,25 @@ ${nm}
                 位置放在最上面 —— 過期後任何操作都會失敗，這件事優先於其他提示。 */}
             {authLost && (
               <div className="bg-amber-50 border-2 border-amber-300 text-amber-900 text-sm rounded-lg px-3 py-2.5">
-                <div className="font-bold mb-1">⚠ 連線階段已過期，需要重新登入</div>
+                {/* 兩種原因後端回的訊息一樣，但要查的方向完全不同，所以標題要分開講：
+                    missing＝這支手機上沒有登入資料（多半是開了新分頁）
+                    expired＝有帶 token，是後端說它失效了（快取被清或真的閒置過久）
+                    回報時看到哪一種，就知道該修哪一邊。 */}
+                <div className="font-bold mb-1">
+                  {authReason === 'missing'
+                    ? '⚠ 這支手機上沒有登入資料，需要登入'
+                    : '⚠ 連線階段已過期，需要重新登入'}
+                </div>
                 <div className="leading-relaxed">
                   在這之前的操作都不會成功。<b>已經拍好的照片與已排入的紀錄都還留在這支手機上</b>，
                   重新登入後會自動繼續上傳，不會遺失。
                   {' '}如果正在填表，建議先把畫面上的內容抄下來或拍照留存，再重新登入。
+                  {authReason === 'missing' && (
+                    <span>{' '}（若你剛才開了新分頁，請改用原本那個分頁，或直接在這裡重新登入。）</span>
+                  )}
                 </div>
                 <button
-                  onClick={() => { sessionStorage.removeItem('sqc_user'); location.href = 'index.html'; }}
+                  onClick={() => { SqcSession.clear(); location.href = 'index.html'; }}
                   className="mt-2 px-3 py-1.5 bg-amber-600 text-white rounded-lg font-semibold">重新登入</button>
               </div>
             )}
