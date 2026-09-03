@@ -44,7 +44,7 @@
     const { useState, useMemo, useEffect, useRef } = React;
     // 版本字串一律用「台灣時間」的 YYYYMMDD-HHMM。與部署關卡無關 ——
     // 那道關卡看的是資安報告的檔名日期，而 GitHub runner 跑 UTC，兩者不要混在一起。
-    const APP_VERSION = '20260903-1143'; // 每次部署更新，用來確認瀏覽器跑的是哪一版（台灣時間）
+    const APP_VERSION = '20260903-1403'; // 每次部署更新，用來確認瀏覽器跑的是哪一版（台灣時間）
     // 這一版前端「至少」需要的後端版本。前後端是各自演進的，版本號本來就不會相等
     // （只改前端時後端不動，反之亦然），所以不能用「兩者相等」當健康指標 ——
     // 要比的是「線上後端有沒有舊到缺少本前端需要的 API」。
@@ -2731,8 +2731,26 @@ ${nm}
                               <div className="font-mono mt-0.5 text-red-700">{p.skipReason}</div>
                             </div>
                           )}
-                          {p.error && <div className="text-red-700 mt-1 font-mono break-all">上傳錯誤：{p.error}</div>}
-                          {p.linkErr && <div className="text-amber-700 mt-1 font-mono break-all">回寫連結錯誤：{p.linkErr}（{p.linkTries} 次）</div>}
+                          {/**
+                            * 已完成（linked）的照片不顯示任何錯誤。
+                            *
+                            * 那些欄位是過程中留下的，而 released() 從 2026-09-03 起會在轉成
+                            * linked 時清掉 —— 但「在那之前就已經完成」的照片不會再走一次
+                            * released()，舊訊息會永遠留在 IndexedDB 裡。所以顯示端也要擋，
+                            * 否則畫面上會一直出現「完成 … 回寫連結錯誤：伺服器忙碌中」，
+                            * 讓人以為那一張還有問題（現場就是這樣被誤讀的）。
+                            *
+                            * 次數要把兩個計數器加起來：逾時類的失敗累加的是 netTries，
+                            * 只印 linkTries 會顯示成「（0 次）」—— 有錯誤訊息卻 0 次，看不懂。
+                            */}
+                          {p.status !== 'linked' && p.error && (
+                            <div className="text-red-700 mt-1 font-mono break-all">上傳錯誤：{p.error}</div>
+                          )}
+                          {p.status !== 'linked' && p.linkErr && (
+                            <div className="text-amber-700 mt-1 font-mono break-all">
+                              回寫連結錯誤：{p.linkErr}（已重試 {(p.linkTries || 0) + (p.netTries || 0)} 次）
+                            </div>
+                          )}
                         </div>
                       ))}
                     </div>

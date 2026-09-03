@@ -53,9 +53,21 @@ assertEqual(timeoutsOf('getBootstrap')[1] >= 30000, true, '第二次給足時間
 assertEqual(timeoutsOf('getBootstrap').length, 2, '只嘗試兩次');
 assertEqual(timeoutsOf('queryRecords'), [12000, 30000], '查詢紀錄同屬「正常快、偶爾慢」');
 
-// 其餘動作維持四次短逾時
-assertEqual(timeoutsOf('submitRecord'), [12000, 12000, 12000, 12000], '送出維持四次 12 秒');
-assertEqual(timeoutsOf('attachPhotoLinks'), [12000, 12000, 12000, 12000], '回寫連結維持四次 12 秒');
+/**
+ * 回寫照片連結要拿後端的腳本鎖（waitLock 20 秒），12 秒結構上就不夠 ——
+ * 2026-09-03 現場：後端其實寫進去了（報表已有連結），但回應沒在 12 秒內回到手機，
+ * 手機當成失敗、照片停在「已上傳、等寫入連結」。而逾時屬於「非 countable」失敗，
+ * 不計入放棄門檻，於是每 5 分鐘重試一次、永遠不會結束。
+ *
+ * 附帶好處：進 RETRY_LONGER 之後嘗試次數從 4 次降為 2 次 ——
+ * 對一個要拿鎖的動作來說是少一半的後端負擔。
+ */
+assertEqual(timeoutsOf('attachPhotoLinks'), [12000, 45000], '★ 回寫連結第二次要給足時間');
+assertEqual(timeoutsOf('attachPhotoLinks').length, 2, '★ 且次數要從 4 降到 2（它要拿鎖）');
+
+// submitRecord 目前仍是四次 12 秒。它同樣要拿鎖，理由上也該加長，
+// 但那會讓使用者在送出按鈕前最多等 57 秒 —— 尚未決定，先維持現狀並在此標記。
+assertEqual(timeoutsOf('submitRecord'), [12000, 12000, 12000, 12000], '送出維持四次 12 秒（待評估）');
 assertEqual(timeoutsOf('checkEditPass'), [12000, 12000, 12000, 12000], '未列出的動作用預設值');
 
 // 最壞總等待要有上限，否則失敗時像卡死

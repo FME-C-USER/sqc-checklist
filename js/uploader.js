@@ -53,10 +53,22 @@
   const emit = () => _listeners.forEach((fn) => { try { fn(); } catch (e) {} });
   const onChange = (fn) => { _listeners.add(fn); return () => _listeners.delete(fn); };
 
-  // 一次為整批照片取上傳網址（一次往返，不是每張一次）
-  //   origin 必須一併送出：Drive 只有在「建立工作階段時帶了 Origin」的情況下，該網址才會
-  //   允許來自這個網域的跨網域 PUT；沒帶的話瀏覽器會被 CORS 擋掉（No Access-Control-Allow-Origin）。
-  //   retry 讓後端知道要不要查「同檔名是否已存在」：第一次上傳不可能已存在，查了白花 0.2~0.4 秒。
+  /**
+   * 一次為整批照片取上傳網址（一次往返，不是每張一次）
+   *   origin 必須一併送出：Drive 只有在「建立工作階段時帶了 Origin」的情況下，該網址才會
+   *   允許來自這個網域的跨網域 PUT；沒帶的話瀏覽器會被 CORS 擋掉（No Access-Control-Allow-Origin）。
+   *   retry 讓後端知道要不要查「同檔名是否已存在」：第一次上傳不可能已存在，查了白花 0.2~0.4 秒。
+   *
+   * ⚠ 已知缺口（2026-09-03）：retry 只看 p.tries，而 tries 是寫進 IndexedDB 的 ——
+   * 空間不足時寫不進去、永遠是 0 → 後端每次都當成首次上傳、不查同檔名 →
+   * 每個工作階段都在 Drive 建一個新檔（現場實測同一張有 8 份以上）。
+   *
+   * 曾經想用「記憶體中的本次已嘗試集合」補這個洞，但那是無效的：
+   * 每一條路徑都是「嘗試 → safeUpdate 成功（tries 被記下）或失敗（進 _skip、本輪不再碰）」，
+   * 所以「已嘗試過但 tries 仍是 0」這個狀態在同一個工作階段內不存在，
+   * 而跨工作階段時那個集合也已經清空。真正的解法是讓寫入能成功
+   * （把 blob 與中繼資料分開存，狀態更新就不必重寫整張 ~950KB 的照片）。
+   */
   async function sessionsFor(list) {
     const r = await window.SqcApi.createUploadSessions(
       list.map((p) => ({ pathParts: p.pathParts || [], name: p.name, retry: (p.tries || 0) > 0 })),
@@ -205,6 +217,20 @@
     const out = { ...photo, status, bytes };
     delete out.blob;
     delete out.thumb;
+    /**
+     * 轉成「完成」時要把失敗紀錄一併清掉。
+     *
+     * 原本只改 status，於是 linkErr／error 會留著 —— 診斷畫面就出現
+     * 「完成　已釋放（原 847 KB）」下面還跟著一行「回寫連結錯誤：伺服器忙碌中…」，
+     * 那一張其實早就完成了（2026-09-03 現場的畫面）。
+     * 已經完成的照片留著舊錯誤只會讓人以為還有問題。
+     */
+    if (status === 'linked') {
+      out.error = '';
+      out.linkErr = '';
+      out.linkTries = 0;
+      out.netTries = 0;
+    }
     return out;
   }
 
