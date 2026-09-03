@@ -44,7 +44,7 @@
     const { useState, useMemo, useEffect, useRef } = React;
     // 版本字串一律用「台灣時間」的 YYYYMMDD-HHMM。與部署關卡無關 ——
     // 那道關卡看的是資安報告的檔名日期，而 GitHub runner 跑 UTC，兩者不要混在一起。
-    const APP_VERSION = '20260903-1033'; // 每次部署更新，用來確認瀏覽器跑的是哪一版（台灣時間）
+    const APP_VERSION = '20260903-1143'; // 每次部署更新，用來確認瀏覽器跑的是哪一版（台灣時間）
     // 這一版前端「至少」需要的後端版本。前後端是各自演進的，版本號本來就不會相等
     // （只改前端時後端不動，反之亦然），所以不能用「兩者相等」當健康指標 ——
     // 要比的是「線上後端有沒有舊到缺少本前端需要的 API」。
@@ -1309,7 +1309,7 @@
         return SqcApi.onAuthLost(mark);
       }, []);
       // 背景待處理量：照片沒傳完就關掉 App 會延後上傳，點檢員必須看得到
-      const [pendingUp, setPendingUp] = useState({ pending: 0, done: 0, unfinished: 0, orphan: 0, queuedRecords: 0, busy: false, lastError: '' });
+      const [pendingUp, setPendingUp] = useState({ pending: 0, done: 0, unfinished: 0, orphan: 0, queuedRecords: 0, busy: false, phase: '', lastError: '' });
       useEffect(() => {
         if (!window.SqcUploader) return;
         let alive = true;
@@ -2670,6 +2670,11 @@ ${nm}
                       const held = diag.filter(p => p.hasBlob).reduce((s, p) => s + (p.blobSize || 0), 0);
                       return held ? '（佔用 ' + (held / 1048576).toFixed(1) + ' MB）' : '（未佔用空間）';
                     })()}
+                    <br />
+                    {/* 上傳器現在在做什麼。2026-09-03 那次卡死完全沒有線索 ——
+                        沒有錯誤訊息、沒有重試次數，畫面上只有一個灰掉的「正在重試…」。
+                        「卡在哪一步」是診斷最基本的一項，之前完全沒有。 */}
+                    目前狀態：{pendingUp.busy ? (pendingUp.phase || '進行中…') : '閒置'}
                     <br />
                     來源網址：{location.origin}
                   </div>

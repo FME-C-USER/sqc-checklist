@@ -51,6 +51,10 @@ function load(photos, opts) {
 
   const sandbox = {
     console, setTimeout, clearTimeout, setInterval: () => 0, clearInterval: () => {},
+    // uploader.js 的 PUT 現在有 AbortController 逾時（瀏覽器一定有，
+    // 但 vm 沙箱預設沒有）—— 沒有它會讓 uploadOne 在第一行就 ReferenceError，
+    // 而那會被誤讀成「上傳失敗」。
+    AbortController,
     navigator: { onLine: true },
     Blob: class { constructor(parts) { this.parts = parts; this.size = 1; } },
     document: { addEventListener: () => {}, visibilityState: 'visible' },

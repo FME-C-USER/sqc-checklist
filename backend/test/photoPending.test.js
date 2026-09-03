@@ -130,8 +130,19 @@ assertEqual(APP.includes('我知道風險，稍後再傳'), true, '必須留一�
 const UP = fs.readFileSync(path.join(__dirname, '..', '..', 'js', 'uploader.js'), 'utf8');
 assertEqual(/if \(_running\) \{ _again = true; emit\(\); return; \}/.test(UP), true,
   '正在跑時要記下待重跑，不可直接 return（原本按了毫無反應）');
-assertEqual(/do \{ _again = false; await pumpOnce\(\); \} while \(_again && navigator\.onLine\)/.test(UP), true,
-  '跑完要接著把待重跑的那一輪跑掉');
+/**
+ * 跑完要接著把待重跑的那一輪跑掉 —— 但要有上限。
+ *
+ * setInterval 每 15 秒就會設一次 _again，而佇列大的時候 pumpOnce 遠超過 15 秒，
+ * 於是 do-while 永遠不結束、_running 永遠是 true：畫面上「正在重試…」一直灰著，
+ * 「立即重試」也按不動（2026-09-03 現場就是這個畫面）。
+ * 而且每一輪都用看門狗包住，卡住的那一輪會被中止而不是把上傳器整個弄死。
+ */
+assertEqual(/_again = false;/.test(UP), true, '跑完要接著把待重跑的那一輪跑掉');
+assertEqual(/while \(_again && navigator\.onLine && rounds < PUMP_LOOP_MAX\);/.test(UP), true,
+  '★ 連續重跑要有上限，否則 _running 永遠釋放不掉');
+assertEqual(/await withWatchdog\(pumpOnce\(\), PUMP_MAX_MS,/.test(UP), true,
+  '★ 每一輪都要有看門狗：任何卡死都不可以讓上傳器死到重新載入為止');
 assertEqual(UP.includes('async function clearBackoff(recordId)'), true, 'force 要能清掉退避時間');
 assertEqual(/nextAt: 0, linkNextAt: 0/.test(UP), true, '上傳退避與連結回寫退避都要清');
 assertEqual(UP.includes('busy: _running'), true, '要對外回報忙碌狀態，按鈕才有回饋');

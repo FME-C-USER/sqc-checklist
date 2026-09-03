@@ -20,6 +20,32 @@
    * 單次請求輕一點、比較容易在逾時內完成，失敗時重做的成本也小。
    */
   const BATCH = 6;
+  /**
+   * 單張 PUT 的逾時。1MB 在門市 4G 上約 10~30 秒，60 秒已經很寬鬆 ——
+   * 目的不是壓縮時間，是「保證這個 await 一定會結束」。
+   */
+  const PUT_TIMEOUT_MS = 60000;
+  /**
+   * 看門狗：任何一處卡住都不可以讓上傳器永久死掉。
+   *
+   * 現在每一個網路呼叫都有逾時（api.js 有、PUT 也有了），所以 pumpOnce 在
+   * 設計上是有界的。這道看門狗是為了「還沒發現的那些卡死」——
+   * 2026-09-03 那次就是因為少了任何一道保護，一個 PUT 卡住就讓整個上傳器
+   * 死到重新載入頁面為止，而且完全沒有錯誤訊息可查。
+   *
+   * 中途被中止是安全的：每一張照片的狀態寫入是各自獨立的，
+   * 已經處理完的不會被回捲，下一輪重新列舉即可接續。
+   */
+  const PUMP_MAX_MS = 600000;   // 10 分鐘
+  /**
+   * 一次 pump() 最多連續跑幾輪 pumpOnce。
+   *
+   * _again 是「跑到一半又被要求重試」的機制，而 setInterval 每 15 秒就會設一次 ——
+   * 佇列大的時候 pumpOnce 遠超過 15 秒，於是 do-while 永遠不結束、
+   * _running 永遠是 true：畫面上「正在重試…」一直灰著，「立即重試」也按不動。
+   * 設上限讓它週期性放手，狀態才會回到可操作。
+   */
+  const PUMP_LOOP_MAX = 3;
   let _running = false;
   let _again = false;      // 跑到一半又被要求重試 → 跑完再跑一輪，不要直接丟掉
   const _listeners = new Set();
@@ -52,15 +78,45 @@
       throw new Error('照片內容不見了：本機儲存的檔案是空的（size='
         + ((photo.blob && photo.blob.size) || 0) + '），無法上傳，需要重拍');
     }
-    // 工作階段網址本身即帶授權，不可再加 Authorization 標頭
-    const res = await fetch(session.url, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'image/jpeg' },
-      body: photo.blob,
-    });
-    if (!res.ok) throw new Error('Drive 上傳失敗 ' + res.status);
-    const data = await res.json();
-    return data.id;
+    /**
+     * 一定要有逾時。
+     *
+     * 這是 2026-09-03 現場「一直無法完整上傳」的根因：原本這個 fetch 沒有
+     * AbortController、沒有 signal、沒有任何逾時 —— 而 api.js 打後端的每一次
+     * 呼叫都有。行動網路上只要有一個 PUT 卡住（連上了但不傳資料），
+     * 這個 await 就永遠不會結束：它在 Promise.all(wave) 裡面 → 整波不完成
+     * → pumpOnce 不返回 → _running 永遠是 true → 之後每 15 秒的 setInterval
+     * 只會設一下 _again 就返回。上傳器完全死掉，直到重新載入頁面。
+     *
+     * 現場的症狀完全對得上：「正在重試…」永遠灰著、約 70 張照片
+     * tries=0 且沒有任何錯誤訊息（卡在第一波，後面的從來沒被列舉）、
+     * 而且沒有「整體錯誤」（因為沒有任何東西拋錯）。
+     *
+     * 計時器要涵蓋讀取回應：連線掛在讀 body 的階段一樣是卡住。
+     */
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), PUT_TIMEOUT_MS);
+    try {
+      // 工作階段網址本身即帶授權，不可再加 Authorization 標頭
+      const res = await fetch(session.url, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'image/jpeg' },
+        body: photo.blob,
+        signal: ctrl.signal,
+      });
+      if (!res.ok) throw new Error('Drive 上傳失敗 ' + res.status);
+      const data = await res.json();
+      return data.id;
+    } catch (e) {
+      // 逾時被中止要講人話：現場看到 AbortError 完全不知道那是什麼
+      if (e && e.name === 'AbortError') {
+        throw new Error('上傳逾時：' + Math.round(PUT_TIMEOUT_MS / 1000)
+          + ' 秒內沒有傳完（訊號不穩時常發生，會自動重試）');
+      }
+      throw e;
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   // ===== 待送出紀錄的自動重送 =====
@@ -170,6 +226,15 @@
    * 上傳成功（不再 pending）、記次退避（nextAt 在未來）、或進跳過名單。
    */
   const _skip = new Map();
+  /**
+   * 這一輪走到哪裡了。
+   *
+   * 2026-09-03 那次卡死完全沒有任何線索：沒有錯誤訊息、沒有重試次數，
+   * 畫面上只有一個灰掉的「正在重試…」。診斷視窗的用途就是讓現場截圖能定位問題，
+   * 而「上傳器現在在做什麼」是最基本的一項，之前完全沒有。
+   */
+  let _phase = '';
+  const phase = (t) => { _phase = t; };
   let _storeBroken = '';   // 最近一次寫回佇列失敗的原因（空字串 = 正常）
   async function safeUpdate(photo) {
     try {
@@ -261,12 +326,15 @@
   async function pumpOnce() {
     try {
       // 先騰出空間再做事：佇列滿到寫不進去的話，後面每一步都會失敗
+      phase('清理已完成的照片');
       await releaseFinished().catch(() => 0);
       _storeBroken = '';     // 清完重新判斷，不要拿上一輪的結論擋住這一輪
+      phase('補送待送出的紀錄');
       await pumpRecords();   // 先把紀錄補送成功，照片的連結才有地方可寫
       // 套用退避：失敗過的照片有 nextAt，時間沒到就不要再打後端。
       // （原本只有迴圈內第二輪之後有過濾，第一輪沒有 —— 等於每 15 秒必定
       //   對 createUploadSessions 打一次，後端越忙這件事越傷。）
+      phase('讀取待傳清單');
       const due = (p) => !_skip.has(p.id) && (!p.nextAt || p.nextAt <= Date.now());
       let pend = (await window.SqcDB.pendingPhotos()).filter(due);
       while (pend.length && navigator.onLine) {
@@ -277,6 +345,7 @@
         // 照片仍留在 IndexedDB 佇列中，不會遺失
         let sessions;
         try {
+          phase('向後端索取 ' + batch.length + ' 個上傳網址');
           sessions = await sessionsFor(batch);
         } catch (e) {
           /**
@@ -295,6 +364,7 @@
         }
         for (let off = 0; off < batch.length; off += CONCURRENCY) {
           const wave = batch.slice(off, off + CONCURRENCY);
+          phase('上傳中：' + wave.map((p) => p.where || p.name).join('、'));
           await Promise.all(wave.map(async (p, k) => {
             let ok;
             try {
@@ -310,6 +380,7 @@
           }));
           emit();
         }
+        phase('回寫照片連結');
         await Promise.all([...new Set(batch.map((p) => p.recordId))].map(flushLinksIfDone));
         /**
          * 這裡原本有一段 `if (_storeBroken) { emit(); break; }`。
@@ -321,9 +392,12 @@
         await new Promise((r) => setTimeout(r, 300));
         pend = (await window.SqcDB.pendingPhotos()).filter(due);
       }
+      phase('檢查還有哪些連結沒寫回');
       await reconcileLinks(); // 涵蓋 App 重啟後、上次已全數 done 但尚未回寫連結的紀錄
+      phase('回報卡住的照片');
       await reportStuck();    // 卡住太久的要把原因送回後端，不要讓它死在這支手機裡
     } finally {
+      phase('');
       emit();
     }
   }
@@ -406,6 +480,20 @@
    *   2. force：清掉所有退避時間。照片是在紀錄寫入後端「之前」就開始上傳的，所以第一次回寫
    *      連結常會收到「找不到紀錄」而進入退避；不清掉的話按重試也還是要等退避結束。
    */
+  /**
+   * 讓一個可能永不結束的 promise 有個上限。
+   * 被中止時原本那個 promise 仍在背景跑（JS 無法真的取消它），
+   * 但這裡的目的只是「不要讓呼叫端永遠等下去」—— 呼叫端釋放了狀態，
+   * 下一輪就能重新開始，而每一張照片的狀態寫入本來就是各自獨立的。
+   */
+  function withWatchdog(promise, ms, message) {
+    let timer;
+    return Promise.race([
+      promise,
+      new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(message)), ms); }),
+    ]).finally(() => clearTimeout(timer));
+  }
+
   async function pump(opts) {
     try {
       if (opts && opts.force) await clearBackoff(opts.recordId);
@@ -428,7 +516,15 @@
     _running = true;
     emit();                       // 讓畫面立刻顯示「正在重試…」，按鈕才有回饋
     try {
-      do { _again = false; await pumpOnce(); } while (_again && navigator.onLine);
+      let rounds = 0;
+      do {
+        _again = false;
+        // 看門狗包住每一輪：卡住的那一輪會被中止，_running 由下面的 finally 釋放，
+        // 下一次 setInterval 就能重新開始 —— 而不是死到重新載入頁面為止。
+        await withWatchdog(pumpOnce(), PUMP_MAX_MS,
+          '這一輪上傳超過 ' + Math.round(PUMP_MAX_MS / 60000) + ' 分鐘沒有結束，已中止並重新開始');
+        rounds++;
+      } while (_again && navigator.onLine && rounds < PUMP_LOOP_MAX);
     } catch (e) {
       /**
        * pump 是被 setInterval / online / visibilitychange 呼叫的，沒有人 await 它 ——
@@ -567,6 +663,7 @@
       busy: _running,
       // 吞掉例外是為了不彈「系統發生未預期錯誤」，但原因不能就此消失 —— 診斷視窗要看得到。
       // 佇列寫不回去是最要緊的一種：這支手機從現在起無法保存任何上傳進度。
+      phase: _phase,
       lastError: _storeBroken
         ? ('照片存不進本機待傳佇列，多半是手機儲存空間不足：' + _storeBroken)
         : _lastPumpError,

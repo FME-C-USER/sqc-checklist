@@ -47,6 +47,10 @@ function load(photos, opts) {
   const visitedAll = [];   // 累計（驗證「清不動」時下一輪還會再試）
   const sandbox = {
     console, setTimeout, clearTimeout, setInterval: () => 0, clearInterval: () => {},
+    // uploader.js 的 PUT 現在有 AbortController 逾時（瀏覽器一定有，
+    // 但 vm 沙箱預設沒有）—— 沒有它會讓 uploadOne 在第一行就 ReferenceError，
+    // 而那會被誤讀成「上傳失敗」。
+    AbortController,
     navigator: { onLine: true },
     Blob: class { constructor(parts) { this.parts = parts; this.size = 1; } },
     fetch: async () => ({ ok: true, status: 200, json: async () => ({ id: 'FID' }) }),
