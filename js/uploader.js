@@ -152,6 +152,24 @@
     return out;
   }
 
+  /**
+   * 本次工作階段要跳過的照片（id → 原因）。只存在記憶體，不寫入 IndexedDB。
+   *
+   * 為什麼一定要用記憶體：會進到這裡的照片，正是「連狀態都寫不回去」的那些——
+   * 既然寫不進去，就無法用 tries/nextAt 讓它自己退避，只剩記憶體擋得住。
+   *
+   * 為什麼非做不可（2026-09-03 現場實證）：
+   * pendingPhotos() 依主鍵排序、id 是 'ph_'+時間戳，所以永遠是最舊的在前，
+   * 而 pend.slice(0, BATCH) 每輪只取最前面 6 張。原本只要那批裡有一張寫不回狀態，
+   * 就 break 掉整個迴圈 —— 於是一張壞照片永久霸佔隊首，後面約 30 張
+   * 「tries=0、沒有任何錯誤訊息」的照片從來沒有被嘗試過。
+   * 那位同事刪掉紀錄重傳也沒用，因為刪紀錄不會移除隊首那張。
+   *
+   * 跳過名單同時解決了我當初加 break 想解決的無限迴圈：
+   * 迴圈是靠「照片離開候選集合」收斂的，而三條路都會讓它離開 ——
+   * 上傳成功（不再 pending）、記次退避（nextAt 在未來）、或進跳過名單。
+   */
+  const _skip = new Map();
   let _storeBroken = '';   // 最近一次寫回佇列失敗的原因（空字串 = 正常）
   async function safeUpdate(photo) {
     try {
@@ -249,7 +267,8 @@
       // 套用退避：失敗過的照片有 nextAt，時間沒到就不要再打後端。
       // （原本只有迴圈內第二輪之後有過濾，第一輪沒有 —— 等於每 15 秒必定
       //   對 createUploadSessions 打一次，後端越忙這件事越傷。）
-      let pend = (await window.SqcDB.pendingPhotos()).filter((p) => !p.nextAt || p.nextAt <= Date.now());
+      const due = (p) => !_skip.has(p.id) && (!p.nextAt || p.nextAt <= Date.now());
+      let pend = (await window.SqcDB.pendingPhotos()).filter(due);
       while (pend.length && navigator.onLine) {
         // 一次向後端取 BATCH 張的上傳網址（往返次數減半），實際 PUT 仍每次 CONCURRENCY 張並行，
         // 避免在行動網路上同時塞太多連線反而更容易失敗
@@ -260,9 +279,16 @@
         try {
           sessions = await sessionsFor(batch);
         } catch (e) {
-          await Promise.all(batch.map((p) => {
+          /**
+           * 取不到上傳網址：這是「後端現在不可用」的訊號，不是這幾張照片的問題，
+           * 所以 break 出去等下一輪 —— 馬上換下一批只是繼續轟炸同一個後端。
+           * 但記次退避若也寫不進去，這 6 張下一輪還是會排在隊首、再擋一次，
+           * 所以寫入失敗的要進跳過名單。
+           */
+          await Promise.all(batch.map(async (p) => {
             const tries = (p.tries || 0) + 1;
-            return safeUpdate({ ...p, tries, error: String(e.message || e), nextAt: Date.now() + Math.min(60000, 2000 * tries) });
+            const ok = await safeUpdate({ ...p, tries, error: String(e.message || e), nextAt: Date.now() + Math.min(60000, 2000 * tries) });
+            if (!ok) _skip.set(p.id, _storeBroken);
           }));
           emit();
           break;
@@ -270,28 +296,30 @@
         for (let off = 0; off < batch.length; off += CONCURRENCY) {
           const wave = batch.slice(off, off + CONCURRENCY);
           await Promise.all(wave.map(async (p, k) => {
+            let ok;
             try {
               const fileId = await uploadOne(p, sessions[off + k]);
-              await safeUpdate({ ...p, status: 'done', fileId, error: '' });
+              ok = await safeUpdate({ ...p, status: 'done', fileId, error: '' });
             } catch (e) {
               const tries = (p.tries || 0) + 1;
-              await safeUpdate({ ...p, tries, error: String(e.message || e), nextAt: Date.now() + Math.min(60000, 2000 * tries) });
+              ok = await safeUpdate({ ...p, tries, error: String(e.message || e), nextAt: Date.now() + Math.min(60000, 2000 * tries) });
             }
+            // 狀態寫不回去 → 本次工作階段跳過它，讓後面的照片有機會被處理。
+            // 絕對不刪：照片還在 IndexedDB，下次開 App 是新的工作階段，會再試一次。
+            if (!ok) _skip.set(p.id, _storeBroken || '本機無法記錄狀態');
           }));
           emit();
         }
         await Promise.all([...new Set(batch.map((p) => p.recordId))].map(flushLinksIfDone));
         /**
-         * 佇列寫不回去時必須跳出本輪。
-         *
-         * 這個迴圈是靠「照片狀態被改掉、下一輪就不再是 pending」來收斂的；
-         * 寫入失敗時狀態不會變，同一批會被無限重取、無限重打 createUploadSessions ——
-         * 比原本讓例外冒出去更糟（原本至少會停）。
-         * 等 setInterval 下一輪再試：那時記憶體壓力可能已經緩解。
+         * 這裡原本有一段 `if (_storeBroken) { emit(); break; }`。
+         * 那是為了避免無限迴圈（狀態改不掉 → 同一批被無限重取），
+         * 但代價是一張壞照片永久霸佔隊首、把後面全部擋住 ——
+         * 2026-09-03 現場有人 30 張照片「從來沒有被嘗試過」就是這樣造成的。
+         * 現在改由跳過名單收斂，所以不需要也不可以在這裡 break。
          */
-        if (_storeBroken) { emit(); break; }
         await new Promise((r) => setTimeout(r, 300));
-        pend = (await window.SqcDB.pendingPhotos()).filter((p) => !p.nextAt || p.nextAt <= Date.now());
+        pend = (await window.SqcDB.pendingPhotos()).filter(due);
       }
       await reconcileLinks(); // 涵蓋 App 重啟後、上次已全數 done 但尚未回寫連結的紀錄
       await reportStuck();    // 卡住太久的要把原因送回後端，不要讓它死在這支手機裡
@@ -343,6 +371,31 @@
         }
       }
     } catch (e) { /* 診斷回報本身絕對不能影響上傳 */ }
+    await reportSkipped().catch(() => { });
+  }
+
+  /**
+   * 回報「連狀態都寫不回本機」而被跳過的照片。
+   *
+   * 為什麼要單獨一條路：上面那支的門檻是 tries >= REPORT_AFTER_TRIES，
+   * 而這些照片的 tries 根本累加不上去（寫入就是失敗的那一步）——
+   * 所以最嚴重的那一類失敗，恰好是唯一永遠不會進異動紀錄的一類。
+   * 那正是 2026-08-27 那批照片在眼前消失卻查不到原因的同一個形狀。
+   *
+   * 「回報過」也只能記在記憶體（同樣寫不進去），所以每個工作階段回報一次。
+   */
+  const _skipReported = new Set();
+  async function reportSkipped() {
+    if (!_skip.size || !window.SqcApi || !window.SqcApi.logEvent) return;
+    const fresh = [...(_skip.keys())].filter((id) => !_skipReported.has(id));
+    if (!fresh.length) return;
+    fresh.forEach((id) => _skipReported.add(id));
+    const reason = _skip.get(fresh[0]) || '(沒有原因)';
+    const msg = `${fresh.length} 張照片的狀態寫不進本機佇列，本次已跳過`
+      + `｜原因：${String(reason).slice(0, 200)}`
+      + `｜佇列共 ${await window.SqcDB.countPhotos()} 筆`
+      + `｜來源：${location.origin}`;
+    try { await window.SqcApi.logEvent('photoUploadStuck', msg); } catch (e) { /* 下個工作階段再試 */ }
   }
 
   /**
@@ -431,7 +484,19 @@
     if (!recordId) return;
     const list = await window.SqcDB.photosOfRecord(recordId);
     if (!list.length) return;
-    if (list.some((p) => p.status !== 'done' && p.status !== 'linked')) return; // 還有上傳中/失敗中的，先不送
+    /**
+     * 這裡原本要求「這一筆的每一張都是 done 或 linked」才回寫，否則整筆先不送。
+     *
+     * 用意是避免「連結寫一半」，但代價太大：只要有一張傳不上去，
+     * 整筆的其餘照片就永遠寫不進連結 —— 2026-09-03 現場有一筆是
+     * 「一張紙本照片 Load failed，其餘 6 張已在雲端卻一直停在待寫連結」。
+     * 報表因此完全沒有那家店的照片連結，而畫面上看不出是被哪一張擋住。
+     *
+     * 改成「有 fileId 的先寫回去」是安全的：後端 attachPhotoLinks 是按檔名合併
+     * （同名覆寫、新名附加），所以分幾次送、送幾次都得到同一個結果。
+     * 剩下那張自己繼續重試，補上時再送一次即可；每張照片實際只會被送一次，
+     * 因為送成功就轉成 linked，不會再進 toLink。
+     */
     const toLink = list.filter((p) => p.status === 'done');
     if (!toLink.length) return; // 已全部 linked 過了
     // 退避：回寫失敗過就等一段時間再試，避免密集打後端(會與使用者的查詢互相搶資源)
@@ -513,5 +578,12 @@
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') pump(); });
   setInterval(pump, 15000); // 週期性嘗試補傳
 
-  window.SqcUploader = { enqueue, pump, pumpRecords, counts, countsOfRecord, onChange, purge };
+  /**
+   * 本次工作階段被跳過的照片（id → 原因）。
+   * 一定要對外公開：跳過如果不顯示，就變成「照片安靜地留在手機上沒人管」——
+   * 那正是這整個診斷視窗要消滅的東西。
+   */
+  const skipped = () => { const o = {}; _skip.forEach((v, k) => { o[k] = v; }); return o; };
+
+  window.SqcUploader = { enqueue, pump, pumpRecords, counts, countsOfRecord, onChange, purge, skipped };
 })();

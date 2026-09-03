@@ -139,8 +139,18 @@ const done = (id) => ({
     await t.uploader.pump();
     await new Promise((r) => setTimeout(r, 30));
 
-    assertEqual(!!t.store.get('d').blob, true, '★ done（已上傳、只差連結）不可卸貨');
+    /**
+     * done 的行為已經改了（2026-09-03）：
+     * flushLinksIfDone 原本要求「這一筆每一張都是 done 或 linked」才回寫連結，
+     * 于是只要有一張 pending，其餘已在雲端的就永遠卡在 done。
+     * 現在「有 fileId 的先寫回去」→ 連結寫成功→转 linked→才卸貨。
+     * 所以這裡正確的期待是「已經轉成 linked 並卸貨」。
+     */
+    assertEqual(t.store.get('d').status, 'linked', '★ done 的連結要能單獨寫回（不可被同一筆的 pending 擋住）');
+    assertEqual(!!t.store.get('d').blob, false, '連結寫成功了，卸貨是正確的');
     assertEqual(!!t.store.get('o').blob, true, '★ orphan（待人工處理）不可卸貨');
+    // （'p' 在這個假環境裡會上傳成功而合理地轉成 linked，所以不能在這裡斷言它的 blob。
+    //   「releaseFinished 不可碰未完成的照片」由下面的 t.visited === [] 與 3b 段負責。）
     // 清理只該碰 linked：走全部的話，每 15 秒就會把 pending 那些 ~900KB 的 blob
     // 讀出來一次，正是我們要避免的記憶體壓力
     assertEqual(t.visited, [], '★ 沒有 linked 時清理不該讀任何一筆');
@@ -190,15 +200,15 @@ const done = (id) => ({
    * 為什麼值得多一道：卸錯貨等於照片永久遺失，而缺失當下已經被改善、拍不回來。
    */
   {
-    const t = load([
-      { ...done('o'), status: 'orphan' },
-      { ...done('d'), status: 'done' },
-    ], { eachIgnoresStatus: true });
+    // 只放 orphan：done 會被 reconcileLinks 合理地寫連結並轉 linked，
+    // 混在一起就分不出「是 releaseFinished 碰了它」還是「是連結寫成功了」。
+    // orphan 不在 flushLinksIfDone 的範圍內，所以能孤立出這一道保險。
+    const t = load([{ ...done('o'), status: 'orphan' }], { eachIgnoresStatus: true });
     await t.uploader.pump();
     await new Promise((r) => setTimeout(r, 30));
-    assertEqual(t.visited.length, 2, '前提：這個情境下 eachPhoto 確實把非 linked 的也吐出來了');
+    assertEqual(t.visited.length, 1, '前提：這個情境下 eachPhoto 確實把非 linked 的也吐出來了');
     assertEqual(!!t.store.get('o').blob, true, '★ 即使索引沒過濾，orphan 仍不可被卸貨');
-    assertEqual(!!t.store.get('d').blob, true, '★ 即使索引沒過濾，done 仍不可被卸貨');
+    assertEqual(t.store.get('o').status, 'orphan', '狀態也不可被改成 linked');
   }
 })().then(() => {
   // ===== 4. 原始碼層面：確認機制真的接上去了 =====

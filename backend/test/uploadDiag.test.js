@@ -65,8 +65,17 @@ assertEqual(/openCursor\(\)/.test(DB), true, '要用游標逐筆取，不可用 
 // ===== 3. 診斷畫面 =====
 assertEqual(/const openDiag = async \(\) => \{/.test(CODE), true, '要有 openDiag');
 assertEqual(/SqcDB\.photoDiagnostics\(\)/.test(CODE), true, '畫面要走 photoDiagnostics');
-assertEqual(/list\.sort\(\(a, b\) => \(b\.tries \|\| 0\) - \(a\.tries \|\| 0\)\)/.test(CODE), true,
-  '卡最久的排前面');
+assertEqual(/merged\.sort\(\(a, b\) => \(b\.skipReason \? 1 : 0\) - \(a\.skipReason \? 1 : 0\) \|\| \(b\.tries \|\| 0\) - \(a\.tries \|\| 0\)\)/.test(CODE), true,
+  '被跳過的最優先、其次是卡最久的');
+/**
+ * ★ 跳過名單只存在 uploader 的記憶體裡，photoDiagnostics 讀不到。
+ * 不併進來的話，被跳過的照片會顯示成「還沒進雲端、沒有任何錯誤」——
+ * 跟「還沒輪到」長得一模一樣。2026-09-03 現場那 30 張就是這樣被誤判的。
+ */
+assertEqual(/SqcUploader\.skipped\(\) : \{\}/.test(CODE), true, '★ 要把記憶體裡的跳過名單併進診斷');
+assertEqual(/skipReason: skip\[p\.id\]/.test(CODE), true, '要標上跳過原因');
+assertEqual(/本次已跳過/.test(APP), true, '★ 畫面要講明「這一輪不會再碰它」');
+assertEqual(/下次重開 App 會再試一次/.test(APP), true, '★ 也要講明照片沒有遺失');
 assertEqual((CODE.match(/onClick=\{openDiag\}/g) || []).length >= 2, true,
   '藍色細條與送出後面板都要有入口（使用者卡住的那一刻就在面板上）');
 assertEqual(/來源網址：\{location\.origin\}/.test(APP), true,

@@ -125,9 +125,11 @@ const PHOTO = (over) => ({
   }
 
   // 原始碼層面確認過濾條件真的加在第一輪（行為測試只能證明有過濾，證明不了寫在哪）
-  assertEqual(
-    /let pend = \(await window\.SqcDB\.pendingPhotos\(\)\)\.filter\(\(p\) => !p\.nextAt \|\| p\.nextAt <= Date\.now\(\)\);/.test(UP),
-    true, '第一輪取待傳清單時就要過濾 nextAt');
+  // 條件已抽成共用的 due()：迴圈頭尾都用同一份，避免只改一處而漏掉另一處。
+  assertEqual(/const due = \(p\) => !_skip\.has\(p\.id\) && \(!p\.nextAt \|\| p\.nextAt <= Date\.now\(\)\);/.test(UP),
+    true, '★ due() 要同時排除退避中與跳過名單');
+  assertEqual((UP.match(/pendingPhotos\(\)\)\.filter\(due\)/g) || []).length, 2,
+    '★ 迴圈開頭與每圈結尾都要用同一份 due()（只改一處會讓另一處繼續取到不該取的）');
 
   // ===== 3. 三個寫回佇列的地方都要走 safeUpdate =====
   assertEqual(/async function safeUpdate\(photo\)/.test(UP), true, '要有吞掉寫入失敗的包裝');

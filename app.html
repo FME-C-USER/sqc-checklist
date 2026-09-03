@@ -44,7 +44,7 @@
     const { useState, useMemo, useEffect, useRef } = React;
     // 版本字串一律用「台灣時間」的 YYYYMMDD-HHMM。與部署關卡無關 ——
     // 那道關卡看的是資安報告的檔名日期，而 GitHub runner 跑 UTC，兩者不要混在一起。
-    const APP_VERSION = '20260902-1215'; // 每次部署更新，用來確認瀏覽器跑的是哪一版（台灣時間）
+    const APP_VERSION = '20260903-1033'; // 每次部署更新，用來確認瀏覽器跑的是哪一版（台灣時間）
     // 這一版前端「至少」需要的後端版本。前後端是各自演進的，版本號本來就不會相等
     // （只改前端時後端不動，反之亦然），所以不能用「兩者相等」當健康指標 ——
     // 要比的是「線上後端有沒有舊到缺少本前端需要的 API」。
@@ -1342,9 +1342,14 @@
         setDiagBusy(true);
         try {
           const list = await SqcDB.photoDiagnostics();
-          // 卡最久的排前面，現場要先看的就是那幾張
-          list.sort((a, b) => (b.tries || 0) - (a.tries || 0));
-          setDiag(list);
+          // 被跳過的照片只存在 uploader 的記憶體裡，photoDiagnostics 讀不到 ——
+          // 不併進來的話它們會顯示成「還沒進雲端、沒有任何錯誤」，
+          // 看起來像「還沒輪到」，而實際上這一輪根本不會再碰它們。
+          const skip = (window.SqcUploader && SqcUploader.skipped) ? SqcUploader.skipped() : {};
+          const merged = list.map(p => (skip[p.id] ? { ...p, skipReason: skip[p.id] } : p));
+          // 卡最久的排前面，現場要先看的就是那幾張；被跳過的最優先（那是真正卡住的）
+          merged.sort((a, b) => (b.skipReason ? 1 : 0) - (a.skipReason ? 1 : 0) || (b.tries || 0) - (a.tries || 0));
+          setDiag(merged);
         } catch (e) {
           setDiag([{ id: 'err', name: '(讀取佇列失敗)', status: '?', where: '', tries: 0, error: String(e && e.message || e) }]);
         } finally { setDiagBusy(false); }
@@ -2712,6 +2717,15 @@ ${nm}
                             )}
                           </div>
                           <div className="text-slate-400 mt-1 font-mono break-all">{p.name}</div>
+                          {/* 被跳過的要講清楚「這一輪不會再碰它」，否則它長得跟「還沒輪到」一樣，
+                              而那正是 2026-09-03 現場 30 張照片被誤判成「還沒輪到」的原因 */}
+                          {p.skipReason && (
+                            <div className="text-red-800 mt-1 bg-red-100 rounded px-1.5 py-1 break-all">
+                              <b>本次已跳過</b>：本機無法記錄這張的狀態，所以先處理後面的照片。
+                              照片還在手機上，<b>下次重開 App 會再試一次</b>。
+                              <div className="font-mono mt-0.5 text-red-700">{p.skipReason}</div>
+                            </div>
+                          )}
                           {p.error && <div className="text-red-700 mt-1 font-mono break-all">上傳錯誤：{p.error}</div>}
                           {p.linkErr && <div className="text-amber-700 mt-1 font-mono break-all">回寫連結錯誤：{p.linkErr}（{p.linkTries} 次）</div>}
                         </div>
