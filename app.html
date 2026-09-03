@@ -44,7 +44,7 @@
     const { useState, useMemo, useEffect, useRef } = React;
     // 版本字串一律用「台灣時間」的 YYYYMMDD-HHMM。與部署關卡無關 ——
     // 那道關卡看的是資安報告的檔名日期，而 GitHub runner 跑 UTC，兩者不要混在一起。
-    const APP_VERSION = '20260903-1403'; // 每次部署更新，用來確認瀏覽器跑的是哪一版（台灣時間）
+    const APP_VERSION = '20260903-1745'; // 每次部署更新，用來確認瀏覽器跑的是哪一版（台灣時間）
     // 這一版前端「至少」需要的後端版本。前後端是各自演進的，版本號本來就不會相等
     // （只改前端時後端不動，反之亦然），所以不能用「兩者相等」當健康指標 ——
     // 要比的是「線上後端有沒有舊到缺少本前端需要的 API」。
@@ -2036,14 +2036,34 @@ ${nm}
         // 不可拍照原因還原
         const npr = note.indexOf('其他') === 0 ? '其他' : (note === '廠區店' || note === '營區店' ? note : '');
         const npo = note.indexOf('其他') === 0 ? note.replace(/^其他[:：]?/, '') : '';
-        const inRoster = STORE_ROSTER.find(s => String(s.code) === String(rec.storeCode));
+        /**
+         * 拿紀錄的店號回頭找名單，必須用 normCode 比 —— 兩邊的前導零不一定一致。
+         *
+         * 名單是文字（匯入時有 setNumberFormat('@')，023661 保得住），
+         * 但點檢紀錄的寫入沒有鎖文字格式，Sheets 會把 '023661' 轉成數字 23661。
+         * 原本這裡是 String(s.code) === String(rec.storeCode)，於是比不到 ——
+         * 就會落到 __custom 用紀錄的 5 碼店號，而店號正是照片檔名的前綴，
+         * 所以「編輯後重新上傳」會在 Drive 產生一個換了名字的孿生檔
+         * （2026-09-03 現場：023661_… 與 23661_… 同時存在）。
+         * 更糟的是後端「查同檔名就不重傳」那道防線也跟著失效。
+         *
+         * 專案裡其他比對店號的地方都已經用 normCode（1963 行的 inRoster、
+         * 防重複點檢、主檔對照），員編也有 normEmp 當退路 —— 只有這裡漏了。
+         *
+         * ★ 命中之後要存「名單的店號」而不是紀錄的店號：
+         *   下面 store 是用嚴格比對再找一次（s.code === basic.storeCode），
+         *   存 5 碼進去那一次就會找不到 → store 是 undefined，而 inRoster 命中時
+         *   customInfo 又被設成 null → effStore 為 null → 編輯畫面會變成
+         *   「請先在基本資料選擇店鋪」，整個編輯流程壞掉。
+         */
+        const inRoster = STORE_ROSTER.find(s => normCode(s.code) === normCode(rec.storeCode));
         const t = String(rec.time || taipeiNow()).replace(' ', 'T').slice(0, 16);
         // 時分欄位有自己的狀態，載回舊紀錄時要一起還原，否則畫面會是空的卻通得過必填檢查
         setTimeParts(t.length > 10 ? { h: t.slice(11, 13), m: t.slice(14, 16) } : { h: '', m: '' });
         setBasic({
           time: t,
           dept: rec.dept || '', section: rec.section || '', staffId: rec.empId || '',
-          storeCode: inRoster ? rec.storeCode : '__custom',
+          storeCode: inRoster ? inRoster.code : '__custom',
           customStore: inRoster ? '' : (rec.storeCode + ' ' + rec.storeName),
           customInfo: inRoster ? null : { code: rec.storeCode, name: rec.storeName, section: '' },
           storeType: rec.storeType === '可拍照' ? 'photo' : 'nophoto',
