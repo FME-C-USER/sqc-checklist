@@ -46,8 +46,39 @@
    * 設上限讓它週期性放手，狀態才會回到可操作。
    */
   const PUMP_LOOP_MAX = 3;
+  /**
+   * 「一直傳不上去」的門檻與之後的重試間隔。
+   *
+   * 三個佇列裡只有 pending 照片沒有出口：紀錄補送有 REC_MAX_TRIES(30) → blocked，
+   * 連結回寫有 LINK_MAX_TRIES(20) → orphan，而 pending 照片的退避上限是 60 秒，
+   * 所以會每分鐘試一次直到頁面關掉。REPORT_AFTER_TRIES 只負責「回報一筆事件」，
+   * 不會停止重試 —— 2026-09-03 現場「卡住好幾個小時一直不動」就是這個結構。
+   *
+   * 為什麼用旗標而不是新增一個狀態：狀態一改，所有既有的消費端都得跟著懂它，
+   * 而其中有一個是安全關鍵 —— 「清空整個佇列」算「幾張會永久遺失」時只認 pending
+   * （app.html），新狀態會被漏掉，於是確認訊息說「0 張會遺失」卻真的刪掉沒上傳的照片。
+   * 維持 status 不變，所有安全消費端就都繼續正確；旗標只影響「要不要密集重試」
+   * 與「畫面怎麼說」這兩件事。
+   */
+  const STALL_AFTER_TRIES = 12;    // 退避到 60 秒後約每分鐘一次，12 次≒十幾分鐘
+  const STALL_RETRY_MS = 600000;   // 之後改成每 10 分鐘一次：仍然會試，但不再打擾後端
+  /**
+   * 照片排進佇列的時間 —— 直接讀主鍵，不需要任何寫入。
+   *
+   * enqueue 的 id 是 'ph_' + Date.now() + '_' + 亂數，所以時間戳記本來就烙在主鍵上。
+   * 這一點很重要：空間滿的手機連 tries 都寫不進去，任何「靠寫入記住」的做法都失效
+   * （前一版用記憶體集合，跨工作階段就清空了，等於沒用），而主鍵是 addPhoto 當下
+   * 就決定的，之後永遠讀得到。
+   */
+  function idTime(id) {
+    const m = /^ph_(\d+)_/.exec(String(id || ''));
+    return m ? Number(m[1]) : 0;
+  }
+  // 排進來超過這個時間還沒傳完，就不可能是「第一次嘗試」→ 要請後端查同檔名
+  const STALE_MS = 600000;
   let _running = false;
   let _again = false;      // 跑到一半又被要求重試 → 跑完再跑一輪，不要直接丟掉
+  let _stalledIds = new Set();  // 一直傳不上去的照片 id（每輪從已讀出的紀錄重新推導）
   const _listeners = new Set();
 
   const emit = () => _listeners.forEach((fn) => { try { fn(); } catch (e) {} });
@@ -59,19 +90,27 @@
    *   允許來自這個網域的跨網域 PUT；沒帶的話瀏覽器會被 CORS 擋掉（No Access-Control-Allow-Origin）。
    *   retry 讓後端知道要不要查「同檔名是否已存在」：第一次上傳不可能已存在，查了白花 0.2~0.4 秒。
    *
-   * ⚠ 已知缺口（2026-09-03）：retry 只看 p.tries，而 tries 是寫進 IndexedDB 的 ——
-   * 空間不足時寫不進去、永遠是 0 → 後端每次都當成首次上傳、不查同檔名 →
-   * 每個工作階段都在 Drive 建一個新檔（現場實測同一張有 8 份以上）。
+   * retry 不可以只看 p.tries：tries 是寫進 IndexedDB 的，而空間不足的手機
+   * 連 tries 都寫不進去、永遠是 0 → 後端每次都當成首次上傳、不查同檔名 →
+   * 每個工作階段都在 Drive 建一個新檔（2026-09-03 現場同一張有 8 份以上）。
    *
-   * 曾經想用「記憶體中的本次已嘗試集合」補這個洞，但那是無效的：
-   * 每一條路徑都是「嘗試 → safeUpdate 成功（tries 被記下）或失敗（進 _skip、本輪不再碰）」，
-   * 所以「已嘗試過但 tries 仍是 0」這個狀態在同一個工作階段內不存在，
-   * 而跨工作階段時那個集合也已經清空。真正的解法是讓寫入能成功
-   * （把 blob 與中繼資料分開存，狀態更新就不必重寫整張 ~950KB 的照片）。
+   * 曾經用「記憶體中的本次已嘗試集合」補這個洞，那是無效的：每一條路徑都是
+   * 「嘗試 → safeUpdate 成功（tries 被記下）或失敗（進 _skip、本輪不再碰）」，
+   * 所以「已嘗試過但 tries 仍是 0」在同一個工作階段內不存在，而跨工作階段時
+   * 那個集合已經清空 —— 記憶體補不了一個「需要跨工作階段記住」的洞。
+   *
+   * 改用主鍵裡的時間戳記：排進來超過 STALE_MS 還沒傳完，就不可能是第一次嘗試。
+   * 這個訊號不需要任何寫入，所以空間滿的手機也拿得到；而且它跨工作階段有效，
+   * 因為它烙在主鍵上。代價只落在真的卡住的照片（多一次同檔名查詢 0.2~0.4 秒），
+   * 正常手機拍完幾秒內就傳完，不會付這個成本。
    */
   async function sessionsFor(list) {
+    const now = Date.now();
     const r = await window.SqcApi.createUploadSessions(
-      list.map((p) => ({ pathParts: p.pathParts || [], name: p.name, retry: (p.tries || 0) > 0 })),
+      list.map((p) => ({
+        pathParts: p.pathParts || [], name: p.name,
+        retry: (p.tries || 0) > 0 || (now - idTime(p.id)) > STALE_MS,
+      })),
       location.origin);
     return (r && r.sessions) || [];
   }
@@ -231,6 +270,14 @@
       out.linkTries = 0;
       out.netTries = 0;
     }
+    /**
+     * 檔案已經進雲端了，「一直傳不上去」的標記就不再成立 ——
+     * 不清掉的話橫幅會繼續說「有照片需要處理」，而其實已經好了。
+     */
+    if (status === 'done' || status === 'linked') {
+      out.error = '';
+      out.stalled = false;
+    }
     return out;
   }
 
@@ -362,7 +409,14 @@
       //   對 createUploadSessions 打一次，後端越忙這件事越傷。）
       phase('讀取待傳清單');
       const due = (p) => !_skip.has(p.id) && (!p.nextAt || p.nextAt <= Date.now());
-      let pend = (await window.SqcDB.pendingPhotos()).filter(due);
+      const all = await window.SqcDB.pendingPhotos();
+      /**
+       * 從剛剛已經讀出來的紀錄推導「一直傳不上去」的張數 —— 不額外讀一次。
+       * counts() 不能自己算：它是每次 emit 都會被呼叫的，而數 stalled 需要
+       * 讀出紀錄本體（含 blob），那正是要避免的記憶體壓力。
+       */
+      _stalledIds = new Set(all.filter((p) => p.stalled).map((p) => p.id));
+      let pend = all.filter(due);
       while (pend.length && navigator.onLine) {
         // 一次向後端取 BATCH 張的上傳網址（往返次數減半），實際 PUT 仍每次 CONCURRENCY 張並行，
         // 避免在行動網路上同時塞太多連線反而更容易失敗
@@ -382,7 +436,12 @@
            */
           await Promise.all(batch.map(async (p) => {
             const tries = (p.tries || 0) + 1;
-            const ok = await safeUpdate({ ...p, tries, error: String(e.message || e), nextAt: Date.now() + Math.min(60000, 2000 * tries) });
+            // 同一個出口：一直取不到上傳網址也算「傳不上去」，不能每分鐘再打一次
+            const stalled = tries >= STALL_AFTER_TRIES;
+            const ok = await safeUpdate({
+              ...p, tries, stalled, error: String(e.message || e),
+              nextAt: Date.now() + (stalled ? STALL_RETRY_MS : Math.min(60000, 2000 * tries)),
+            });
             if (!ok) _skip.set(p.id, _storeBroken);
           }));
           emit();
@@ -395,10 +454,36 @@
             let ok;
             try {
               const fileId = await uploadOne(p, sessions[off + k]);
-              ok = await safeUpdate({ ...p, status: 'done', fileId, error: '' });
+              /**
+               * ★ 檔案已經在雲端了，本機這份 blob 就是廢料 —— 這裡要「卸貨」而不是原封存回去。
+               *
+               * 原本寫的是 { ...p, status: 'done', fileId }，blob 還在裡面，
+               * 所以「把狀態從 pending 改成 done」這個幾百位元組的變更，
+               * 要重寫整張 ~820KB 的照片，並且需要 ~820KB 的可用空間才寫得成功。
+               * 空間滿的手機於是永遠寫不進去 → 照片永遠停在 pending →
+               * 下次開 App 又傳一次 → Drive 多一份。
+               *
+               * 卸貨之後這次寫入只有幾百位元組，幾乎必定成功，而且立刻釋放 ~820KB
+               * —— 從「每傳成功一張釋放 0」變成「每傳成功一張就為下一張騰出空間」，
+               * 佇列會自己排完。這是 blob/中繼資料分家（要升 IndexedDB 版本、
+               * 要寫容錯搬移）之外，拿到同樣效果的最小改動。
+               *
+               * done 之後沒有任何東西需要 blob：attachPhotoLinks 只要 fileId 與檔名，
+               * 而佇列裡的 thumb 從來沒有任何讀取端（只被寫入與刪除）。
+               */
+              ok = await safeUpdate(released({ ...p, fileId }, 'done'));
             } catch (e) {
               const tries = (p.tries || 0) + 1;
-              ok = await safeUpdate({ ...p, tries, error: String(e.message || e), nextAt: Date.now() + Math.min(60000, 2000 * tries) });
+              /**
+               * 試到一定次數就不再每分鐘打一次 —— 這是 pending 照片原本唯一缺的出口。
+               * 注意 status 刻意保持 pending：照片還在手機上、還是會遺失，
+               * 所有「幾張會永久遺失」的計算都必須繼續把它算進去。
+               */
+              const stalled = tries >= STALL_AFTER_TRIES;
+              ok = await safeUpdate({
+                ...p, tries, stalled, error: String(e.message || e),
+                nextAt: Date.now() + (stalled ? STALL_RETRY_MS : Math.min(60000, 2000 * tries)),
+              });
             }
             // 狀態寫不回去 → 本次工作階段跳過它，讓後面的照片有機會被處理。
             // 絕對不刪：照片還在 IndexedDB，下次開 App 是新的工作階段，會再試一次。
@@ -566,12 +651,18 @@
   }
   let _lastPumpError = '';
 
-  /** 清掉退避：上傳重試(nextAt)與連結回寫重試(linkNextAt)都歸零，讓下一輪立刻重試 */
+  /**
+   * 清掉退避：上傳重試(nextAt)與連結回寫重試(linkNextAt)都歸零，讓下一輪立刻重試。
+   * 也一併清掉「一直傳不上去」的旗標 —— 使用者按「立即重試」就是在說
+   * 「情況變了（換了網路、清了空間），重新給它一次機會」，若不清掉，
+   * 那幾張下一次失敗就會立刻又被判定為 stalled、退避回 10 分鐘。
+   */
   async function clearBackoff(recordId) {
     const all = recordId ? await window.SqcDB.photosOfRecord(recordId) : await window.SqcDB.allPhotos();
     await Promise.all(all
-      .filter((p) => p.status !== 'linked' && (p.nextAt || p.linkNextAt))
-      .map((p) => window.SqcDB.updatePhoto({ ...p, nextAt: 0, linkNextAt: 0 })));
+      .filter((p) => p.status !== 'linked' && (p.nextAt || p.linkNextAt || p.stalled))
+      .map((p) => window.SqcDB.updatePhoto({ ...p, nextAt: 0, linkNextAt: 0, stalled: false, tries: 0 })));
+    _stalledIds = new Set();
   }
 
   /**
@@ -687,6 +778,12 @@
       unfinished: pending + done,
       queuedRecords: recs.length,
       busy: _running,
+      /**
+       * 其中「一直傳不上去、已停止密集重試」的張數。
+       * 它是 pending 的子集（status 刻意沒有改），所以不能把它加進任何總數 ——
+       * 只用來決定畫面要說「上傳中，請保持頁面開啟」還是「需要處理」。
+       */
+      stalled: _stalledIds.size,
       // 吞掉例外是為了不彈「系統發生未預期錯誤」，但原因不能就此消失 —— 診斷視窗要看得到。
       // 佇列寫不回去是最要緊的一種：這支手機從現在起無法保存任何上傳進度。
       phase: _phase,

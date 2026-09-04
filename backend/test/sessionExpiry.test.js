@@ -35,7 +35,7 @@ const ROOT = path.join(__dirname, '..', '..');
  * 用一般的 // 規則會把字串裡的 https:// 之後整行吃掉。
  */
 function stripComments(src) {
-  const out = src.replace(/\{\s*\/\*[\s\S]*?\*\/\s*\}/g, ' ').replace(/\/\*[\s\S]*?\*\//g, ' ');
+  const out = src.replace(/\/\*[\s\S]*?\*\//g, ' ');
   return out.split('\n').map((l) => (/^\s*\/\//.test(l) ? '' : l)).join('\n');
 }
 const read = (...p) => stripComments(fs.readFileSync(path.join(ROOT, ...p), 'utf8'));

@@ -44,7 +44,7 @@
     const { useState, useMemo, useEffect, useRef } = React;
     // 版本字串一律用「台灣時間」的 YYYYMMDD-HHMM。與部署關卡無關 ——
     // 那道關卡看的是資安報告的檔名日期，而 GitHub runner 跑 UTC，兩者不要混在一起。
-    const APP_VERSION = '20260903-1745'; // 每次部署更新，用來確認瀏覽器跑的是哪一版（台灣時間）
+    const APP_VERSION = '20260904-1042'; // 每次部署更新，用來確認瀏覽器跑的是哪一版（台灣時間）
     // 這一版前端「至少」需要的後端版本。前後端是各自演進的，版本號本來就不會相等
     // （只改前端時後端不動，反之亦然），所以不能用「兩者相等」當健康指標 ——
     // 要比的是「線上後端有沒有舊到缺少本前端需要的 API」。
@@ -2341,9 +2341,39 @@ ${nm}
               ? `✅ ${storeName} 已送出（先前的回應在網路上遺失，已確認資料只有一筆）`
               : `✅ ${isEdit ? '已更新' : '已送出'}　${storeName}　${total}/${TOTAL_MAX}（${grade.txt}）`);
           }
-        }).catch(e => alert((isEdit ? '更新' : '送出') + '失敗：' + e.message
-          + (isEdit ? '' : '\n\n這筆已存入待送佇列，網路恢復後會自動重送，請保持頁面開啟。')))
-          .finally(() => setSubmitting(false));
+        }).catch(e => {
+          /**
+           * 逾時／連線中斷不可以說「送出失敗」。
+           *
+           * 2026-09-03 現場：畫面說「送出失敗：伺服器逾時未回應（12 秒）」，
+           * 但查詢時那筆紀錄與照片連結都在 —— 後端做完了，只是回應沒在 12 秒內回來。
+           * 而說成「失敗」的直接後果是同事再按一次送出，每一次都要搶後端的腳本鎖，
+           * 於是更多人逾時：這個訊息本身有放大效應，是唯一會自我加劇的一項。
+           *
+           * 新增紀錄其實很安全：送出前就先進了待送佇列，補送每輪會先問 recordExists
+           * （只讀「紀錄ID」一欄、不搶鎖），已存在就把佇列項刪掉，不會寫成兩列。
+           * 所以正確的說法是「還在確認」，而且要明確叫她不要重複送出。
+           *
+           * 編輯不進佇列（原紀錄仍完整、沒有遺失風險），所以要請她自己再存一次
+           * —— 但同一個紀錄ID 重存是覆寫，不會產生第二筆。
+           */
+          const unsure = !!(e && (e.transient || e.timedOut));
+          if (unsure && !isEdit) {
+            alert('⏳ 伺服器沒有在時限內回應：' + e.message
+              + '\n\n這不代表失敗 —— 後端很可能已經寫入成功了。'
+              + '\n系統會自動確認（通常幾十秒內），確認後上方提示就會消失。'
+              + '\n\n請不要重複按「送出評核」，重複送出只會讓伺服器更慢。');
+            return;
+          }
+          if (unsure && isEdit) {
+            alert('⏳ 伺服器沒有在時限內回應：' + e.message
+              + '\n\n這次修改可能已經存進去了。請到「查詢紀錄」確認那一筆'
+              + '\n若還是舊的，再存一次即可（同一筆會覆寫，不會變成兩筆）。');
+            return;
+          }
+          alert((isEdit ? '更新' : '送出') + '失敗：' + e.message
+            + (isEdit ? '' : '\n\n這筆已存入待送佇列，網路恢復後會自動重送，請保持頁面開啟。'));
+        }).finally(() => setSubmitting(false));
       };
 
       // 包一層例外攔截：任何未預期的錯誤都要顯示出來，不可讓按鈕「按了沒反應」而查不出原因
@@ -2715,8 +2745,9 @@ ${nm}
                             : p.status === 'orphan' ? 'border-amber-200 bg-amber-50' : 'border-slate-200 bg-slate-50')}>
                           <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
                             <span className={"font-bold " + (p.status === 'pending' ? 'text-red-700' : p.status === 'orphan' ? 'text-amber-700' : 'text-slate-600')}>
-                              {p.status === 'pending' ? '還沒進雲端' : p.status === 'done' ? '已進雲端，待寫連結'
-                                : p.status === 'linked' ? '完成' : p.status === 'orphan' ? '需人工處理' : p.status}
+                              {p.status === 'pending' ? (p.stalled ? '一直傳不上去' : '還沒進雲端')
+                                : p.status === 'done' ? '已進雲端，待寫連結'
+                                  : p.status === 'linked' ? '完成' : p.status === 'orphan' ? '需人工處理' : p.status}
                             </span>
                             <span className="text-slate-600">{p.where || '(無題目)'}</span>
                             {p.tries > 0 && <span className="text-slate-500">已重試 <b>{p.tries}</b> 次</span>}
@@ -2965,16 +2996,28 @@ ${nm}
                 <div>
                   {/* 標題跟著「還有沒有照片沒進雲端」變：pending 為 0 時檔案都安全了，
                       再說「請保持頁面開啟」會讓人以為照片還可能掉 */}
+                  {/**
+                    * 「一直傳不上去」要跟「正在傳」講不一樣的話。
+                    *
+                    * 2026-09-03 現場有人卡了好幾個小時，畫面一直寫「請保持頁面開啟」——
+                    * 於是她就一直開著等，而那幾張其實每分鐘失敗一次、不會自己好。
+                    * 「請保持頁面開啟」是在請她等；等不會有結果的時候，要改成請她處理。
+                    */}
                   <span className="font-bold">
-                    {pendingUp.pending > 0
-                      ? '📤 還有照片沒進雲端，請保持頁面開啟'
-                      : '☁️ 照片都在雲端了，背景正在寫入連結'}
+                    {pendingUp.stalled > 0
+                      ? '⚠ 有照片一直傳不上去，請按「查看原因」'
+                      : pendingUp.pending > 0
+                        ? '📤 還有照片沒進雲端，請保持頁面開啟'
+                        : '☁️ 照片都在雲端了，背景正在寫入連結'}
                   </span>
                   {/* 不可以把 pending 與 done 合稱「未完成」—— done 的檔案已經在雲端硬碟，
                       只差最後一步回寫連結。合起來講會讓人以為照片都傳不上去。 */}
                   <span className="text-xs ml-2">
                     {pendingUp.queuedRecords > 0 && <span className="mr-2">待送出紀錄 <b>{pendingUp.queuedRecords}</b> 筆</span>}
-                    {pendingUp.pending > 0 && <span className="mr-2">上傳中 <b>{pendingUp.pending}</b> 張</span>}
+                    {/* stalled 是 pending 的子集（status 刻意沒改），所以要相減，不可以相加 */}
+                    {pendingUp.pending - (pendingUp.stalled || 0) > 0
+                      && <span className="mr-2">上傳中 <b>{pendingUp.pending - (pendingUp.stalled || 0)}</b> 張</span>}
+                    {pendingUp.stalled > 0 && <span className="mr-2 text-red-700">一直傳不上去 <b>{pendingUp.stalled}</b> 張</span>}
                     {pendingUp.done > 0 && <span className="mr-2">已上傳、等寫入連結 <b>{pendingUp.done}</b> 張</span>}
                     {pendingUp.orphan > 0 && <span className="text-amber-700">需人工處理 <b>{pendingUp.orphan}</b> 張</span>}
                   </span>

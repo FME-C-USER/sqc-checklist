@@ -107,6 +107,8 @@
           // 但診斷畫面若因此顯示「內容 0 KB」，會被誤讀成「照片內容不見了」。
           hasBlob: !!p.blob, blobSize: (p.blob && p.blob.size) || p.bytes || 0, fileId: p.fileId || '',
           reported: !!p.reported,
+          // 「一直傳不上去、已停止密集重試」—— 診斷要標出來，否則跟「正在傳」長得一樣
+          stalled: !!p.stalled,
         });
         c.continue();
       };

@@ -132,14 +132,19 @@ const PHOTO = (over) => ({
   // 條件已抽成共用的 due()：迴圈頭尾都用同一份，避免只改一處而漏掉另一處。
   assertEqual(/const due = \(p\) => !_skip\.has\(p\.id\) && \(!p\.nextAt \|\| p\.nextAt <= Date\.now\(\)\);/.test(UP),
     true, '★ due() 要同時排除退避中與跳過名單');
-  assertEqual((UP.match(/pendingPhotos\(\)\)\.filter\(due\)/g) || []).length, 2,
+  // 比對「有幾處過了 due()」而不是「字面長相」：2026-09-03 迴圈開頭改成先把清單存進
+  // 變數（要順便推導 stalled 張數），字面就變了，但頭尾都過 due() 這個意圖沒變。
+  assertEqual((UP.match(/\.filter\(due\)/g) || []).length, 2,
     '★ 迴圈開頭與每圈結尾都要用同一份 due()（只改一處會讓另一處繼續取到不該取的）');
 
   // ===== 3. 三個寫回佇列的地方都要走 safeUpdate =====
   assertEqual(/async function safeUpdate\(photo\)/.test(UP), true, '要有吞掉寫入失敗的包裝');
-  assertEqual(/await safeUpdate\(\{ \.\.\.p, status: 'done', fileId, error: '' \}\)/.test(UP), true,
-    '上傳成功後的狀態寫回要包起來');
-  assertEqual((UP.match(/safeUpdate\(\{ \.\.\.p, tries/g) || []).length, 2,
+  // 2026-09-03 起這一筆改成先 released() 卸掉 blob 再寫（幾百位元組而不是 ~820KB），
+  // 但它一樣必須走 safeUpdate —— 寫不進去時要能收斂到跳過名單，不可以拋出去。
+  assertEqual(/await safeUpdate\(released\(\{ \.\.\.p, fileId \}, 'done'\)\)/.test(UP), true,
+    '上傳成功後的狀態寫回要包起來（而且要卸掉 blob）');
+  // 兩處記次都加上了 stalled 判定，寫法變成多行，所以比對跨行的形狀
+  assertEqual((UP.match(/safeUpdate\(\{\s*\.\.\.p, tries, stalled,/g) || []).length, 2,
     '取不到上傳網址、單張上傳失敗兩個記次的地方都要包起來');
   assertEqual(/\n      const fileId = await uploadOne\(p, sessions\[off \+ k\]\);\n              await window\.SqcDB\.updatePhoto/.test(UP), false,
     '上傳路徑上不可再有裸的 updatePhoto');

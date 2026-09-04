@@ -62,9 +62,14 @@ assertEqual(/postStat\.pending \+ postStat\.done\)\) \|\| postSubmit\.added/.tes
   '不可再把 pending+done 當成「未完成張數」');
 assertEqual(CODE.includes("cloudSafe ? '關閉（連結會在背景寫完）' : '我知道風險，稍後再傳'"), true,
   'cloudSafe 時按鈕不該還叫「我知道風險」');
-// 藍色細條同一套標準
-assertEqual(CODE.includes("pendingUp.pending > 0\n                      ? '📤 還有照片沒進雲端，請保持頁面開啟'"), true,
-  '頂部提示條也要用 pending 判斷');
+/**
+ * 藍色細條同一套標準：判斷「還有照片沒進雲端」只能看 pending。
+ * 2026-09-03 傍晚在它前面多了一層 stalled 分支（一直傳不上去要改口，
+ * 因為「請保持頁面開啟」是在請她等，而等不會有結果），
+ * 所以不可以再用固定縮排的字串比對；pending 這一層的措辭與門檻本身不變。
+ */
+assertEqual(/pendingUp\.pending > 0\s*\n\s*\? '📤 還有照片沒進雲端，請保持頁面開啟'/.test(CODE), true,
+  '★ 那個措辭必須掛在 pendingUp.pending > 0 這個條件上，不可以掛到別的條件去');
 
 // ===== 逐張狀態 =====
 assertEqual(/const \[postShots, setPostShots\] = useState\(\[\]\);/.test(CODE), true, '要有逐張狀態');

@@ -1,13 +1,14 @@
 /**
  * 回歸測試：兩件在 2026-09-03 現場觀察到的事。
  *
- * 一、Drive 裡同一張照片有 8 份以上（時間戳每兩分鐘一個）—— 尚未修好，本檔固定住現況
- *   retry 旗標只看 p.tries，而 tries 是寫進 IndexedDB 的 ——
+ * 一、Drive 裡同一張照片有 8 份以上（時間戳每兩分鐘一個）
+ *   retry 旗標原本只看 p.tries，而 tries 是寫進 IndexedDB 的 ——
  *   空間不足時寫不進去、永遠是 0 → retry 永遠 false → 後端每次都當成首次上傳、
  *   不查同檔名 → 又在 Drive 建一個新檔。
- *   同一個工作階段內有 _skip 跳過名單擋著（案例 1），但重開 App 就再來一次（案例 1b）：
- *   份數 ≈ 開啟 App 的次數。解法是讓寫入能成功（blob 與中繼資料分開存），
- *   不是在記憶體裡記「已試過」—— 記憶體隨工作階段一起消失，補不到這個洞。
+ *   同一個工作階段內有 _skip 跳過名單擋著（案例 1），重開 App 則靠主鍵裡的
+ *   時間戳記認出「這張排很久了」（案例 1b）—— 那個訊號不需要任何寫入，
+ *   所以空間滿的手機也拿得到，而且跨工作階段有效。
+ *   曾經用記憶體集合補這個洞，那是無效的：記憶體隨工作階段一起消失。
  *
  * 二、「已上傳、等寫入連結」永遠不消失，但轉出的報表其實已經有連結
  *   attachPhotoLinks 要拿後端的腳本鎖（waitLock 20 秒），12 秒結構上不夠。
@@ -112,8 +113,11 @@ function load(photos, opts) {
   return { uploader: sandbox.SqcUploader, store, drive, sessionItems, puts };
 }
 
+// 主鍵裡的時間戳記決定 retry 要不要查同檔名，所以一定要用「當下」——
+// 寫成 'ph_1000' 是 1970 年，會被正確地判定為陳舊，測不到「首次上傳」那條。
+const T0 = Date.now();
 const photo = (n) => ({
-  id: 'ph_' + String(1000 + n), name: 'p' + n + '.jpg', status: 'pending',
+  id: 'ph_' + (T0 + n) + '_a' + n, name: 'p' + n + '.jpg', status: 'pending',
   recordId: 'R1', month: '11509', pathParts: ['115年09月', '1.招牌'],
   blob: { size: 900000 }, tries: 0, where: '1.招牌',
 });
@@ -142,17 +146,18 @@ const settle = () => new Promise((r) => setTimeout(r, 40));
   }
 
   /**
-   * ===== 1b. 已知缺口：跨工作階段仍會重複 =====
-   * 重新載入 uploader（＝使用者關掉 App 再開、或重新整理），跳過名單清空，
-   * 而 tries 因為寫不進 IndexedDB 仍是 0 → retry 又是 false → 後端不查同檔名 → Drive 再多一份。
-   * 這就是現場「同一張 8 份」的真正機制：份數 ≈ 開啟 App 的次數，不是 pump 的次數。
+   * ===== 1b. ★ 跨工作階段也不可以重複（2026-09-03 傍晚補上）=====
+   * 重新載入 uploader＝使用者關掉 App 再開，跳過名單與任何記憶體狀態都清空，
+   * 而 tries 因為寫不進 IndexedDB 仍是 0。這裡原本是「已知缺口」，
+   * 份數 ≈ 開啟 App 的次數，就是現場同一張 8 份的真正機制。
    *
-   * 真正的解法是讓寫入能成功（把 blob 與中繼資料分開存），不是在記憶體裡記「已試過」——
-   * 記憶體本身就是隨工作階段消失的東西。這條斷言刻意固定住「壞的現況」：
-   * 等 blob 拆分做完之後它會失敗，那時請把 2 改成 1。
+   * 補法不是在記憶體裡記「已試過」（那隨工作階段一起消失，補不到這個洞），
+   * 而是讀主鍵裡的時間戳記：'ph_<ms>_<rand>' 的 ms 是 addPhoto 當下決定的，
+   * 不需要任何寫入，而且跨工作階段永遠讀得到。
    */
   {
-    const shared = [photo(0)];
+    // 這一張是 20 分鐘前排進佇列的（超過 STALE_MS 的 10 分鐘）
+    const shared = [{ ...photo(0), id: 'ph_' + (T0 - 1200000) + '_old' }];
     const s1 = load(shared, { writeFails: true });
     await s1.uploader.pump(); await settle();
     // 第二個工作階段共用同一個 Drive（用第一階段留下的檔名清單）
@@ -160,10 +165,10 @@ const settle = () => new Promise((r) => setTimeout(r, 40));
     s2.drive.push(...s1.drive);
     await s2.uploader.pump(); await settle();
 
-    assertEqual(s2.drive.length, 2,
-      '已知缺口：重開 App 後 tries 仍是 0 → 又建一個新檔（待 blob 拆分後才會變 1）');
-    assertEqual(s2.sessionItems.flat().map((i) => i.retry), [false],
-      '已知缺口：新工作階段無從得知這張試過了');
+    assertEqual(s2.drive.length, 1,
+      '★ 重開 App 後不可以再建一個新檔（實際 ' + s2.drive.length + '）—— 這是現場同一張 8 份的來源');
+    assertEqual(s2.sessionItems.flat().map((i) => i.retry), [true],
+      '★ 新工作階段要靠主鍵的時間戳記認出「這張排很久了」，不能依賴寫得進去才算的 tries');
   }
 
   // ===== 2. 一切正常時不可以多花那次查詢 =====
@@ -172,7 +177,7 @@ const settle = () => new Promise((r) => setTimeout(r, 40));
     await t.uploader.pump();
     await settle();
     assertEqual(t.sessionItems.flat().map((i) => i.retry), [false], '首次上傳不查同檔名');
-    assertEqual(t.store.get('ph_1000').status, 'linked', '正常流程要跑完');
+    assertEqual(t.store.get('ph_' + T0 + '_a0').status, 'linked', '正常流程要跑完');
     assertEqual(t.drive.length, 1, 'Drive 上一份');
   }
 
@@ -181,7 +186,7 @@ const settle = () => new Promise((r) => setTimeout(r, 40));
     const t = load([{ ...photo(0), error: '舊的上傳錯誤', linkErr: '舊的回寫錯誤', linkTries: 3, netTries: 5 }], {});
     await t.uploader.pump();
     await settle();
-    const p = t.store.get('ph_1000');
+    const p = t.store.get('ph_' + T0 + '_a0');
     assertEqual(p.status, 'linked', '前提：已完成');
     assertEqual(p.error, '', '★ 完成後不可留著舊的上傳錯誤');
     assertEqual(p.linkErr, '', '★ 完成後不可留著舊的回寫錯誤');

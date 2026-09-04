@@ -65,14 +65,24 @@ assertEqual(timeoutsOf('queryRecords'), [12000, 30000], '查詢紀錄同屬「�
 assertEqual(timeoutsOf('attachPhotoLinks'), [12000, 45000], '★ 回寫連結第二次要給足時間');
 assertEqual(timeoutsOf('attachPhotoLinks').length, 2, '★ 且次數要從 4 降到 2（它要拿鎖）');
 
-// submitRecord 目前仍是四次 12 秒。它同樣要拿鎖，理由上也該加長，
-// 但那會讓使用者在送出按鈕前最多等 57 秒 —— 尚未決定，先維持現狀並在此標記。
-assertEqual(timeoutsOf('submitRecord'), [12000, 12000, 12000, 12000], '送出維持四次 12 秒（待評估）');
+/**
+ * submitRecord 跟 attachPhotoLinks 一樣要拿後端的腳本鎖，12 秒結構上不夠。
+ * 2026-09-03 現場：畫面說「送出失敗：伺服器逾時未回應（12 秒）」，
+ * 但查詢時那筆紀錄與照片連結都在 —— 後端做完了，回應沒趕上。
+ *
+ * 放寬是安全的：送出前就先進了待送佇列，補送每輪先問 recordExists
+ * （只讀「紀錄ID」一欄、不搶鎖），已存在就把佇列項刪掉，不會寫成兩列。
+ * 次數從 4 降到 2 對要拿鎖的動作也是好事：少一半的鎖競爭。
+ */
+assertEqual(timeoutsOf('submitRecord'), [12000, 45000], '★ 送出要給足時間（它要拿鎖）');
+assertEqual(timeoutsOf('submitRecord').length, 2, '★ 且次數要從 4 降到 2');
 assertEqual(timeoutsOf('checkEditPass'), [12000, 12000, 12000, 12000], '未列出的動作用預設值');
 
 // 最壞總等待要有上限，否則失敗時像卡死
 assertEqual(worst('getBootstrap') <= 75000, true, '開場載入最壞不超過 75 秒（實際 58 秒）');
-assertEqual(worst('submitRecord'), 53200, '送出的最壞總等待與原本相同');
+// 最壞總等待從 53.2 秒變 57.7 秒 —— 多等 4.5 秒，換到的是「不會把成功誤報為失敗」。
+// 誤報的代價大得多：同事會再按一次送出，而每次送出都要搶鎖 → 更多人逾時。
+assertEqual(worst('submitRecord'), 57700, '送出的最壞總等待（12+45 加上退避）');
 assertEqual(worst('getStoreList') <= 100000, true, '名單最壞不超過 100 秒（背景載入，畫面仍可用）');
 
 // 逾時訊息要講實際用的秒數，不可寫死 12
