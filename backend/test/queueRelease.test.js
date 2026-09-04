@@ -62,7 +62,9 @@ function load(photos, opts) {
   sandbox.window = sandbox;
   sandbox.SqcApi = {
     createUploadSessions: async (items) => ({ sessions: items.map((_, i) => ({ ok: true, url: 'u' + i })) }),
-    attachPhotoLinks: async () => ({ ok: true }),
+    // linkFails：讓連結回寫回報「找不到紀錄」，用來把 orphan 留在 orphan
+    // （2026-09-04 起 orphan 每次開 App 會被給一次機會，成功就會轉 linked）
+    attachPhotoLinks: async () => ((opts && opts.linkFails) ? { ok: false, message: '找不到紀錄' } : { ok: true }),
     sharePhotoLinks: async () => ({ ok: true }),
     recordExists: async () => ({ exists: false }),
     submitRecord: async () => ({ ok: true }),
@@ -152,7 +154,14 @@ const done = (id) => ({
      */
     assertEqual(t.store.get('d').status, 'linked', '★ done 的連結要能單獨寫回（不可被同一筆的 pending 擋住）');
     assertEqual(!!t.store.get('d').blob, false, '連結寫成功了，卸貨是正確的');
-    assertEqual(!!t.store.get('o').blob, true, '★ orphan（待人工處理）不可卸貨');
+    /**
+     * 2026-09-04 起 orphan 每次開 App 會被給一次重送機會（原本三個入口全都不收它，
+     * 一旦變成 orphan 就永遠掛在畫面上，現場有一張掛了一週）。
+     * 這裡的假後端回 ok，所以它會成功轉 linked 並卸貨 —— 那是正確的：連結寫成功了。
+     * 「重送失敗時仍要留著內容」由下面的案例 2b 驗證。
+     */
+    assertEqual(t.store.get('o').status, 'linked', '★ orphan 重送成功要轉成 linked（不可再永遠掛著）');
+    assertEqual(!!t.store.get('o').blob, false, '轉成 linked 之後卸貨是正確的');
     // （'p' 在這個假環境裡會上傳成功而合理地轉成 linked，所以不能在這裡斷言它的 blob。
     //   「releaseFinished 不可碰未完成的照片」由下面的 t.visited === [] 與 3b 段負責。）
     // 清理只該碰 linked：走全部的話，每 15 秒就會把 pending 那些 ~900KB 的 blob
@@ -206,8 +215,10 @@ const done = (id) => ({
   {
     // 只放 orphan：done 會被 reconcileLinks 合理地寫連結並轉 linked，
     // 混在一起就分不出「是 releaseFinished 碰了它」還是「是連結寫成功了」。
-    // orphan 不在 flushLinksIfDone 的範圍內，所以能孤立出這一道保險。
-    const t = load([{ ...done('o'), status: 'orphan' }], { eachIgnoresStatus: true });
+    // 搭配 linkFails 讓那一次重送失敗，orphan 就會留在 orphan，能孤立出這一道保險。
+    // linkFails 讓那一次重送回報「找不到紀錄」→ 留在 orphan，
+    // 才能孤立出「releaseFinished 有沒有碰非 linked 的」這一道保險。
+    const t = load([{ ...done('o'), status: 'orphan' }], { eachIgnoresStatus: true, linkFails: true });
     await t.uploader.pump();
     await new Promise((r) => setTimeout(r, 30));
     assertEqual(t.visited.length, 1, '前提：這個情境下 eachPhoto 確實把非 linked 的也吐出來了');

@@ -153,7 +153,18 @@ const settle = () => new Promise((r) => setTimeout(r, 300));
   }
   const ghost = Array.from(b.photos.values())[0];
   assertEqual(ghost.status, 'orphan', '重試達上限後應標記 orphan 並停止重送');
-  assertEqual(b.calls.length <= 20, true, `重送次數應被上限擋住(實際 ${b.calls.length} 次)`);
+  /**
+   * 20 次 countable 失敗 + orphan「每次開 App 給一次機會」的那 1 次 = 21。
+   *
+   * 那一次是 2026-09-04 加的：orphan 原本三個入口全都不收，一旦變成 orphan
+   * 就永遠掛在畫面上（現場有一張掛了一週）。但它必須是「每個工作階段一次」，
+   * 不可以退回每輪都試 —— 那就把 LINK_MAX_TRIES 當初要避免的無限重試搬回來了。
+   * 這裡跑了 30 輪，所以 21 同時證明了「有給機會」與「只給一次」。
+   */
+  assertEqual(b.calls.length, 21,
+    `重送次數要停在 20 次上限 + orphan 的 1 次機會(實際 ${b.calls.length} 次)`);
+  assertEqual(ghost.linkErr.indexOf('可以清空佇列') >= 0, true,
+    '★ 放棄時的訊息要說「該做什麼」，不是只寫後端原文「找不到紀錄」');
 
   // ===== 情境5：後端還沒部署新版(取不到上傳網址)時，照片必須留在佇列等重試，不可遺失 =====
   //   前端與後端無法同時更新，中間必然有空窗；這段期間照片只能延後上傳，絕不能被丟掉。

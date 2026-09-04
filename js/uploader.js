@@ -79,6 +79,7 @@
   let _running = false;
   let _again = false;      // 跑到一半又被要求重試 → 跑完再跑一輪，不要直接丟掉
   let _stalledIds = new Set();  // 一直傳不上去的照片 id（每輪從已讀出的紀錄重新推導）
+  const _orphanTried = new Set();  // 本次開 App 已經給過一次機會的 orphan（只存記憶體，重開就重來）
   const _listeners = new Set();
 
   const emit = () => _listeners.forEach((fn) => { try { fn(); } catch (e) {} });
@@ -710,11 +711,40 @@
      * 剩下那張自己繼續重試，補上時再送一次即可；每張照片實際只會被送一次，
      * 因為送成功就轉成 linked，不會再進 toLink。
      */
-    const toLink = list.filter((p) => p.status === 'done');
-    if (!toLink.length) return; // 已全部 linked 過了
-    // 退避：回寫失敗過就等一段時間再試，避免密集打後端(會與使用者的查詢互相搶資源)
+    /**
+     * done 之外，也把「本次開 App 還沒試過的 orphan」帶上一次。
+     *
+     * orphan 是「連結回寫連續失敗 LINK_MAX_TRIES 次後放棄」的狀態，原本三個入口
+     * （pendingPhotos、reconcileLinks、clearBackoff）全都不收它 —— 所以一旦變成
+     * orphan 就永遠不會再被碰，連按「立即重試」也沒用（那支只清時間、不改狀態）。
+     * 2026-09-04 現場就有一張 8/28 的照片這樣掛了一週。
+     *
+     * 觸發條件比原本估計的常見：只要一筆紀錄最後沒進後端（送出失敗放棄或事後被刪除），
+     * 它底下所有照片就會在 20 次之後全部變成 orphan。
+     *
+     * 為什麼是「每次開 App 一次」而不是每輪都試：
+     *   後端修好紀錄之後重送一定會成功（orphan 的照片都有 fileId，
+     *   而 attachPhotoLinks 是按檔名合併、重送安全）。
+     *   但如果每 15 秒都試，就等於把當初設 LINK_MAX_TRIES 要避免的無限重試搬回來 ——
+     *   而「紀錄真的不存在」這件事不會在幾秒內改變。開一次 App 給一次機會剛好。
+     */
     const now = Date.now();
-    if (toLink.some((p) => p.linkNextAt && p.linkNextAt > now)) return;
+    const dueLink = (p) => !p.linkNextAt || p.linkNextAt <= now;
+    const doneOnes = list.filter((p) => p.status === 'done');
+    /**
+     * ★ orphan 要「各自」過退避這一關，不可以併進下面那道整筆檢查。
+     *
+     * 下一行是「這一筆只要有人還在退避，整批就先不送」。如果把 orphan 也算進去，
+     * 一張剛失敗過（linkNextAt 還有 5 分鐘）的 orphan 就會把同一筆的 done 一起擋住 ——
+     * 那正是 2026-09-03 修掉的隊首堵塞，不可以從這裡搬回來。
+     */
+    const orphanOnes = list.filter((p) => p.status === 'orphan'
+      && !_orphanTried.has(p.id) && dueLink(p));
+    if (!doneOnes.length && !orphanOnes.length) return; // 已全部 linked 過了
+    // 退避：回寫失敗過就等一段時間再試，避免密集打後端(會與使用者的查詢互相搶資源)
+    if (doneOnes.length && doneOnes.some((p) => p.linkNextAt && p.linkNextAt > now)) return;
+    const toLink = doneOnes.concat(orphanOnes);
+    orphanOnes.forEach((p) => _orphanTried.add(p.id));
     const month = toLink[0].month;
     const links = {};
     toLink.forEach((p) => { const k = (p.pathParts || []).join('/'); (links[k] = links[k] || []).push({ name: p.name, fileId: p.fileId }); });
@@ -726,11 +756,23 @@
       await Promise.all(toLink.map((p) => {
         const linkTries = (p.linkTries || 0) + (countable ? 1 : 0);
         const netTries = (p.netTries || 0) + (countable ? 0 : 1);
-        const status = countable && linkTries >= LINK_MAX_TRIES ? 'orphan' : p.status; // 放棄後不再重送，保留資料供人工查
+        const giveUp = countable && linkTries >= LINK_MAX_TRIES;
+        const status = giveUp ? 'orphan' : p.status; // 放棄後不再自動重送（每次開 App 仍會試一次）
+        /**
+         * 放棄時不能只寫「找不到紀錄」。
+         *
+         * 那句話是後端的原文，看的人不知道該做什麼 —— 而這個狀態下「重試」是沒有用的：
+         * 紀錄真的不存在（送出失敗放棄，或事後被刪除），重送一百次也一樣。
+         * 她需要知道的是「照片已經安全，可以放心清掉」。
+         */
+        const msg = giveUp
+          ? '這張照片所屬的點檢紀錄不存在（可能已被刪除，或當初送出沒有成功）。'
+            + '照片本身已經在雲端硬碟，不會遺失 —— 重試不會有用，可以清空佇列。'
+          : reason;
         // 紀錄不存在：首次短一點(紀錄通常1~2秒內就寫入完成)，之後逐步拉長
         // 網路失敗：直接等久一點(10秒起、上限5分鐘)，避免在訊號不良時空轉
         const wait = countable ? 1500 * linkTries : 10000 * Math.min(netTries, 30);
-        return window.SqcDB.updatePhoto({ ...p, linkTries, netTries, status, linkErr: reason, linkNextAt: Date.now() + Math.min(300000, wait) });
+        return window.SqcDB.updatePhoto({ ...p, linkTries, netTries, status, linkErr: msg, linkNextAt: Date.now() + Math.min(300000, wait) });
       }));
     };
     try {
@@ -758,7 +800,15 @@
   // (涵蓋 App 重啟、上傳完成當下漏觸發等情況)
   async function reconcileLinks() {
     const all = await window.SqcDB.allPhotos();
-    const recordIds = new Set(all.filter((p) => p.status === 'done').map((p) => p.recordId));
+    /**
+     * orphan 也要納入，否則「整筆照片都已經是 orphan」的紀錄從頭到尾不會被拜訪，
+     * flushLinksIfDone 裡那個「每次開 App 給一次機會」永遠不會被觸發。
+     * 2026-09-04 現場那張 8/28 的照片就是這種情形（它那一筆只有它自己）。
+     * 實際上只會多試一次：flushLinksIfDone 內部用 _orphanTried 收斂。
+     */
+    const recordIds = new Set(all
+      .filter((p) => p.status === 'done' || p.status === 'orphan')
+      .map((p) => p.recordId));
     for (const id of recordIds) await flushLinksIfDone(id);
   }
 

@@ -10,7 +10,7 @@
 // 後端版本：每次修改本檔就更新，並於前端「資料更新時間」旁顯示。
 // 用途：貼上程式碼後若忘記「部署 → 管理部署作業 → 新版本」，畫面上的後端版本就不會變，
 //       可立即分辨是「沒貼上」「貼了但沒部署」還是「已生效」。
-var GAS_VERSION = '20260904-1210';   // 台灣時間 YYYYMMDD-HHMM
+var GAS_VERSION = '20260904-1445';   // 台灣時間 YYYYMMDD-HHMM
 
 var SPREADSHEET_ID = '1GRZZsZRgakMGENspOxmlx96NfckC8UYOe0ipuNNEoh0';
 var DRIVE_ROOT_ID  = '122nQjldImn5Zh5AUguxZF0YzobThgdc9';
@@ -903,6 +903,26 @@ function updateRecord(month, id, rec, pass, who) {
         var blocked = guardCrossWeek(toYmd(orig['點檢時間']), pass, who);
         if (blocked) return blocked;
         rec.id = id; rec.createdAt = orig['建立時間'] || nowStr(); rec.updatedAt = nowStr();
+        /**
+         * 照片JSON 不可以直接用前端送來的那份覆寫。
+         *
+         * 前端的照片JSON 是「開啟編輯那一刻」的快照，而 fileId 是 attachPhotoLinks
+         * 寫的 —— 前端從來不擁有 fileId，它連產生 fileId 的能力都沒有。
+         * 於是有一個時序缺口：開啟編輯時紀錄裡只有檔名，中途照片上傳完成、
+         * 連結被寫回去，然後她才按送出 → 那份舊快照把剛寫好的 fileId 全部蓋成空的。
+         * 2026-09-03 竹南博愛店就是這樣：手機端 6 張全是「完成」（後端確實回報成功過），
+         * 但紀錄的照片JSON 一個 fileId 都沒有，畫面顯示「缺 6 張」。
+         * 而修復工具只填空值、不會無中生有，所以這種覆蓋是真的會弄丟連結。
+         *
+         * 合併規則（誰擁有什麼，分得很清楚）：
+         *   有哪些檔名   → 前端說了算（它才知道使用者新增／刪除了什麼）
+         *   每個檔名的 fileId → 後端現存的優先（前端送來的若沒有就沿用）
+         * 這與 attachPhotoLinks 本來就在用的「按檔名合併」是同一個規則。
+         *
+         * 刪除必須明示：用 removedNames 傳進來，不可以用「沒送出來」暗示 ——
+         * 否則快照過期時，中途被 attachPhotoLinks 附加進來的新照片會被誤刪。
+         */
+        rec.photos = mergePhotoJson_(safeJson(orig['照片JSON']), rec.photos, rec.removedNames);
         var newRow = recordToRow(sh, rec); // rec 為前端英文鍵完整紀錄，直接覆寫
         sh.getRange(i + 1, 1, 1, newRow.length).setValues([newRow]);
         return { ok: true };
@@ -1617,6 +1637,59 @@ function photoNamesOf(list) {
   return (list || []).map(function (e) {
     return (e && typeof e === 'object') ? String(e.name || '') : String(e == null ? '' : e);
   }).filter(function (n) { return n; }).join(',');
+}
+
+/**
+ * 合併照片JSON：保住後端已經寫好的 fileId，同時尊重前端的新增與刪除。
+ *
+ * stored   後端現存的那份（權威的 fileId 來源）
+ * incoming 前端送來的那份（權威的「應該有哪些檔名」來源）
+ * removed  前端明確標記刪除的檔名陣列
+ *
+ * 規則：
+ *   最終檔名集合 = (stored ∪ incoming) − removed
+ *   每個檔名的 fileId = stored 的優先，沒有才用 incoming 的
+ *
+ * 為什麼要 union 而不是只取 incoming：incoming 是「開啟編輯那一刻」的快照，
+ * 期間 attachPhotoLinks 可能又附加了新完成的照片；只取 incoming 會把那些
+ * 從紀錄裡抹掉 —— 檔案還在 Drive，但照片JSON 沒有那一筆，
+ * 連修復工具都救不回來（它只填空值，不會無中生有）。
+ *
+ * 項目可能是字串（只有檔名）或 {name, fileId}，兩種都要吃得下。
+ */
+function mergePhotoJson_(stored, incoming, removed) {
+  var S = stored || {}, I = incoming || {};
+  var gone = {};
+  (removed || []).forEach(function (n) { var s = String(n || '').trim(); if (s) gone[s] = true; });
+  var nameOf = function (e) {
+    return (e && typeof e === 'object') ? String(e.name || '') : String(e == null ? '' : e);
+  };
+  var idOf = function (e) { return (e && typeof e === 'object' && e.fileId) ? String(e.fileId) : ''; };
+
+  var out = {};
+  var keys = [];
+  Object.keys(S).forEach(function (k) { keys.push(k); });
+  Object.keys(I).forEach(function (k) { if (keys.indexOf(k) < 0) keys.push(k); });
+
+  keys.forEach(function (k) {
+    var idById = {};   // 檔名 → 現存的 fileId
+    (S[k] || []).forEach(function (e) {
+      var n = nameOf(e); if (n && idOf(e)) idById[n] = idOf(e);
+    });
+    var seen = {}, arr = [];
+    // 先照「前端的順序」放，再補上前端沒送到但現存有的（那些是中途才附加進來的）
+    var push = function (e) {
+      var n = nameOf(e);
+      if (!n || gone[n] || seen[n]) return;
+      seen[n] = true;
+      var fid = idById[n] || idOf(e);
+      arr.push(fid ? { name: n, fileId: fid } : n);
+    };
+    (I[k] || []).forEach(push);
+    (S[k] || []).forEach(push);
+    if (arr.length) out[k] = arr;
+  });
+  return out;
 }
 
 function safeCell_(v) {

@@ -44,7 +44,7 @@
     const { useState, useMemo, useEffect, useRef } = React;
     // 版本字串一律用「台灣時間」的 YYYYMMDD-HHMM。與部署關卡無關 ——
     // 那道關卡看的是資安報告的檔名日期，而 GitHub runner 跑 UTC，兩者不要混在一起。
-    const APP_VERSION = '20260904-1210'; // 每次部署更新，用來確認瀏覽器跑的是哪一版（台灣時間）
+    const APP_VERSION = '20260904-1445'; // 每次部署更新，用來確認瀏覽器跑的是哪一版（台灣時間）
     // 這一版前端「至少」需要的後端版本。前後端是各自演進的，版本號本來就不會相等
     // （只改前端時後端不動，反之亦然），所以不能用「兩者相等」當健康指標 ——
     // 要比的是「線上後端有沒有舊到缺少本前端需要的 API」。
@@ -62,7 +62,7 @@
     // 20260831-1650 起還需要：連線階段的滑動效期（getSession 每次通過驗證就把
     // 6 小時重新計算）。沒有它的話，早上登入的人下午會突然被踢出去。
     // 20260902 起還需要：photoState（照片JSON 為空要視為異常，不可寫成「已同步」）
-    const NEEDS_GAS = '20260904-1210';
+    const NEEDS_GAS = '20260904-1445';
 
     /**
      * 從 LINE 等 App 內建瀏覽器開啟時，回傳那個 App 的名字，否則空字串。
@@ -1666,7 +1666,17 @@ ${nm}
 
 按「完成編輯」後才會真的刪除（移到 Drive 垃圾桶，可還原）。`)) return;
         setExistingPhotos({ ...existingPhotos, [key]: arr.filter((_, k) => k !== i) });
-        if (gone && gone.fileId) setRemovedPhotos(prev => [...prev, { fileId: gone.fileId, name: nm }]);
+        /**
+         * 沒有 fileId 的也要記進 removedPhotos。
+         *
+         * 原本是 `if (gone && gone.fileId)` —— 只有「已經在 Drive」的才記，
+         * 因為這個清單當初只用來事後把 Drive 檔案移入垃圾桶。
+         * 但它現在還負責告訴後端「使用者真的刪掉了哪幾張」（後端改成合併之後，
+         * 刪除只能靠明示；沒送到的檔名會被當成快照過期而從現存資料補回來）。
+         * 而「無雲端連結」的照片正好就是沒有 fileId 的那些 —— 漏記的話會刪不掉。
+         * fileId 只在 trashPhotos 那一步需要，缺了就跳過那一步即可。
+         */
+        setRemovedPhotos(prev => [...prev, { fileId: (gone && gone.fileId) || '', name: nm }]);
       };
 
       // 工號比對一律轉字串：Sheet 會把工號存成數字，下拉選單的值是字串，嚴格比對會找不到人。
@@ -2323,6 +2333,16 @@ ${nm}
           // 直接丟過去後端會 join 成 "[object Object]" 把這一欄寫爛，所以一律取出檔名。
           paperPhotos: (photosJson[[monthFolder, 'SQC點檢表完成照片'].join('/')] || [])
             .map(e => (e && typeof e === 'object') ? e.name : e).filter(Boolean),
+          /**
+           * 被打叉刪除的原照片檔名 —— 刪除必須「明示」，不可以用「沒送出來」暗示。
+           *
+           * 後端在更新時會把「現存的照片JSON」與這一份合併，保住它已經寫好的 fileId
+           * （我們送來的這份是開啟編輯那一刻的快照，中途 attachPhotoLinks 寫進去的
+           * 連結不在裡面 —— 直接覆寫就會把它們清成空的，2026-09-03 竹南博愛店就是這樣）。
+           * 合併時檔名取聯集，所以「使用者真的刪掉了哪幾張」只能靠這個清單表達；
+           * 少了它，中途才被附加進紀錄的照片會被誤刪。
+           */
+          removedNames: removedPhotos.map(x => (x && (x.name || x))).filter(Boolean),
         };
 
         // 紀錄依「點檢時間」分月存放。編輯時若把點檢時間改到別的月份，該筆就必須從原月份活頁搬到新月份，
@@ -2356,8 +2376,10 @@ ${nm}
           }
           if (!isEdit) SqcDB.delQueuedRecord(recId).catch(() => { });   // 已確認寫入後端，不需重送
           // 紀錄已更新成功，才把被標記刪除的原照片移入 Drive 垃圾桶（可還原）
-          if (removedPhotos.length) {
-            SqcApi.trashPhotos(removedPhotos.map(x => x.fileId), storeName + ' ' + basic.time.slice(0, 10))
+          // 沒有 fileId 的（原本就沒進雲端／連結沒寫回）不必也不能丟垃圾桶，過濾掉再送
+          const toTrash = removedPhotos.map(x => x.fileId).filter(Boolean);
+          if (toTrash.length) {
+            SqcApi.trashPhotos(toTrash, storeName + ' ' + basic.time.slice(0, 10))
               .catch(e => alert('紀錄已更新，但刪除舊照片失敗：' + e.message + '。照片仍在 Drive，可再編輯一次重試。'));
           }
           if (!isEdit) {
@@ -3547,14 +3569,36 @@ ${nm}
                     <span className="text-xs whitespace-nowrap">只看照片未齊{pendingCount ? `（${pendingCount} 筆）` : ''}</span>
                   </label>
                 </div>
-                {/* 照片還在點檢人員手機的佇列裡時，當天就要追 —— 隔幾天手機資料被清掉就只能重拍 */}
+                {/**
+                  * ⚠ 這個警告只看後端的照片JSON（有檔名、沒 fileId），
+                  * 它「看不到」照片到底在哪裡 —— 可能還在手機佇列裡，也可能早就在雲端硬碟上。
+                  *
+                  * 原本的指示直接說「請當天聯絡他，用原本那支手機開一次 App，佇列會自動傳完」。
+                  * 2026-09-04 現場證明那會把人導向死路：竹南博愛店缺 6 張，而那 6 張在
+                  * 她手機的診斷裡全部是「完成　已釋放」—— 後端確實回報過成功，blob 也丟掉了。
+                  * 開一百次 App 都不會動（reconcileLinks 只收 done，那些已經是 linked），
+                  * 而且手機上根本沒有內容可以再傳。
+                  *
+                  * 所以順序要反過來：先用修復試算問「Drive 到底有沒有」，
+                  * 那是唯一能分辨這兩種情況的動作，而且它是唯讀的、零風險。
+                  * 只有在修復回報「Drive 真的沒有」時，才需要去追手機。
+                  */}
                 {pendingCount > 0 && (
                   <div className="bg-red-50 border border-red-300 text-red-800 text-sm rounded-lg px-3 py-2">
-                    <span className="font-bold">⚠ 有 {pendingCount} 筆紀錄的照片還沒上傳完成</span>
+                    <span className="font-bold">⚠ 有 {pendingCount} 筆紀錄的照片沒有雲端連結</span>
                     <div className="text-xs mt-1">
-                      照片可能還在點檢人員的手機裡（關掉 App 不會弄丟）。<b>請當天就聯絡他，用原本那支手機、原本那個瀏覽器開一次 App</b>，
-                      佇列會自動傳完並補上連結。放久了手機資料被清掉就只能請人重拍缺失照片，而缺失當下已經被改善、拍不回來。
-                      若已經確定傳不回來，可到「維護專區 → 照片連結修復」試算，看是哪幾張真的不在雲端硬碟。
+                      這代表紀錄裡有檔名、但沒有連結。<b>檔案可能早就在雲端硬碟上了</b>（上傳成功、只是連結沒寫回），
+                      也可能還在點檢人員的手機裡。這兩種的處理方式完全不同，所以請照順序做：
+                      <div className="mt-1.5 pl-1">
+                        <div><b>① 先到「維護專區 → 照片連結修復」按試算</b>（唯讀，不會改任何東西）。
+                          它會直接告出哪幾張在雲端、哪幾張真的不在。</div>
+                        <div className="mt-1"><b>② 在雲端 → 跑正式修復就好</b>，連到的是當時的原始照片。
+                          <span className="text-red-700">修復期間請點檢人員先不要編輯那一筆</span>，
+                          否則編輯會用開啟時的舊資料把剛補好的連結蓋掉。</div>
+                        <div className="mt-1"><b>③ 真的不在雲端 → 才需要當天聯絡他</b>，
+                          用原本那支手機、原本那個瀏覽器開一次 App，佇列會自動傳完並補上連結。
+                          放久了手機資料被清掉就只能請人重拍，而缺失當下已經被改善、拍不回來。</div>
+                      </div>
                     </div>
                   </div>
                 )}

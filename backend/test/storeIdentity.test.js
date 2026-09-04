@@ -163,9 +163,19 @@ assertEqual(/有 \$\{chg\.length\} 家店的店號變更/.test(CODE), true, '★
 assertEqual(/後端版本過舊。若這次名單有門市改號，系統不會提醒你。/.test(CODE), true,
   '★ 舊後端回不出 codeChanges 時要說清楚 —— 否則會被誤讀成「沒有異動」');
 
-// ===== 版本 =====
-assertEqual(/var GAS_VERSION = '20260904-1210';/.test(GS), true, '後端版號要更新（這批動了後端）');
-assertEqual(/const NEEDS_GAS = '20260904-1210';/.test(APP), true, '前端要求的後端版本要跟上');
+/**
+ * ===== 版本 =====
+ * 不寫死某一個版號 —— 那會讓每次改版都得回來改這裡，改久了就變成無意義的維護。
+ * 真正的不變式是「這批需要新後端，所以 NEEDS_GAS 必須等於後端自己的版號」：
+ * NEEDS_GAS 落後就等於前端不會提醒管理者去貼後端。
+ */
+{
+  const gas = (GS.match(/var GAS_VERSION = '([0-9-]+)'/) || [])[1];
+  const needs = (APP.match(/const NEEDS_GAS = '([0-9-]+)'/) || [])[1];
+  assertEqual(!!gas && !!needs, true, '前提：兩個版號都讀得到');
+  assertEqual(needs, gas, '★ NEEDS_GAS 要等於後端版號（這批動了後端，落後就不會提醒去貼）');
+  assertEqual(gas >= '20260904-1210', true, '後端版號不可低於本批（' + gas + '）');
+}
 
 console.log(failed ? `\n❌ ${failed} 項失敗` : '\n✅ 全部通過');
 process.exit(failed ? 1 : 0);
