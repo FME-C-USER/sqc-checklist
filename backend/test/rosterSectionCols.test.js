@@ -54,10 +54,12 @@ assertEqual(APP.includes('(rec ? rec.主責課 : s.課別) || \'\''), true,
 // ===== 4. 主責課店數也要跟著搬 =====
 const grab = (a, b) => { const s = APP.indexOf(a), e = APP.indexOf(b, s); if (s < 0 || e < 0) throw new Error('抽取失敗：' + a); return APP.slice(s, e); };
 const normCodeSrc = grab('function normCode(', '\n');
+// 2026-09-04 起也用 normName：門市會重新編號，改號後只比店號會認不出是同一家店。沙箱要一併帶入。
+const normNameSrc = grab('function normName(', '\n');
 const code = grab('// ===== 每日店數表', 'window.SqcReport =');
 const sb = { window: {}, console };
 vm.createContext(sb);
-vm.runInContext(normCodeSrc + '\n' + code + '\nthis.api = { buildKpiBlock, buildBatchBlock, effSectionOf };', sb);
+vm.runInContext(normCodeSrc + '\n' + normNameSrc + '\n' + code + '\nthis.api = { buildKpiBlock, buildBatchBlock, effSectionOf };', sb);
 const { buildKpiBlock, buildBatchBlock, effSectionOf } = sb.api;
 
 // 有效課別：點過的用實際，沒點的用名單
@@ -72,10 +74,20 @@ const report = {
     { 店號: '000002', 主責課: '訓練課', 主責部: '業務部', 合計: 90, 店名: '換課店', 點檢時間: '2026-08-05 10:00', 實際梯次: '第一梯' },
   ],
 };
+/**
+ * 2026-09-04 起簽章是 (店號, 店名, 名單課別) —— 多了店名。
+ * 門市會重新編號，名單與紀錄的店號可能不一致（2026-09 有 13 家），
+ * 只比店號的話那一筆會查不到，逐店的名單表就把已點檢的店標成「未點檢」。
+ */
 const effSec = effSectionOf(report);
-assertEqual(effSec('000001', '北三課'), '北三課', '沒點檢的店用名單的課別');
-assertEqual(effSec('000002', '北三課'), '訓練課', '點過的店改用實際點檢的課別');
-assertEqual(effSec('009999', ''), '(未分類)', '名單與紀錄都查不到時不可回 undefined');
+assertEqual(effSec('000001', '', '北三課'), '北三課', '沒點檢的店用名單的課別');
+assertEqual(effSec('000002', '', '北三課'), '訓練課', '點過的店改用實際點檢的課別');
+assertEqual(effSec('009999', '', ''), '(未分類)', '名單與紀錄都查不到時不可回 undefined');
+// ★ 改號情境：名單已換成新店號 099999，紀錄還是舊店號 000002，靠店名認出是同一家
+assertEqual(effSec('099999', '換課店', '北三課'), '訓練課',
+  '★ 店號改了也要靠店名認出是同一家店（否則已點檢的店會被算成未點檢）');
+assertEqual(effSec('000002', '完全不同的店', '北三課'), '訓練課',
+  '店名對不上時仍要能用店號查到（雙鍵，不是只換一把鑰匙）');
 
 const kpi = buildKpiBlock(report, '8/1-8/31');
 const rowOf = (name) => kpi.find(r => r[0] === name);

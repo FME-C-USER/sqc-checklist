@@ -10,7 +10,7 @@
 // 後端版本：每次修改本檔就更新，並於前端「資料更新時間」旁顯示。
 // 用途：貼上程式碼後若忘記「部署 → 管理部署作業 → 新版本」，畫面上的後端版本就不會變，
 //       可立即分辨是「沒貼上」「貼了但沒部署」還是「已生效」。
-var GAS_VERSION = '20260902-1226';   // 台灣時間 YYYYMMDD-HHMM
+var GAS_VERSION = '20260904-1210';   // 台灣時間 YYYYMMDD-HHMM
 
 var SPREADSHEET_ID = '1GRZZsZRgakMGENspOxmlx96NfckC8UYOe0ipuNNEoh0';
 var DRIVE_ROOT_ID  = '122nQjldImn5Zh5AUguxZF0YzobThgdc9';
@@ -830,20 +830,38 @@ function recordExists(month, id) {
 }
 
 function getInspectedCodes(month) {
+  var empty = { codes: [], names: [] };
   var sh = ssBook().getSheetByName('點檢紀錄_' + month);
-  if (!sh) return { codes: [] };
+  if (!sh) return empty;
   var lastRow = sh.getLastRow();
-  if (lastRow < 2) return { codes: [] };
+  if (lastRow < 2) return empty;
   var head = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0];
-  var col = head.indexOf('店號');
-  if (col < 0) return { codes: [] };
-  var vals = sh.getRange(2, col + 1, lastRow - 1, 1).getValues();
-  var out = [];
+  var col = head.indexOf('店號'), ncol = head.indexOf('店名');
+  if (col < 0) return empty;
+  /**
+   * 店名也要回傳。
+   *
+   * 門市會重新編號，同一家店在名單與已送出的紀錄裡可能是不同店號 ——
+   * 只比店號的話，改號後那家店會重新變成「可點檢」，於是被重複點檢。
+   * 店名是店號不可靠時唯一還可靠的鍵（實測 115/09 名單 1323 家店，
+   * 店名含去尾字「店」之後零重複）。
+   *
+   * 讀兩欄仍然只讀兩欄 —— 這支存在的理由就是「不要為了一個欄位讀整張活頁」，
+   * 多一欄不影響那個目的。
+   */
+  var lo = Math.min(col, ncol < 0 ? col : ncol);
+  var hi = Math.max(col, ncol < 0 ? col : ncol);
+  var vals = sh.getRange(2, lo + 1, lastRow - 1, hi - lo + 1).getValues();
+  var codes = [], names = [];
   for (var i = 0; i < vals.length; i++) {
-    var c = normCode(vals[i][0]);
-    if (c) out.push(c);   // 已正規化（去前導0），前端可直接比對
+    var c = normCode(vals[i][col - lo]);
+    if (c) codes.push(c);   // 已正規化（去前導0），前端可直接比對
+    if (ncol >= 0) {
+      var n = normName(vals[i][ncol - lo]);
+      if (n) names.push(n);  // 已正規化（去尾字「店」），前端要用同一支 normName
+    }
   }
-  return { codes: out };
+  return { codes: codes, names: names };
 }
 
 /**
@@ -968,13 +986,24 @@ function buildMonthlyReport(month, filter, isManager) {
   });
 
   // 店號可能因店鋪重新編號而新舊不一(同一家店在名單/主檔各存不同店號)，比對店鋪主檔一律以店名為主、店號僅作備援
-  var masterByCode = {}, masterByName = {}, rosterByCode = {};
+  var masterByCode = {}, masterByName = {}, rosterByCode = {}, rosterByName = {};
   storesMaster.forEach(function (r) {
     masterByCode[normCode(r['店號'])] = r;
     var nm = normName(r['店名']); if (nm) masterByName[nm] = r;
   });
-  roster.forEach(function (r) { rosterByCode[normCode(r['店號'])] = r; });
+  roster.forEach(function (r) {
+    rosterByCode[normCode(r['店號'])] = r;
+    var nm = normName(r['店名']); if (nm) rosterByName[nm] = r;
+  });
   var findMaster = function (code, name) { return masterByName[normName(name)] || masterByCode[normCode(code)] || {}; };
+  /**
+   * 名單查詢：跟 findMaster 同一個規則（店名優先、店號備援）。
+   *
+   * 原本只有 rosterByCode 一條路，於是門市改號之後這一筆會查不到名單列，
+   * 報表的店型態退回「一般店」、遠程店／假日店退回「否」、原預排梯次變空白 ——
+   * 全部靜默降級，看不出是「查不到」還是「本來就是這樣」。
+   */
+  var findRoster = function (code, name) { return rosterByName[normName(name)] || rosterByCode[normCode(code)] || {}; };
 
   // 依大分類分組題目，供小計與欄位排序用
   var catOrder = [], catItems = {};
@@ -987,7 +1016,7 @@ function buildMonthlyReport(month, filter, isManager) {
   var rows = records.map(function (rec, idx) {
     var code = normCode(rec.storeCode);
     var sm = findMaster(rec.storeCode, rec.storeName);
-    var ro = rosterByCode[code] || {};
+    var ro = findRoster(rec.storeCode, rec.storeName);
     var itemScores = {}, itemExtra = {};
     checklist.forEach(function (it) {
       var d = (rec.detail || {})[it.id];
@@ -1103,6 +1132,20 @@ function importMaster(kind, month, rows, fileName, batches) {
     if (!map[kind]) throw new Error('未知匯入類型：' + kind);
     var sh = ensureKindSheet(kind, month); // 缺活頁自動建立
     var head = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0];
+    /**
+     * 覆蓋之前先算出「同一家店的店號變了」的清單。
+     *
+     * 為什麼一定要做：門市會重新編號，同一家店在名單／主檔各存不同店號。
+     * 而系統多數比對是以店號為鍵，所以改號會讓「這家店本月點過了嗎」對不上 ——
+     * 那家店會重新變成可點檢（可能被重複點檢），逐店的名單表也會把它標成未點檢。
+     * 這些後果全部不會報錯：課別 KPI 的應點檢／已點檢兩個數字都還是對的，
+     * 只有逐店那張表矛盾。2026-09 就是這樣，事後比對兩個轉出檔才發現 13 家店改號。
+     *
+     * 匯入是整表取代（下面 clearContent），舊店號一旦覆蓋就完全沒有痕跡可查，
+     * 所以「告知」必須在這一刻做完。
+     */
+    var codeChanges = (kind === 'roster' || kind === 'stores')
+      ? diffStoreCodes_(sh, head, rows) : null;
     // 清空舊資料（保留表頭）→ 以最新上傳為主
     if (sh.getLastRow() > 1) sh.getRange(2, 1, sh.getLastRow() - 1, head.length).clearContent();
     var out = rows.map(function (r) { return head.map(function (h) { return r[h] != null ? String(r[h]) : ''; }); });
@@ -1114,11 +1157,57 @@ function importMaster(kind, month, rows, fileName, batches) {
     setSetting('匯入_' + kind, (fileName || '') + ' @ ' + nowStr());
     // 店鋪名單檔右側附帶「梯次/評核日期區間」小表時一併存下，供依實際日期反推梯次
     var batchCount = (kind === 'roster' && batches && batches.length) ? saveBatchPeriods(month, batches) : 0;
-    return { ok: true, count: out.length, batchCount: batchCount };
+    var res = { ok: true, count: out.length, batchCount: batchCount };
+    if (codeChanges) {
+      res.codeChanges = codeChanges.changed;   // [{name, from, to}]
+      res.addedStores = codeChanges.added;     // 新增的店數
+      res.removedStores = codeChanges.removed; // 名單裡消失的店數
+    }
+    return res;
   } finally {
     SpreadsheetApp.flush();
     lock.releaseLock();
   }
+}
+
+/**
+ * 比對「覆蓋前的舊資料」與「即將寫入的新資料」，找出同一家店改了店號的情形。
+ *
+ * 以店名為鍵 —— 這正是店號不可靠時唯一還可靠的東西。實測 115/09 的名單
+ * 1323 家店，店名（含去尾字「店」之後）零重複，所以店名可以當唯一鍵。
+ *
+ * 只回報「店名對得上但店號不同」的：新增與消失的店只給數量，
+ * 因為那兩種在名單月月不同是正常的，逐筆列出會把真正要看的訊息淹掉。
+ *
+ * 不拿鎖也不寫任何東西 —— 呼叫端已經在鎖裡面了。
+ */
+function diffStoreCodes_(sh, head, rows) {
+  var ci = head.indexOf('店號'), ni = head.indexOf('店名');
+  if (ci < 0 || ni < 0) return null;          // 這張表沒有這兩欄，不適用
+  var last = sh.getLastRow();
+  var oldByName = {};
+  if (last > 1) {
+    var vals = sh.getRange(2, 1, last - 1, head.length).getValues();
+    for (var i = 0; i < vals.length; i++) {
+      var nm = normName(vals[i][ni]);
+      if (nm) oldByName[nm] = String(vals[i][ci] == null ? '' : vals[i][ci]).trim();
+    }
+  }
+  var changed = [], added = 0, seen = {};
+  (rows || []).forEach(function (r) {
+    var nm = normName(r['店名']);
+    if (!nm) return;
+    seen[nm] = true;
+    var code = String(r['店號'] == null ? '' : r['店號']).trim();
+    if (!(nm in oldByName)) { added++; return; }
+    // 用 normCode 比：前導零的差異不算改號（那是格式問題，不是門市重新編號）
+    if (normCode(oldByName[nm]) !== normCode(code)) {
+      changed.push({ name: String(r['店名']).trim(), from: oldByName[nm], to: code });
+    }
+  });
+  var removed = 0;
+  Object.keys(oldByName).forEach(function (nm) { if (!seen[nm]) removed++; });
+  return { changed: changed, added: added, removed: removed };
 }
 
 // ============================================================

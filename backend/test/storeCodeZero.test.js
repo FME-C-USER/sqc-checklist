@@ -54,6 +54,10 @@ const CODE = APP.split('\n').filter((l) => !/^\s*(\/\/|\*|\/\*|\{\/\*)/.test(l))
 const ncSrc = APP.match(/function normCode\(c\) \{[\s\S]*?\}\n/);
 assertEqual(!!ncSrc, true, '前提：app.html 裡找得到 normCode');
 const normCode = new Function(ncSrc[0] + '; return normCode;')();
+// 2026-09-04 起 inRoster 也用 normName（店名優先、店號備援）
+const nnSrc = APP.match(/function normName\(n\) \{[\s\S]*?\}\n/);
+assertEqual(!!nnSrc, true, '前提：app.html 裡找得到 normName');
+const normName = new Function(nnSrc[0] + '; return normName;')();
 
 // ===== 1. normCode 真的能把兩種形式統一 =====
 assertEqual(normCode('023661'), '23661', 'normCode 去掉前導零');
@@ -73,18 +77,30 @@ assertEqual(normCode(null), '', 'null 不可爆掉');
   // 檔案裡有多個 inRoster，要抓的是「拿紀錄去比名單」那一個（回填編輯畫面用的）。
   // 另一處 1963 行的 `normCode(x.code) === code` 早就用了正規化 —— 正確的寫法
   // 本來就在這個檔案裡，2039 是唯一的例外。
-  const mFind = CODE.match(/const inRoster = STORE_ROSTER\.find\((s => [^;]*rec\.storeCode[^;]*)\);/);
-  assertEqual(!!mFind, true, '前提：找得到「拿紀錄比名單」的 inRoster 那一行');
+  /**
+   * 抓「整個 const inRoster = …; 敘述」而不是只抓 find 的回呼。
+   * 2026-09-04 加上店名備援之後它變成兩行（店名 find || 店號 find），
+   * 只抓回呼會抓到括號不成對的片段，組出來的函式直接語法錯誤。
+   *
+   * ★ 字元類別必須是 [^;] 而不是 [\s\S]：
+   *   檔案裡更前面還有一個 acceptCustomStore 的
+   *   `const inRoster = STORE_ROSTER.find(x => normCode(x.code) === code);`，
+   *   用 [\s\S]*? 會從那裡開始、一路跨過上百行找到 rec.storeCode，
+   *   抓出一大段語法不成立的東西。[^;] 停在分號，那一句就配不到 rec.storeCode，
+   *   正規引擎才會往下找到真正要的這一句。
+   */
+  const mFind = CODE.match(/const inRoster = STORE_ROSTER\.find\([^;]*rec\.storeCode[^;]*\);/);
+  assertEqual(!!mFind, true, '前提：找得到「拿紀錄比名單」的 inRoster 敘述');
   const mPick = CODE.match(/storeCode: inRoster \? ([^:]+?) : '__custom',/);
   assertEqual(!!mPick, true, '前提：找得到 storeCode 指定那一行');
 
-  const run = new Function('STORE_ROSTER', 'rec', 'normCode', `
-    const inRoster = STORE_ROSTER.find(${mFind[1]});
+  const run = new Function('STORE_ROSTER', 'rec', 'normCode', 'normName', `
+    ${mFind[0]}
     return { hit: !!inRoster, storeCode: inRoster ? ${mPick[1]} : '__custom' };
   `);
 
   const ROSTER = [{ code: '023661', name: '關廟旺萊店' }, { code: '016950', name: '高雄新豐店' }];
-  const out = run(ROSTER, { storeCode: 23661, storeName: '關廟旺萊店' }, normCode);
+  const out = run(ROSTER, { storeCode: 23661, storeName: '關廟旺萊店' }, normCode, normName);
 
   assertEqual(out.hit, true,
     '★ 紀錄是 23661、名單是 023661 時必須認得出來 —— 認不出來就會落到 __custom 而換掉檔名');
@@ -92,7 +108,7 @@ assertEqual(normCode(null), '', 'null 不可爆掉');
     '★ 命中後要存「名單的店號」（6 碼），不是紀錄的 5 碼 —— 見檔頭的迴歸說明');
 
   // 真的是自訂店（不在名單裡）時，仍然要落到 __custom
-  const custom = run(ROSTER, { storeCode: '099999', storeName: '測試自訂店' }, normCode);
+  const custom = run(ROSTER, { storeCode: '099999', storeName: '測試自訂店' }, normCode, normName);
   assertEqual(custom.storeCode, '__custom', '不在名單裡的店仍要走自訂店路徑');
 }
 

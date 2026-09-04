@@ -44,7 +44,7 @@
     const { useState, useMemo, useEffect, useRef } = React;
     // 版本字串一律用「台灣時間」的 YYYYMMDD-HHMM。與部署關卡無關 ——
     // 那道關卡看的是資安報告的檔名日期，而 GitHub runner 跑 UTC，兩者不要混在一起。
-    const APP_VERSION = '20260904-1117'; // 每次部署更新，用來確認瀏覽器跑的是哪一版（台灣時間）
+    const APP_VERSION = '20260904-1210'; // 每次部署更新，用來確認瀏覽器跑的是哪一版（台灣時間）
     // 這一版前端「至少」需要的後端版本。前後端是各自演進的，版本號本來就不會相等
     // （只改前端時後端不動，反之亦然），所以不能用「兩者相等」當健康指標 ——
     // 要比的是「線上後端有沒有舊到缺少本前端需要的 API」。
@@ -62,7 +62,7 @@
     // 20260831-1650 起還需要：連線階段的滑動效期（getSession 每次通過驗證就把
     // 6 小時重新計算）。沒有它的話，早上登入的人下午會突然被踢出去。
     // 20260902 起還需要：photoState（照片JSON 為空要視為異常，不可寫成「已同步」）
-    const NEEDS_GAS = '20260902-1226';
+    const NEEDS_GAS = '20260904-1210';
 
     /**
      * 從 LINE 等 App 內建瀏覽器開啟時，回傳那個 App 的名字，否則空字串。
@@ -364,6 +364,22 @@
     function taipeiToday() { return taipeiNow().slice(0, 10); }
     // 店號正規化：去除前導0與空白，避免不同來源(店鋪名單/店鋪主檔)格式不一致誤判成不同店
     function normCode(c) { const s = String(c == null ? '' : c).trim(); return s.replace(/^0+(?=\d)/, ''); }
+    /**
+     * 店名正規化 —— 必須與後端 程式碼.gs 的 normName 一字不差。
+     *
+     * 為什麼需要它：門市會重新編號，同一家店在名單與已送出的紀錄裡可能是不同店號
+     * （2026-09 實際發生 13 家，例：三峽峇里店 019150 → 026169）。
+     * 店號改了之後，所有以店號為鍵的比對都會斷 —— 而斷掉的方式是靜默的：
+     * 那家店會重新變成「可點檢」（可能被重複點檢），逐店的名單表會標成「未點檢」，
+     * 但課別 KPI 的應點檢／已點檢兩個數字都還是對的，所以只有那一張表自相矛盾。
+     *
+     * 店名是店號不可靠時唯一還可靠的鍵：實測 115/09 名單 1323 家店，
+     * 店名（含去尾字「店」之後）零重複。
+     *
+     * ⚠ 兩邊的規則一定要一致：後端回傳的已點檢店名是用它正規化過的，
+     * 前端若用不同規則比對，會比不到而讓防重複點檢失效。
+     */
+    function normName(n) { return String(n == null ? '' : n).trim().replace(/店$/, ''); }
     // 點檢時間(YYYY-MM-DDTHH:mm) → 民國年月，如 2026-07 → 11507
     function rocMonth(dt) { const s = String(dt == null ? '' : dt); if (s.length < 7) return MONTH; return String(parseInt(s.slice(0, 4)) - 1911) + s.slice(5, 7); }
     // 民國年月字串前後推移，如 shiftRocMonth('11512', 1) → '11601'（跨年）
@@ -631,12 +647,27 @@
      * 新課出現已點檢大於應點檢，兩邊的完成率都到不了 100%。
      * 回傳 (店號, 名單課別) => 課別 的查詢函式（先建索引，避免每家店都掃一次紀錄）。
      */
+    /**
+     * 把紀錄同時以店號與店名建索引，回傳 (店號, 店名) => 紀錄 的查詢函式。
+     *
+     * 為什麼要兩個鍵：門市重新編號之後，名單的店號與紀錄的店號會不一致
+     * （2026-09 有 13 家），只用店號查就會查不到那一筆 —— 於是逐店的名單表
+     * 把已點檢的店標成「未點檢」，而課別 KPI 的數字卻是對的，兩張表互相矛盾。
+     * 店名優先、店號備援，與後端 findMaster／findRoster 同一個規則。
+     */
+    function recLookupOf(rows) {
+      const byCode = {}, byName = {};
+      (rows || []).forEach(r => {
+        const c = normCode(r.店號); if (c) byCode[c] = r;             // 店號空白不可當成一把「通用鑰匙」
+        const n = normName(r.店名); if (n) byName[n] = r;
+      });
+      return (code, name) => byName[normName(name)] || byCode[normCode(code)] || null;
+    }
+
     function effSectionOf(report) {
-      const recOf = {};
-      (report.rows || []).forEach(r => { const c = normCode(r.店號); if (c) recOf[c] = r; });
-      return (code, planned) => {
-        const c = normCode(code);
-        const rec = c ? recOf[c] : null;
+      const find = recLookupOf(report.rows);
+      return (code, name, planned) => {
+        const rec = find(code, name);
         return (rec && rec.主責課) || planned || '(未分類)';
       };
     }
@@ -654,7 +685,7 @@
       // 應點檢的歸屬要跟著「實際由哪一課點的」走（與主責課、梯次同一個規則）。
       // 否則實際換課點的那家店會在原課永遠掛著未點檢、在新課出現已點檢>應點檢，兩邊都到不了 100%。
       const eff = effSectionOf(report);
-      const planBySec = {}; roster.forEach(s => { const k = eff(s.店號, s.課別); planBySec[k] = (planBySec[k] || 0) + 1; });
+      const planBySec = {}; roster.forEach(s => { const k = eff(s.店號, s.店名, s.課別); planBySec[k] = (planBySec[k] || 0) + 1; });
       const doneBySec = {}; rows.forEach(r => { (doneBySec[r.主責課] = doneBySec[r.主責課] || []).push(r); });
       // 名單外自行新增的店：名單裡沒有它，應點檢也要補上，否則已點檢會大於應點檢
       const inRoster = {}; roster.forEach(s => { const c = normCode(s.店號); if (c) inRoster[c] = true; });
@@ -698,22 +729,20 @@
       const roster = report.roster || [], rows = report.rows || [];
       const batchOf = (v) => String(v || '').trim();
       const NONE = '(未列梯次)';   // 判不出梯次的也要有欄位，否則合計會少掉幾筆，數字對不起來
-      const recOf = {};
-      rows.forEach(r => { const c = normCode(r.店號); if (c) recOf[c] = r; });   // 店號空白不可當成一把「通用鑰匙」
+      const findRec = recLookupOf(rows);   // 店號與店名雙鍵：門市改號後只比店號會查不到
       // 每家店的「有效梯次」：點過的以實際點檢日期落在哪一梯為準，沒點的用名單的預排。
       //   預計側也用有效梯次（而非原預排）—— 脫期的店若預計留在第一梯、實際算在第二梯，
       //   兩梯永遠各差一筆，全部點完也到不了 100%。原預排在名單裡另有一欄可查。
-      const effOf = (code, planned) => {
-        const c = normCode(code);
-        const rec = c ? recOf[c] : null;
+      const effOf = (code, name, planned) => {
+        const rec = findRec(code, name);
         return batchOf(rec ? (rec.實際梯次 || rec.預排梯次) : '') || batchOf(planned) || NONE;
       };
       const inRoster = {};
       roster.forEach(s => { const c = normCode(s.店號); if (c) inRoster[c] = true; });
       const batches = [];
       const addBatch = (b) => { if (b && batches.indexOf(b) < 0) batches.push(b); };
-      roster.forEach(s => addBatch(effOf(s.店號, s.預排梯次)));
-      rows.forEach(r => addBatch(effOf(r.店號, '')));   // 名單外自行新增的店也要有欄位
+      roster.forEach(s => addBatch(effOf(s.店號, s.店名, s.預排梯次)));
+      rows.forEach(r => addBatch(effOf(r.店號, r.店名, '')));   // 名單外自行新增的店也要有欄位
       batches.sort((a, b) => a === NONE ? 1 : b === NONE ? -1 : (a < b ? -1 : a > b ? 1 : 0));
       if (!batches.length) return [];
       const deptOfSection = sectionDeptMap(report); // 含零點檢課別，順序才會與KPI表一致
@@ -726,9 +755,9 @@
       // 課別也要用「有效課別」（實際點的那一課），否則實際換課點的店會算在原課的預計裡，
       // 跟 KPI 表的應點檢對不起來
       const effSec = effSectionOf(report);
-      roster.forEach(s => bump(plan, effSec(s.店號, s.課別), effOf(s.店號, s.預排梯次)));
+      roster.forEach(s => bump(plan, effSec(s.店號, s.店名, s.課別), effOf(s.店號, s.店名, s.預排梯次)));
       rows.forEach(r => {
-        const b = effOf(r.店號, '');
+        const b = effOf(r.店號, r.店名, '');
         bump(actual, r.主責課 || '(未分類)', b);
         // 名單外自行新增的店：名單裡沒有它，預計側也要補上，否則實際會大於預計
         if (!inRoster[normCode(r.店號)]) bump(plan, r.主責課 || '(未分類)', b);
@@ -827,14 +856,14 @@
     //   左＝名單逐店的實際點檢狀態｜中＝每日店數表（逐週）｜右＝上：課別KPI彙總、下：梯次表
     function buildRosterCheckSheet(wb, report, customerFacing, filter) {
       const ws = wb.addWorksheet('查核店鋪名單');
-      const byCode = {}; report.rows.forEach(r => { byCode[normCode(r.店號)] = r; });
+      const findRec = recLookupOf(report.rows);   // 店號與店名雙鍵：門市改號後只比店號會把已點檢的店標成未點檢
       // D/E/F 是「營業組織」（部/課/擔當，取自店鋪主檔），與 SQC 的「主責課」是兩回事 ——
       // 原本 E 欄誤用店鋪名單的課別，導致它與後面的「主責課」欄完全重複，而真正的營業課反而沒出現。
       const head = customerFacing
         ? ['序', '既存店號', '店舖名稱', '部別', '營業課', '擔當', '地址', '隨盤點', '預排梯次', '日期', '是(否)點檢']
         : ['序', '既存店號', '店舖名稱', '部別', '營業課', '擔當', '地址', '隨盤點', '實際點檢課', '實際點檢人員', '實際點檢梯次', '主責課', '預排梯次', '日期', '是(否)點檢'];
       const rosterRows = report.roster.map((s, i) => {
-        const rec = byCode[normCode(s.店號)];
+        const rec = findRec(s.店號, s.店名);
         const common = [i + 1, padStoreCode(s.店號), s.店名, s.營業部, s.營業課, s.營業擔當, s.地址, s.店鋪型態 === '隨盤點點檢店' ? 'V' : ''];
         const tail = rec ? [mmdd(rec.點檢時間), '已點檢'] : ['', '未點檢'];
         return customerFacing
@@ -1280,7 +1309,11 @@
 
       // ---- 開場資料（依 workMonth 由後端載入；載入前為空）----
       const [boot, setBoot] = useState({ checklist: buildChecklist([], MONTH), stores: [], staffs: [], depts: [] });
-      const [inspectedCodes, setInspectedCodes] = useState({}); // 當月已有點檢紀錄的店號
+      const [inspectedCodes, setInspectedCodes] = useState({}); // 當月已有點檢紀錄的店號（已去前導0）
+      const [inspectedNames, setInspectedNames] = useState({}); // 同上，但以店名為鍵（門市改號時店號比不到，靠這個）
+      // 「這家店本月點過了嗎」—— 店號或店名任一命中就算點過。
+      // 兩個鍵各自會在不同情況下失效：改號時店號失效，改名時店名失效，所以要 or。
+      const isInspected = (code, name) => !!inspectedCodes[normCode(code)] || !!inspectedNames[normName(name)];
       // loaded＝已確認過（可以放心讓人選店）；err＝這次查詢失敗（防重複機制目前是失效的）
       const [inspectedState, setInspectedState] = useState({ loaded: false, err: '' });
       const [custResults, setCustResults] = useState([]);
@@ -1563,13 +1596,29 @@
         // 只取店號清單。原本呼叫 queryRecords(mo, {}) 取「全部紀錄」，但這裡只用得到店號 ——
         // 而那支會把每一列的明細/觀察/照片JSON 全部解析後整包傳過來，月底上千筆就是好幾 MB。
         // 舊版後端沒有 getInspectedCodes（會回「未知動作」），此時退回舊做法，功能不受影響。
-        const viaCodes = () => SqcApi.getInspectedCodes(mo).then(r => (r.codes || []));
-        const viaRecords = () => SqcApi.queryRecords(mo, {}).then(r => (r.records || []).map(x => x.storeCode));
+        /**
+         * 店號與店名都要收。
+         *
+         * 門市會重新編號（2026-09 有 13 家），改號之後名單的店號配不上紀錄的店號 ——
+         * 只比店號的話那家店會重新變成「可點檢」，於是被重複點檢，而且沒有任何提示。
+         * 店名是這時候唯一還可靠的鍵。
+         *
+         * 後端較舊、只回 codes 時 names 是空陣列，行為與改動前完全相同（不會更差）。
+         */
+        const viaCodes = () => SqcApi.getInspectedCodes(mo).then(r => ({ codes: r.codes || [], names: r.names || [] }));
+        const viaRecords = () => SqcApi.queryRecords(mo, {}).then(r => ({
+          codes: (r.records || []).map(x => x.storeCode),
+          names: (r.records || []).map(x => x.storeName),
+        }));
         return viaCodes()
           .catch(e => (/未知動作/.test(e.message || '') ? viaRecords() : Promise.reject(e)))
-          .then(codes => {
-            const map = {}; codes.forEach(c => { const k = normCode(c); if (k) map[k] = true; });
+          .then(({ codes, names }) => {
+            const map = {};
+            codes.forEach(c => { const k = normCode(c); if (k) map[k] = true; });
+            const nmap = {};
+            names.forEach(n => { const k = normName(n); if (k) nmap[k] = true; });
             setInspectedCodes(map);
+            setInspectedNames(nmap);
             setInspectedState({ loaded: true, err: '' });
           })
           .catch(e => setInspectedState({ loaded: false, err: e.message || '查詢失敗' }));
@@ -1796,7 +1845,7 @@ ${nm}
         const q = storeQuery.trim().toLowerCase();
         const all = sectionStores.map(s => {
           const editingThis = !!editingRecordId && String(s.code) === String(basic.storeCode);
-          return { ...s, editingThis, done: !!inspectedCodes[normCode(s.code)] && !editingThis };
+          return { ...s, editingThis, done: isInspected(s.code, s.name) && !editingThis };
         });
         const list = all
           .filter(s => showDoneStores || !s.done || String(s.code) === String(basic.storeCode))
@@ -1815,7 +1864,7 @@ ${nm}
         if (!inspectedState.loaded || editingRecordId) return;
         const code = basic.storeCode;
         if (!code || code === '__custom') return;
-        if (!inspectedCodes[normCode(code)]) return;
+        if (!isInspected(code, (STORE_ROSTER.find(s => normCode(s.code) === normCode(code)) || {}).name)) return;
         const hit = STORE_ROSTER.find(s => String(s.code) === String(code));
         alert(`「${(hit && hit.name) || code}」本月已有點檢紀錄，已為你取消選擇。\n\n`
           + '（剛開啟 App 時「已點檢」還在確認中，所以它一度出現在可選名單裡。）\n'
@@ -1966,7 +2015,7 @@ ${nm}
             + '若這家店本月確實要點檢，請先請管理者到「維護專區 → 店鋪名單」把它加入本月名單。');
           return false;
         }
-        if (inspectedCodes[code]) {
+        if (isInspected(code, inRoster.name)) {
           alert(`「${inRoster.name}」本月已有點檢紀錄，不可重複點檢。\n（如需修正請到「查詢紀錄」編輯那一筆。）`);
           return false;
         }
@@ -2056,7 +2105,14 @@ ${nm}
          *   customInfo 又被設成 null → effStore 為 null → 編輯畫面會變成
          *   「請先在基本資料選擇店鋪」，整個編輯流程壞掉。
          */
-        const inRoster = STORE_ROSTER.find(s => normCode(s.code) === normCode(rec.storeCode));
+        /**
+         * 店名優先、店號備援 —— 與後端 findMaster／findRoster 同一個規則。
+         * 只比店號時，門市改號後這一筆會配不到名單，於是落到 __custom 用紀錄的舊店號，
+         * 而店號正是照片檔名的前綴：編輯後重新上傳的照片就會用舊店號，
+         * 在 Drive 上變成一個換了名字的孿生檔（2026-09-03 現場）。
+         */
+        const inRoster = STORE_ROSTER.find(s => normName(s.name) === normName(rec.storeName))
+          || STORE_ROSTER.find(s => normCode(s.code) === normCode(rec.storeCode));
         const t = String(rec.time || taipeiNow()).replace(' ', 'T').slice(0, 16);
         // 時分欄位有自己的狀態，載回舊紀錄時要一起還原，否則畫面會是空的卻通得過必填檢查
         setTimeParts(t.length > 10 ? { h: t.slice(11, 13), m: t.slice(14, 16) } : { h: '', m: '' });
@@ -2097,7 +2153,7 @@ ${nm}
         }
         if (basic.time.length <= 10) { jumpTo('basic-time', '請先在「基本資料」填寫點檢時間（時間為必填）', 'basic'); return; }
         if (!effStore) { jumpTo('basic-store', '請先在「基本資料」選擇店鋪', 'basic'); return; }
-        if (!isEdit && inspectedCodes[normCode(effStore.code)]) { jumpTo('basic-store', '這家店本月已有點檢紀錄，不可重複點檢（如需修正請至查詢紀錄編輯該筆）', 'basic'); return; }
+        if (!isEdit && isInspected(effStore.code, effStore.name)) { jumpTo('basic-store', '這家店本月已有點檢紀錄，不可重複點檢（如需修正請至查詢紀錄編輯該筆）', 'basic'); return; }
         if (!basic.storeType) { jumpTo('basic-phototype', '請先在「基本資料」選擇可否拍照', 'basic'); return; }
         if (!reasonOk) { jumpTo('basic-phototype', '不可拍照店鋪請選擇原因', 'basic'); return; }
         if (!basic.staffId) { jumpTo('basic-staff', '請先在「基本資料」選擇點檢人員', 'basic'); return; }
@@ -2291,7 +2347,11 @@ ${nm}
             // 後端二次把關（如同店本月已被他人搶先送出）
             if (!isEdit) SqcDB.delQueuedRecord(recId).catch(() => { });   // 後端明確拒絕，重送也不會成功
             alert('⚠ ' + (result.message || '送出失敗，請稍後再試'));
-            if (result.code === 'DUPLICATE') { setInspectedCodes(prev => ({ ...prev, [normCode(storeCode)]: true })); setTab('basic'); }
+            if (result.code === 'DUPLICATE') {
+              setInspectedCodes(prev => ({ ...prev, [normCode(storeCode)]: true }));
+              setInspectedNames(prev => ({ ...prev, [normName(storeName)]: true }));
+              setTab('basic');
+            }
             return;
           }
           if (!isEdit) SqcDB.delQueuedRecord(recId).catch(() => { });   // 已確認寫入後端，不需重送
@@ -2300,7 +2360,10 @@ ${nm}
             SqcApi.trashPhotos(removedPhotos.map(x => x.fileId), storeName + ' ' + basic.time.slice(0, 10))
               .catch(e => alert('紀錄已更新，但刪除舊照片失敗：' + e.message + '。照片仍在 Drive，可再編輯一次重試。'));
           }
-          if (!isEdit) setInspectedCodes(prev => ({ ...prev, [normCode(storeCode)]: true }));
+          if (!isEdit) {
+            setInspectedCodes(prev => ({ ...prev, [normCode(storeCode)]: true }));
+            setInspectedNames(prev => ({ ...prev, [normName(storeName)]: true }));
+          }
           // 為下一家店重設基本資料：
           //   店鋪與拍照類型清掉（這家已變成「已點檢」，留著只會被自己的警告攔下來）
           //   時間只保留日期、清掉時分 —— 一整天連續點好幾家時日期不必重選，但時分一定要
@@ -2474,15 +2537,26 @@ ${nm}
 
       // 匯出「當月名單中尚未點檢」的店鋪（本月已點檢者排除；可依課別）
       const exportUninspected = async () => {
-        let done = new Set();
+        /**
+         * 店號與店名兩個鍵都要放進 done。
+         *
+         * 這裡原本的過濾條件就已經寫了 `!done.has(String(s.name))` 這條店名備援，
+         * 但 done 從來只放 normCode(storeCode) —— 所以那條在正式環境永遠不會命中，
+         * 是個做一半的功能。門市改號後（2026-09 有 13 家）店號比不到，
+         * 於是已點檢的店會被列進「尚未點檢」，而且沒有任何提示。
+         */
+        const done = new Set();
         if (CONFIGURED) {
           const q = await SqcApi.queryRecords(workMonth, { section: filter.section });
-          (q.records || []).forEach(r => done.add(normCode(r.storeCode)));
+          (q.records || []).forEach(r => {
+            const c = normCode(r.storeCode); if (c) done.add('c:' + c);
+            const n = normName(r.storeName); if (n) done.add('n:' + n);
+          });
         } else {
-          records.forEach(r => done.add(String(r.store)));
+          records.forEach(r => done.add('c:' + normCode(r.store)));
         }
         const roster = STORE_ROSTER.filter(s => !filter.section || s.section === filter.section);
-        const pending = roster.filter(s => !done.has(normCode(s.code)) && !done.has(String(s.name)));
+        const pending = roster.filter(s => !done.has('c:' + normCode(s.code)) && !done.has('n:' + normName(s.name)));
         if (!pending.length) { alert('當月名單中沒有尚未點檢的店鋪 🎉'); return; }
         const head = ['店號', '店名', '課別', '店鋪型態'];
         const data = [head].concat(pending.map(s => [padStoreCode(s.code), s.name, s.section, s.type || '一般店']));
@@ -4002,6 +4076,31 @@ ${nm}
               : saved > 0
                 ? '\n（同時轉入梯次期間 ' + saved + ' 筆：' + batches.map(b => b.梯次 + ' ' + b.區間).join('、') + '）'
                 : '\n⚠ 梯次期間解析到 ' + batches.length + ' 筆但後端存下 0 筆，請檢查區間格式（需為 8/1-8/15 這種寫法）。';
+          }
+          /**
+           * 店號異動一定要當場講出來。
+           *
+           * 門市會重新編號，同一家店在新舊名單各是不同店號（2026-09 有 13 家，
+           * 例：三峽峇里店 019150 → 026169）。而匯入是整表取代，舊店號一旦覆蓋
+           * 就完全沒有痕跡可查，所以「告知」只有這一刻做得到。
+           *
+           * 為什麼重要：系統多數比對已改為「店名優先、店號備援」，功能不會壞，
+           * 但已經產生的照片檔名是用舊店號組的（檔名在拍照當下就決定了），
+           * 那些檔案與照片JSON 是一致的、報表連結是通的 —— 不要去改 Drive 檔名。
+           * 這一段就是讓人知道「哪幾家店從今天起會用新店號」。
+           */
+          const chg = r.codeChanges;
+          if (chg === undefined && (area.importKind === 'roster' || area.importKind === 'stores')) {
+            convMsg += '\n⚠ 無法比對店號異動：後端版本過舊。若這次名單有門市改號，系統不會提醒你。';
+          } else if (chg && chg.length) {
+            convMsg += `\n\n⚠ 有 ${chg.length} 家店的店號變更（同一家店、改了編號）：\n`
+              + chg.slice(0, 20).map(c => `　・${c.name}：${c.from} → ${c.to}`).join('\n')
+              + (chg.length > 20 ? `\n　…等共 ${chg.length} 家` : '')
+              + '\n\n已點檢的判斷會以店名為主，不會因此重複點檢。'
+              + '\n但這些店「之前已上傳的照片檔名」仍是舊店號 —— 那是正確的，不要去改。';
+          }
+          if (r.addedStores || r.removedStores) {
+            convMsg += `\n（名單異動：新增 ${r.addedStores || 0} 家、移除 ${r.removedStores || 0} 家）`;
           }
           setUploaded({ ...uploaded, [sub]: f.name });
           load(); await onReload();

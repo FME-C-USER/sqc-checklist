@@ -65,7 +65,10 @@ assertEqual(/const inRoster = STORE_ROSTER\.find\(x => normCode\(x\.code\) === c
   '要比對本月名單');
 assertEqual(/不在本月（\$\{monthFolderOf\(workMonth\)\}）的店鋪名單內，不可點檢/.test(CODE), true,
   '名單外要明確擋下');
-assertEqual(/if \(inspectedCodes\[code\]\) \{/.test(CODE), true, '已點檢要當場擋下，不必等到送出');
+// 2026-09-04 起改用 isInspected（店號或店名任一命中）—— 門市會重新編號，
+// 只比店號的話改號後那家店會重新變成可點檢而被重複點檢。
+assertEqual(/if \(isInspected\(code, inRoster\.name\)\) \{/.test(CODE), true, '已點檢要當場擋下，不必等到送出');
+assertEqual(/if \(inspectedCodes\[code\]\) \{/.test(CODE), false, '不可再只比店號');
 assertEqual(/inRoster\.section !== basic\.section/.test(CODE), true, '跨課要告知（這是本功能的主要用途）');
 assertEqual(/customInfo: \{ \.\.\.s, \.\.\.inRoster \}/.test(CODE), true, '要用名單裡那一筆（帶課別與店鋪型態）');
 // 兩個入口都要走同一支

@@ -26,10 +26,13 @@ const code = grab('// ===== 每日店數表', 'window.SqcReport =');
 
 // 梯次表要用店號比對「這家店有沒有被點過」，normCode 定義在更上面
 const normCodeSrc = grab('function normCode(', '\n');
+// 2026-09-04 起也用 normName：門市會重新編號，改號後只比店號會認不出是同一家店，
+// 於是逐店的名單表把已點檢的店標成「未點檢」。沙箱要一併帶入。
+const normNameSrc = grab('function normName(', '\n');
 
 const sandbox = { window: {}, console };
 vm.createContext(sandbox);
-vm.runInContext(normCodeSrc + '\n' + code + '\nthis.__api = { buildDailyCountBlock, buildBatchBlock, buildKpiBlock };', sandbox);
+vm.runInContext(normCodeSrc + '\n' + normNameSrc + '\n' + code + '\nthis.__api = { buildDailyCountBlock, buildBatchBlock, buildKpiBlock };', sandbox);
 const { buildDailyCountBlock, buildBatchBlock, buildKpiBlock } = sandbox.__api;
 
 // ===== 測資：8/1(六) 7家、8/3(一) 127家；第一梯已完成、第二梯未開始 =====

@@ -53,11 +53,21 @@ const rec = (id, code) => ({
   total: 90, grade: '合格', staffCount: '1', identity: '店長', note: '',
   detail: {}, observation: {}, photos: { 'k': ['a.jpg'] }, paperPhotos: [],
 });
-assertEqual(ctx.getInspectedCodes('11508'), { codes: [] }, '沒有紀錄時回空陣列');
+/**
+ * 2026-09-04 起一併回傳店名。
+ * 門市會重新編號（2026-09 有 13 家），只比店號的話改號後那家店會重新變成
+ * 「可點檢」而被重複點檢，且沒有任何提示。店名是這時唯一還可靠的鍵。
+ * 多讀一欄不違背這支存在的理由 —— 它要避免的是「為了一個欄位讀整張活頁」。
+ *
+ * 註：這裡的假資料 storeName 是 code + '店'，而 normName 會砍掉尾字「店」，
+ * 所以正規化後的店名剛好等於原始店號（帶前導零），不是巧合也不是錯誤。
+ */
+assertEqual(ctx.getInspectedCodes('11508'), { codes: [], names: [] }, '沒有紀錄時回空陣列');
 ctx.submitRecord(rec('R1', '025129'));
 ctx.submitRecord(rec('R2', '019962'));
-assertEqual(ctx.getInspectedCodes('11508'), { codes: ['25129', '19962'] }, '只回店號，且已去前導0（前端可直接比對）');
-assertEqual(ctx.getInspectedCodes('11599'), { codes: [] }, '沒有該月活頁時回空，不可拋錯');
+assertEqual(ctx.getInspectedCodes('11508'), { codes: ['25129', '19962'], names: ['025129', '019962'] },
+  '店號去前導0、店名去尾字「店」（兩者都已正規化，前端可直接比對）');
+assertEqual(ctx.getInspectedCodes('11599'), { codes: [], names: [] }, '沒有該月活頁時回空，不可拋錯');
 // 回傳量要遠小於整包紀錄 —— 這就是這一項的目的
 const light = JSON.stringify(ctx.getInspectedCodes('11508')).length;
 const heavy = JSON.stringify({ records: ctx.queryRecords('11508', {}) }).length;
